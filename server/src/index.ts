@@ -19,6 +19,9 @@ import cors from "cors";
 import express from "express";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import {
@@ -36,6 +39,9 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 // Blob upload uses raw bytes; content-type is echoed as a header.
 app.use("/api/blobs", express.raw({ type: "*/*", limit: MAX_BLOB_BYTES + 1024 }));
+
+// Healthcheck — no auth, no state. Used by Railway / load balancers.
+app.get("/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // ---- registration / auth ----
 
@@ -336,6 +342,22 @@ function handleError(res: express.Response, e: unknown) {
 
 // keep TS happy — referenced elsewhere
 export type _UserRow = UserRow;
+
+// ---- serve the SPA (single-origin production deploy) ----
+// In dev the web/ package is served by Vite on :5173 and proxies /api to
+// this process; in a production build we serve the built SPA from here so
+// the client's `location.origin` naturally points at the same host as the
+// relay. If web/dist doesn't exist (e.g. during a server-only dev run),
+// we silently skip this — no error, no phantom route.
+const SPA_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+if (existsSync(SPA_DIR)) {
+  app.use(express.static(SPA_DIR));
+  // History-mode fallback: anything that isn't an API/WS call gets index.html.
+  app.get(/^\/(?!api|socket\.io).*/, (_req, res) => {
+    res.sendFile(resolve(SPA_DIR, "index.html"));
+  });
+  console.log(`[aegent] serving SPA from ${SPA_DIR}`);
+}
 
 httpServer.listen(PORT, () => {
   console.log(`[aegent] relay listening on http://localhost:${PORT}`);

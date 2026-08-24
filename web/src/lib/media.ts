@@ -60,7 +60,7 @@ export async function objectUrlFor(ref: MediaRef): Promise<string> {
   if (hit) return hit;
   const ciphertext = await api.downloadBlob(ref.blobId);
   const plaintext = secretBoxOpenBytes(b64.decode(ref.contentKey), ciphertext);
-  const blob = new Blob([plaintext], { type: ref.mime });
+  const blob = new Blob([plaintext as BlobPart], { type: ref.mime });
   const url = URL.createObjectURL(blob);
   OBJECT_URLS.set(cacheKey, url);
   return url;

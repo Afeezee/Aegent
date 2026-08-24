@@ -116,7 +116,7 @@ export function searchUsers(q: string, excludeId: string): PublicUser[] {
          AND (lower(email) LIKE ? OR lower(display_name) LIKE ? OR lower(handle) LIKE ?)
        ORDER BY display_name LIMIT 20`,
   ).all(excludeId, like, like, like) as UserRow[];
-  return rows.map(toPublic);
+  return rows.map((u) => toPublic(u));
 }
 
 // ---- privacy toggles ----

@@ -1,0 +1,21 @@
+# Keep the build context small and never bake secrets or state into the image.
+node_modules
+**/node_modules
+dist
+**/dist
+.vite
+**/.vite
+data
+server/data
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.log
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+README.md
+DEPLOYMENT.md

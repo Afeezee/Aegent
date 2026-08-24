@@ -99,9 +99,11 @@ export const api = {
     headers.set("x-mime", mime);
     const t = loadToken();
     if (t) headers.set("authorization", `Bearer ${t}`);
+    // Blob constructor's typing narrows to ArrayBuffer; a plain Uint8Array
+    // is fine at runtime but TS 5+ objects to the SharedArrayBuffer overlap.
     const r = await fetch("/api/blobs", {
       method: "POST",
-      body: new Blob([bytes], { type: "application/octet-stream" }),
+      body: new Blob([bytes as BlobPart], { type: "application/octet-stream" }),
       headers,
     });
     if (!r.ok) throw new Error(`upload ${r.status}`);

@@ -17,17 +17,17 @@ export function connectSocket(token: string): Socket {
 export function disconnectSocket() { sock?.disconnect(); sock = null; }
 export function socket(): Socket | null { return sock; }
 
-export function onMessage(cb: (envelope: Envelope) => void) {
-  sock?.on("message", cb); return () => sock?.off("message", cb);
+export function onMessage(cb: (envelope: Envelope) => void): () => void {
+  sock?.on("message", cb); return () => { sock?.off("message", cb); };
 }
-export function onTyping(cb: (info: { from: string; groupId?: string }) => void) {
-  sock?.on("typing", cb); return () => sock?.off("typing", cb);
+export function onTyping(cb: (info: { from: string; groupId?: string }) => void): () => void {
+  sock?.on("typing", cb); return () => { sock?.off("typing", cb); };
 }
-export function onRead(cb: (info: { id: string; at: number; by: string }) => void) {
-  sock?.on("read", cb); return () => sock?.off("read", cb);
+export function onRead(cb: (info: { id: string; at: number; by: string }) => void): () => void {
+  sock?.on("read", cb); return () => { sock?.off("read", cb); };
 }
-export function onPresence(cb: (info: { userId: string; online: boolean; at: number }) => void) {
-  sock?.on("presence", cb); return () => sock?.off("presence", cb);
+export function onPresence(cb: (info: { userId: string; online: boolean; at: number }) => void): () => void {
+  sock?.on("presence", cb); return () => { sock?.off("presence", cb); };
 }
 
 export function sendCipher(
