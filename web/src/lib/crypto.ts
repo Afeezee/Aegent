@@ -1,0 +1,188 @@
+// Client-side crypto — the single API surface for every operation that
+// touches key material or plaintext. Swapping in MLS (per spec §5.1)
+// later means reimplementing the functions here without changing any
+// caller.
+//
+// Primitives:
+//   - tweetnacl (Curve25519 + XSalsa20-Poly1305) via nacl.box for
+//     peer-to-peer messaging; same primitive as NaCl and original
+//     Signal builds; audited, small, no build headaches.
+//   - nacl.secretbox for wrapping the private key, the local store,
+//     and media blobs (with a fresh per-blob content key).
+//   - hash-wasm's Argon2id for password → key derivation (pure WASM).
+//   - nacl.hash (SHA-512), truncated, for recovery-code checksum.
+//
+// Intentional limits:
+//   - No forward secrecy per-message. MLS solves this; production must
+//     swap before shipping.
+//   - No group ratchet — group chat is n × (1:1) fan-out.
+
+import nacl from "tweetnacl";
+import naclUtil from "tweetnacl-util";
+import { argon2id } from "hash-wasm";
+
+let ready: Promise<void> | null = null;
+export function initCrypto(): Promise<void> {
+  if (!ready) ready = Promise.resolve();
+  return ready;
+}
+
+// ---- encoding ----
+
+export const b64 = {
+  encode: (bytes: Uint8Array) => naclUtil.encodeBase64(bytes),
+  decode: (s: string) => naclUtil.decodeBase64(s),
+};
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+// ---- identity ----
+
+export type IdentityKeys = { publicKey: Uint8Array; privateKey: Uint8Array };
+
+export function generateIdentity(): IdentityKeys {
+  const kp = nacl.box.keyPair();
+  return { publicKey: kp.publicKey, privateKey: kp.secretKey };
+}
+
+// ---- password KDF ----
+// Same password, domain-separated outputs.
+
+const KDF_KEY_LEN = 32;
+const KDF_OPTS = { iterations: 3, memorySize: 65536, parallelism: 1 };
+
+export function newKdfSalt(): Uint8Array {
+  return nacl.randomBytes(16);
+}
+
+export async function deriveKey(
+  password: string,
+  salt: Uint8Array,
+  context: "priv-wrap" | "local-store",
+): Promise<Uint8Array> {
+  const raw = await argon2id({
+    password: `${context}:${password}`,
+    salt,
+    ...KDF_OPTS,
+    hashLength: KDF_KEY_LEN,
+    outputType: "binary",
+  });
+  return raw as Uint8Array;
+}
+
+// ---- symmetric wrap (secretbox) ----
+
+export function secretBoxSeal(key: Uint8Array, plaintext: Uint8Array): string {
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const ct = nacl.secretbox(plaintext, nonce, key);
+  const out = new Uint8Array(nonce.length + ct.length);
+  out.set(nonce, 0); out.set(ct, nonce.length);
+  return b64.encode(out);
+}
+
+export function secretBoxOpen(key: Uint8Array, wrapped: string): Uint8Array {
+  const buf = b64.decode(wrapped);
+  const nonce = buf.slice(0, nacl.secretbox.nonceLength);
+  const ct = buf.slice(nacl.secretbox.nonceLength);
+  const pt = nacl.secretbox.open(ct, nonce, key);
+  if (!pt) throw new Error("decrypt_failed");
+  return pt;
+}
+
+// Raw-bytes variants for media (avoid base64 round-trips on hot path).
+export function secretBoxSealBytes(key: Uint8Array, plaintext: Uint8Array): Uint8Array {
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const ct = nacl.secretbox(plaintext, nonce, key);
+  const out = new Uint8Array(nonce.length + ct.length);
+  out.set(nonce, 0); out.set(ct, nonce.length);
+  return out;
+}
+
+export function secretBoxOpenBytes(key: Uint8Array, wrapped: Uint8Array): Uint8Array {
+  const nonce = wrapped.slice(0, nacl.secretbox.nonceLength);
+  const ct = wrapped.slice(nacl.secretbox.nonceLength);
+  const pt = nacl.secretbox.open(ct, nonce, key);
+  if (!pt) throw new Error("decrypt_failed");
+  return pt;
+}
+
+// ---- E2E messaging (nacl.box) ----
+
+export function encryptForPeer(
+  plaintext: string,
+  peerPublicKey: Uint8Array,
+  myPrivateKey: Uint8Array,
+): string {
+  const nonce = nacl.randomBytes(nacl.box.nonceLength);
+  const ct = nacl.box(enc.encode(plaintext), nonce, peerPublicKey, myPrivateKey);
+  const out = new Uint8Array(nonce.length + ct.length);
+  out.set(nonce, 0); out.set(ct, nonce.length);
+  return b64.encode(out);
+}
+
+export function decryptFromPeer(
+  ciphertext: string,
+  peerPublicKey: Uint8Array,
+  myPrivateKey: Uint8Array,
+): string {
+  const buf = b64.decode(ciphertext);
+  const nonce = buf.slice(0, nacl.box.nonceLength);
+  const ct = buf.slice(nacl.box.nonceLength);
+  const pt = nacl.box.open(ct, nonce, peerPublicKey, myPrivateKey);
+  if (!pt) throw new Error("decrypt_failed");
+  return dec.decode(pt);
+}
+
+// ---- media content key ----
+// One key per attachment; delivered inside the E2E-encrypted message.
+export function newContentKey(): Uint8Array {
+  return nacl.randomBytes(nacl.secretbox.keyLength);
+}
+
+// ---- recovery code ----
+// 128-bit entropy + 1-byte SHA-512 checksum → base32 in 5-char groups.
+// Prototype note: production would swap for BIP-39 words for typo
+// tolerance. Same 128-bit strength.
+
+const B32 = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // Crockford-ish; no I/O/L/0/1
+
+export function newRecoveryPhrase(): { phrase: string; entropy: Uint8Array } {
+  const entropy = nacl.randomBytes(16);
+  return { phrase: phraseFromEntropy(entropy), entropy };
+}
+
+function phraseFromEntropy(entropy: Uint8Array): string {
+  const check = nacl.hash(entropy)[0];
+  const buf = new Uint8Array(17);
+  buf.set(entropy, 0); buf[16] = check;
+  let bits = "";
+  for (const b of buf) bits += b.toString(2).padStart(8, "0");
+  while (bits.length % 5 !== 0) bits += "0";
+  let out = "";
+  for (let i = 0; i < bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)];
+  return out.match(/.{1,5}/g)!.join("-");
+}
+
+export function entropyFromPhrase(phrase: string): Uint8Array {
+  const clean = phrase.toUpperCase().replace(/[^A-Z2-9]/g, "");
+  if (clean.length < 28) throw new Error("recovery code too short");
+  let bits = "";
+  for (const c of clean) {
+    const v = B32.indexOf(c);
+    if (v < 0) throw new Error(`invalid character: ${c}`);
+    bits += v.toString(2).padStart(5, "0");
+  }
+  const bytes = new Uint8Array(17);
+  for (let i = 0; i < 17; i++) bytes[i] = parseInt(bits.slice(i * 8, i * 8 + 8), 2);
+  const entropy = bytes.slice(0, 16);
+  if (bytes[16] !== nacl.hash(entropy)[0]) {
+    throw new Error("checksum mismatch — did you mistype?");
+  }
+  return entropy;
+}
+
+export function identityFromRecovery(entropy: Uint8Array): IdentityKeys {
+  const seed = nacl.hash(entropy).slice(0, 32);
+  const kp = nacl.box.keyPair.fromSecretKey(seed);
+  return { publicKey: kp.publicKey, privateKey: kp.secretKey };
+}
