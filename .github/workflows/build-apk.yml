@@ -9,12 +9,12 @@ name: Android APK
       api_url:
         description: "Absolute URL of the Aegent relay the APK should hit"
         required: true
-        default: "https://aegent-production.up.railway.app"
+        default: "https://aegentweb-production-e18e.up.railway.app"
 
 env:
   # Default target for push builds — set this once to your Railway
   # domain and every commit produces an APK pointed at it.
-  DEFAULT_API_URL: "https://aegent-production.up.railway.app"
+  DEFAULT_API_URL: "https://aegentweb-production-e18e.up.railway.app"
 
 # softprops/action-gh-release needs write access to create Releases —
 # the default GITHUB_TOKEN is read-only. Job-scoped so nothing else
