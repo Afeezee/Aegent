@@ -1,126 +1,47 @@
-// SQLite store.
+// Storage backend.
 //
-// Design invariant: every content column here is opaque ciphertext or
-// public directory metadata. Nothing here — not message bodies, not
-// group names, not attachment bytes, not reactions — is ever plaintext
-// that Aegent could read. The server relays. The client understands.
+// Two backends, one async API:
 //
-// What's public metadata (and why it's OK):
-//   - user id, email, display name, public key  → the directory has to
-//     be searchable
-//   - group id, member ids, timestamps          → the server has to fan
-//     out messages, so it must know who is in a group
-//   - envelope routing (sender, recipient, timestamp) → routing needs it
+//   - Postgres (via `pg`) whenever DATABASE_URL is set — this is the
+//     production path, and it's what Railway's Postgres addon provides
+//     out of the box. No filesystem to persist; the DB is a real
+//     managed service so redeploys never lose data.
 //
-// What's ciphertext (opaque):
-//   - message bodies (per-recipient envelopes)
-//   - blob bytes (media)
-//   - group display names, when the client chooses to keep them private
+//   - node:sqlite when DATABASE_URL is absent — the zero-setup local
+//     dev path. Writes to `data/aegent.db` under the process CWD.
+//
+// Callers see the same interface either way: `db.prepare(sql).get()`,
+// `.all()`, `.run()`, `db.exec(...)`, `db.tx(async () => {...})`. All
+// four are async — the SQLite path just resolves synchronously
+// underneath.
+//
+// SQL is written in a common subset that works on both. `?` placeholders
+// get translated to `$1, $2, ...` for pg. `BYTEA`/`BLOB` and
+// `BIGINT`/`INTEGER` are papered over inside the schema init.
 
-import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import pgPkg from "pg";
+const { Pool } = pgPkg;
 
-const DB_PATH = resolve(process.cwd(), "data/aegent.db");
-mkdirSync(dirname(DB_PATH), { recursive: true });
+type Row = Record<string, unknown>;
+type Args = readonly unknown[];
 
-export const db = new DatabaseSync(DB_PATH);
-db.exec("PRAGMA journal_mode = WAL;");
-db.exec("PRAGMA foreign_keys = ON;");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id             TEXT PRIMARY KEY,
-    email          TEXT UNIQUE NOT NULL,
-    -- Optional phone number in E.164 form ("+" + digits). Unique when set;
-    -- NULL is allowed for accounts that never add one.
-    phone          TEXT,
-    display_name   TEXT NOT NULL,
-    handle         TEXT UNIQUE NOT NULL,       -- @-handle for search / invite links
-    password_hash  TEXT NOT NULL,              -- Argon2id, server auth only
-    public_key     TEXT NOT NULL,              -- base64 Curve25519
-    wrapped_priv   TEXT NOT NULL,              -- private key wrapped by password-derived key
-    kdf_salt       TEXT NOT NULL,
-    -- Privacy toggles are per-user booleans; defaults chosen for privacy.
-    read_receipts  INTEGER NOT NULL DEFAULT 0, -- send read receipts (off by default)
-    presence       INTEGER NOT NULL DEFAULT 0, -- share online/last-seen (off by default)
-    last_seen_at   INTEGER,
-    created_at     INTEGER NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS groups (
-    id           TEXT PRIMARY KEY,
-    -- Group display name is plaintext on the server so members can join
-    -- via link and see what they were invited to before decryption is
-    -- possible. Individual chat *contents* remain ciphertext.
-    name         TEXT NOT NULL,
-    created_by   TEXT NOT NULL REFERENCES users(id),
-    created_at   INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS group_members (
-    group_id     TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-    user_id      TEXT NOT NULL REFERENCES users(id),
-    joined_at    INTEGER NOT NULL,
-    PRIMARY KEY (group_id, user_id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_gm_user ON group_members(user_id);
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id            TEXT PRIMARY KEY,
-    sender_id     TEXT NOT NULL REFERENCES users(id),
-    recipient_id  TEXT NOT NULL REFERENCES users(id),
-    -- If part of a group send, the group id (public routing info); NULL
-    -- for a direct 1:1. Clients still get one envelope per recipient.
-    group_id      TEXT REFERENCES groups(id),
-    -- Opaque envelope: base64(nonce || nacl.box(plaintext, recipient_pub, sender_priv)).
-    -- The plaintext inside is JSON (see shared/protocol.ts on the
-    -- client) and can carry a text body, a media reference, a reply
-    -- pointer, an edit, a delete, or a reaction. The server never
-    -- distinguishes those cases.
-    ciphertext    TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    delivered_at  INTEGER,
-    read_at       INTEGER
-  );
-  CREATE INDEX IF NOT EXISTS idx_messages_recipient
-    ON messages(recipient_id, delivered_at, created_at);
-
-  CREATE TABLE IF NOT EXISTS blobs (
-    id           TEXT PRIMARY KEY,
-    owner_id     TEXT NOT NULL REFERENCES users(id),
-    -- MIME type sent by the uploader. Not used server-side for anything
-    -- content-aware; kept so clients can pre-size players/previews.
-    mime         TEXT NOT NULL,
-    -- Raw ciphertext bytes of the media. The content key is delivered
-    -- separately, inside an E2E-encrypted message envelope.
-    ciphertext   BLOB NOT NULL,
-    byte_size    INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_blobs_owner ON blobs(owner_id, created_at);
-`);
-
-// Idempotent migration: for accounts created before the `phone` column,
-// add it in-place. SQLite has no "ADD COLUMN IF NOT EXISTS", so we
-// probe pragma_table_info and only ALTER when it isn't there. Safe to
-// run every boot.
-try {
-  const columns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
-  if (!columns.some((c) => c.name === "phone")) {
-    db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
-    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
-  }
-} catch (e) {
-  console.warn("[aegent] phone-column migration skipped:", (e as Error).message);
+export interface Statement {
+  get<T = Row>(...args: Args): Promise<T | undefined>;
+  all<T = Row>(...args: Args): Promise<T[]>;
+  run(...args: Args): Promise<void>;
 }
 
-// Live in-memory presence (last time we saw this user's socket).
-// Persisted-to-DB only when they disconnect, and only if they've opted
-// in to `presence`. Otherwise their last_seen_at stays NULL and other
-// clients see "offline / no presence".
-export const livePresence = new Map<string, number>();
+export interface Db {
+  prepare(sql: string): Statement;
+  exec(sql: string): Promise<void>;
+  tx<T>(work: () => Promise<T>): Promise<T>;
+  backend: "pg" | "sqlite";
+}
+
+// ---- shared row types ----
 
 export type UserRow = {
   id: string;
@@ -164,3 +85,195 @@ export type BlobRow = {
   byte_size: number;
   created_at: number;
 };
+
+// Live in-memory presence (last time we saw this user's socket). Not
+// persisted; the source of truth is the socket registry.
+export const livePresence = new Map<string, number>();
+
+// ---- placeholder translation ----
+
+function toPg(sql: string): string {
+  let n = 0;
+  return sql.replace(/\?/g, () => `$${++n}`);
+}
+
+// ---- backends ----
+
+function makePgBackend(): Db {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL!,
+    // Railway's managed Postgres presents a self-signed cert; accept it.
+    // If you're on a provider with a trusted chain, set PGSSLMODE=verify.
+    ssl: process.env.PGSSLMODE === "disable"
+      ? false
+      : { rejectUnauthorized: false },
+    max: Number(process.env.PG_POOL_MAX ?? 10),
+  });
+  pool.on("error", (err) => console.error("[db.pg] pool error:", err.message));
+
+  const prepare = (sql: string): Statement => {
+    const text = toPg(sql);
+    return {
+      async get(...args) {
+        const r = await pool.query({ text, values: args as unknown[] });
+        return r.rows[0];
+      },
+      async all(...args) {
+        const r = await pool.query({ text, values: args as unknown[] });
+        return r.rows;
+      },
+      async run(...args) {
+        await pool.query({ text, values: args as unknown[] });
+      },
+    };
+  };
+
+  return {
+    prepare,
+    async exec(sql: string) {
+      // pg supports multi-statement query strings in a single `query`
+      // call as long as no parameters are used — perfect for schema DDL.
+      await pool.query(sql);
+    },
+    async tx<T>(work: () => Promise<T>): Promise<T> {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const out = await work();
+        await client.query("COMMIT");
+        return out;
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => { /* ignore */ });
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+    backend: "pg",
+  };
+}
+
+function makeSqliteBackend(): Db {
+  const DB_PATH = resolve(process.cwd(), "data/aegent.db");
+  mkdirSync(dirname(DB_PATH), { recursive: true });
+  const sq = new DatabaseSync(DB_PATH);
+  sq.exec("PRAGMA journal_mode = WAL;");
+  sq.exec("PRAGMA foreign_keys = ON;");
+
+  const prepare = (sql: string): Statement => {
+    // SQLite uses `?` natively; no translation needed.
+    // Cast to node:sqlite's SQLInputValue — our callers pass strings /
+    // numbers / null / Buffer, all of which qualify.
+    type SqlIn = string | number | null | bigint | Uint8Array;
+    const stmt = sq.prepare(sql);
+    return {
+      async get(...args) { return stmt.get(...(args as SqlIn[])) as never; },
+      async all(...args) { return stmt.all(...(args as SqlIn[])) as never; },
+      async run(...args) { stmt.run(...(args as SqlIn[])); },
+    };
+  };
+
+  return {
+    prepare,
+    async exec(sql: string) { sq.exec(sql); },
+    async tx<T>(work: () => Promise<T>): Promise<T> {
+      sq.exec("BEGIN");
+      try {
+        const out = await work();
+        sq.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try { sq.exec("ROLLBACK"); } catch { /* ignore */ }
+        throw e;
+      }
+    },
+    backend: "sqlite",
+  };
+}
+
+export const db: Db = process.env.DATABASE_URL ? makePgBackend() : makeSqliteBackend();
+console.log(`[aegent] db backend: ${db.backend}`);
+
+// ---- schema init ----
+//
+// Two flavors — the type differences between BYTEA / BLOB and
+// BIGINT / INTEGER need per-backend DDL, and Postgres has
+// `ADD COLUMN IF NOT EXISTS` while SQLite doesn't.
+
+const isPg = db.backend === "pg";
+const BYTES = isPg ? "BYTEA" : "BLOB";
+const BIG = isPg ? "BIGINT" : "INTEGER";
+
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS users (
+    id             TEXT PRIMARY KEY,
+    email          TEXT UNIQUE NOT NULL,
+    phone          TEXT,
+    display_name   TEXT NOT NULL,
+    handle         TEXT UNIQUE NOT NULL,
+    password_hash  TEXT NOT NULL,
+    public_key     TEXT NOT NULL,
+    wrapped_priv   TEXT NOT NULL,
+    kdf_salt       TEXT NOT NULL,
+    read_receipts  INTEGER NOT NULL DEFAULT 0,
+    presence       INTEGER NOT NULL DEFAULT 0,
+    last_seen_at   ${BIG},
+    created_at     ${BIG} NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone
+    ON users(phone) WHERE phone IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS groups (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    created_by   TEXT NOT NULL REFERENCES users(id),
+    created_at   ${BIG} NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS group_members (
+    group_id     TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    joined_at    ${BIG} NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gm_user ON group_members(user_id);
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id            TEXT PRIMARY KEY,
+    sender_id     TEXT NOT NULL REFERENCES users(id),
+    recipient_id  TEXT NOT NULL REFERENCES users(id),
+    group_id      TEXT REFERENCES groups(id),
+    ciphertext    TEXT NOT NULL,
+    created_at    ${BIG} NOT NULL,
+    delivered_at  ${BIG},
+    read_at       ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_recipient
+    ON messages(recipient_id, delivered_at, created_at);
+
+  CREATE TABLE IF NOT EXISTS blobs (
+    id           TEXT PRIMARY KEY,
+    owner_id     TEXT NOT NULL REFERENCES users(id),
+    mime         TEXT NOT NULL,
+    ciphertext   ${BYTES} NOT NULL,
+    byte_size    INTEGER NOT NULL,
+    created_at   ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_blobs_owner ON blobs(owner_id, created_at);
+`;
+
+export async function initSchema(): Promise<void> {
+  await db.exec(SCHEMA);
+  // Idempotent add of the `phone` column for DBs created before it
+  // existed. Postgres has ADD COLUMN IF NOT EXISTS; SQLite doesn't, so
+  // we probe pragma_table_info first.
+  if (isPg) {
+    await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
+  } else {
+    const cols = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
+    if (!cols.some((c) => c.name === "phone")) {
+      await db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
+      await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
+    }
+  }
+}
