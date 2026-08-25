@@ -25,6 +25,7 @@ import {
 import { backup_thread } from "../agent/tools.js";
 import { toast } from "../components/ui.js";
 import { siteUrl } from "../lib/api.js";
+import { shareInvite } from "../lib/contacts-integration.js";
 
 export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [thread, setThread] = useState<Thread | null>(null);
@@ -268,8 +269,19 @@ function EmptyRight({ onCompose }: { onCompose: () => void }) {
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
           <Button variant="primary" onClick={onCompose}><Icon.plus /> New chat</Button>
-          <Button onClick={() => { try { navigator.clipboard.writeText(siteUrl("/")); toast("Link copied", "ok"); } catch { /* ignore */ } }}>
-            <Icon.link /> Copy invite link
+          <Button onClick={async () => {
+            const me = currentSession()?.user;
+            const url = me ? siteUrl(`/#/i/${me.handle}`) : siteUrl("/");
+            const how = await shareInvite({
+              url,
+              title: "Chat with me on Aegent",
+              text: me
+                ? `${me.displayName} invited you to chat privately on Aegent — end-to-end encrypted.`
+                : "Chat privately on Aegent — end-to-end encrypted.",
+            });
+            if (how === "copied") toast("Link copied", "ok");
+          }}>
+            <Icon.link /> Share invite
           </Button>
         </div>
         <div className="small" style={{ marginTop: 20, opacity: 0.7 }}>

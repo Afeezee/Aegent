@@ -11,7 +11,7 @@ import { currentSession } from "../lib/session.js";
 import { upsertContact, upsertGroup } from "../lib/store.js";
 import {
   inviteBodyFor, inviteBySms, isContactPickerSupported,
-  matchPickedContactsToAegent, pickPhoneContacts,
+  matchPickedContactsToAegent, pickPhoneContacts, shareInvite,
 } from "../lib/contacts-integration.js";
 
 type Mode = "chat" | "group" | "invite";
@@ -86,12 +86,28 @@ export function ComposeOverlay({
     setPicking(true);
     try {
       const picked = await pickPhoneContacts();
-      if (picked.length === 0) { setPicking(false); return; }
+      if (picked.length === 0) {
+        setPicking(false);
+        toast("No contacts selected", "info");
+        return;
+      }
       const matched = await matchPickedContactsToAegent(picked);
       setPhonePicks(matched);
+      const onAegent = matched.filter((m) => m.aegent).length;
+      const total = matched.length;
+      toast(
+        onAegent > 0
+          ? `${total} imported · ${onAegent} already on Aegent`
+          : `${total} imported — invite them via SMS below`,
+        "ok",
+      );
     } catch (e) {
       const msg = (e as Error).message;
-      if (!/cancel/i.test(msg)) toast(`Contacts: ${msg}`, "error");
+      if (/permission_denied/i.test(msg)) {
+        toast("Contacts permission denied — enable it in system settings.", "warn");
+      } else if (!/cancel/i.test(msg)) {
+        toast(`Contacts: ${msg}`, "error");
+      }
     } finally { setPicking(false); }
   }
 
@@ -257,10 +273,14 @@ function InviteCard({ link, handle, displayName }: { link: string; handle: strin
           try { await navigator.clipboard.writeText(link); toast("Invite link copied", "ok"); }
           catch { toast("Copy failed", "error"); }
         }}><Icon.copy /> Copy link</Button>
-        <Button onClick={async () => {
-          if (navigator.share) { try { await navigator.share({ title: "Chat with me on Aegent", url: link }); } catch { /* ignore */ } }
-          else { try { await navigator.clipboard.writeText(link); toast("Copied", "ok"); } catch { /* ignore */ } }
-        }} variant="primary"><Icon.link /> Share</Button>
+        <Button variant="primary" onClick={async () => {
+          const how = await shareInvite({
+            url: link,
+            title: `Chat with ${displayName} on Aegent`,
+            text: `${displayName} invited you to chat privately on Aegent — end-to-end encrypted.`,
+          });
+          if (how === "copied") toast("Sharing not available — link copied", "warn");
+        }}><Icon.link /> Share</Button>
       </div>
 
       <div style={{
