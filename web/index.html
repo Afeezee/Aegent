@@ -3,11 +3,44 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="color-scheme" content="light dark" />
-    <title>Aegent</title>
+
+    <title>Aegent — Private messenger with an on-device agent</title>
+    <meta name="description" content="A messenger where every conversation is end-to-end encrypted, and an on-device agent can search, draft, and remind — always with your confirmation before anything is sent." />
+    <meta name="theme-color" content="#8a7dff" />
+    <meta name="color-scheme" content="dark light" />
+
+    <!-- Icons — SVG for modern browsers, PNG fallback, iOS home-screen. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/favicon.svg" color="#8a7dff" />
+
+    <!-- Open Graph — Facebook, LinkedIn, Slack, Discord, iMessage, most CMSs. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Aegent" />
+    <meta property="og:title" content="Aegent — Private messenger with an on-device agent" />
+    <meta property="og:description" content="End-to-end encrypted messages, and an on-device agent that searches, drafts, and never sends without asking." />
+    <meta property="og:image" content="/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Aegent — a private messenger with an on-device agent. End-to-end encrypted." />
+    <meta property="og:image:type" content="image/png" />
+
+    <!-- Twitter / X large-image card. -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Aegent — Private messenger with an on-device agent" />
+    <meta name="twitter:description" content="End-to-end encrypted messages, and an on-device agent that searches, drafts, and never sends without asking." />
+    <meta name="twitter:image" content="/og.png" />
+    <meta name="twitter:image:alt" content="Aegent brand card" />
+
+    <!-- PWA-ish hint so iOS home-screen adds sensibly. -->
+    <meta name="apple-mobile-web-app-title" content="Aegent" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

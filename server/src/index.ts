@@ -31,6 +31,7 @@ import {
 import { db, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, storeBlob } from "./blobs.js";
+import { agentTurn } from "./agent.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -41,7 +42,15 @@ app.use(express.json({ limit: "2mb" }));
 app.use("/api/blobs", express.raw({ type: "*/*", limit: MAX_BLOB_BYTES + 1024 }));
 
 // Healthcheck — no auth, no state. Used by Railway / load balancers.
-app.get("/healthz", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+app.get("/healthz", (_req, res) => res.json({
+  ok: true,
+  ts: Date.now(),
+  llm: !!process.env.ANTHROPIC_API_KEY, // clients can render an LLM badge if true
+}));
+
+// LLM agent proxy — keeps the API key server-side. The client uses this
+// only for the LLM call itself; retrieval/tool execution stays on-device.
+app.post("/api/agent/turn", authed, (req, res) => agentTurn(req as AuthedReq, res));
 
 // ---- registration / auth ----
 

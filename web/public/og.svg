@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="aurora-v" cx="14%" cy="8%" r="70%">
+      <stop offset="0%" stop-color="#8a7dff" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#8a7dff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="aurora-c" cx="96%" cy="18%" r="65%">
+      <stop offset="0%" stop-color="#6ee7ff" stop-opacity="0.42"/>
+      <stop offset="60%" stop-color="#6ee7ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="aurora-p" cx="52%" cy="112%" r="60%">
+      <stop offset="0%" stop-color="#ff8ecb" stop-opacity="0.32"/>
+      <stop offset="60%" stop-color="#ff8ecb" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8a7dff"/>
+      <stop offset="0.65" stop-color="#a794ff"/>
+      <stop offset="1" stop-color="#6ee7ff"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="0.6" y2="0.4">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c7d3ff"/>
+    </linearGradient>
+    <filter id="badgeGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="22"/>
+    </filter>
+  </defs>
+
+  <!-- deep midnight canvas -->
+  <rect width="1200" height="630" fill="#05070d"/>
+  <!-- ambient aurora -->
+  <rect width="1200" height="630" fill="url(#aurora-v)"/>
+  <rect width="1200" height="630" fill="url(#aurora-c)"/>
+  <rect width="1200" height="630" fill="url(#aurora-p)"/>
+  <!-- subtle vignette -->
+  <rect width="1200" height="630" fill="black" opacity="0.15"/>
+
+  <!-- glow behind badge -->
+  <circle cx="240" cy="300" r="130" fill="#8a7dff" opacity="0.55" filter="url(#badgeGlow)"/>
+
+  <!-- Æ badge -->
+  <g transform="translate(150 210)">
+    <rect width="180" height="180" rx="44" fill="url(#badge)"/>
+    <rect width="180" height="180" rx="44" fill="none" stroke="rgba(255,255,255,0.35)" stroke-width="1.5"/>
+    <text x="90" y="132"
+      text-anchor="middle"
+      font-family="'Inter', 'Segoe UI', system-ui, sans-serif"
+      font-size="130" font-weight="900" fill="#0f1226">Æ</text>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <g transform="translate(390 240)">
+    <text x="0" y="0"
+      font-family="'Inter', 'Segoe UI', system-ui, sans-serif"
+      font-size="112" font-weight="800"
+      letter-spacing="-3"
+      fill="url(#wordmark)">Aegent</text>
+    <text x="0" y="70"
+      font-family="'Inter', 'Segoe UI', system-ui, sans-serif"
+      font-size="28" font-weight="500" fill="#a3adc2">
+      A private messenger with an on-device agent.
+    </text>
+    <text x="0" y="112"
+      font-family="'Inter', 'Segoe UI', system-ui, sans-serif"
+      font-size="24" font-weight="400" fill="#7c88a4">
+      End-to-end encrypted. Searches, drafts, never sends without asking.
+    </text>
+  </g>
+
+  <!-- footer chip -->
+  <g transform="translate(150 520)">
+    <rect x="0" y="0" width="280" height="48" rx="24"
+      fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.18)"/>
+    <circle cx="24" cy="24" r="5" fill="#9ee6a9"/>
+    <text x="44" y="31"
+      font-family="'Inter', 'Segoe UI', system-ui, sans-serif"
+      font-size="14" font-weight="600" letter-spacing="2.4" fill="#c7d3ff">
+      END-TO-END ENCRYPTED
+    </text>
+  </g>
+
+  <!-- decorative message bubbles -->
+  <g transform="translate(890 340)" opacity="0.85">
+    <rect x="0" y="0" width="220" height="52" rx="22"
+      fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.14)"/>
+    <text x="20" y="32" font-family="'Inter', system-ui, sans-serif"
+      font-size="15" fill="#c7d3ff">🔒 hello, ada</text>
+  </g>
+  <g transform="translate(940 405)">
+    <rect x="0" y="0" width="180" height="52" rx="22"
+      fill="url(#badge)"/>
+    <text x="20" y="32" font-family="'Inter', system-ui, sans-serif"
+      font-size="15" fill="#0f1226" font-weight="600">✨ on my way</text>
+  </g>
+</svg>
