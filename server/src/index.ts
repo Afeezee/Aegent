@@ -161,9 +161,12 @@ app.get("/api/users/:id", authed, async (req, res) => {
 
 app.post("/api/users/lookup-phones", authed, async (req, res) => {
   try {
-    const body = z.object({ phones: z.array(z.string()).max(200) }).parse(req.body);
+    // Real phone contact lists are large — 500 per request is a comfortable
+    // upper bound; the client should still chunk beyond that.
+    const body = z.object({ phones: z.array(z.string()).max(500) }).parse(req.body);
     const found: Array<ReturnType<typeof toPublic>> = [];
     for (const raw of body.phones) {
+      if (!raw || !raw.trim()) continue;
       const u = await findUserByPhone(raw);
       if (u && u.id !== (req as AuthedReq).userId) found.push(toPublic(u, livePresence));
     }

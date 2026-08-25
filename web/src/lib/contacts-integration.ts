@@ -103,10 +103,25 @@ async function pickWeb(): Promise<PickedPhoneContact[]> {
 export async function matchPickedContactsToAegent(
   picked: PickedPhoneContact[],
 ): Promise<Array<PickedPhoneContact & { aegent?: PublicUser }>> {
-  const phones = picked.map((p) => p.phone);
-  const found = await api.lookupPhones(phones);
-  // Match by last-9-digit tail — user might have "0803…" locally and
-  // "+234803…" on Aegent.
+  // Dedupe + drop empties BEFORE hitting the network — a device with
+  // 900 contacts shouldn't produce 900 lookups if 60% are duplicates.
+  const uniquePhones = Array.from(new Set(
+    picked.map((p) => (p.phone ?? "").trim()).filter(Boolean),
+  ));
+  // Server caps at 500 per request; chunk with a small margin. Runs
+  // sequentially so a single 429/timeout stops the storm.
+  const CHUNK = 250;
+  const found: PublicUser[] = [];
+  for (let i = 0; i < uniquePhones.length; i += CHUNK) {
+    const slice = uniquePhones.slice(i, i + CHUNK);
+    try {
+      const part = await api.lookupPhones(slice);
+      found.push(...part);
+    } catch {
+      // If one chunk fails, keep going — a partial match is still useful.
+    }
+  }
+  // Match by last-9-digit tail (locale-insensitive) — "0803…" vs "+234803…".
   const suffix = (s: string) => s.replace(/[^\d]/g, "").slice(-9);
   const byTail = new Map(found.map((u) => [suffix(u.phone ?? ""), u]));
   return picked.map((p) => ({ ...p, aegent: byTail.get(suffix(p.phone)) }));
