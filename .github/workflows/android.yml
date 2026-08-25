@@ -85,8 +85,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: aegent-*.apk
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
-          name: Aegent ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build #{0}', github.run_number) }}
+          # Both values are quoted so YAML doesn't parse the `#` in the
+          # release name as a comment (which was closing the ${{ }}
+          # expression prematurely and breaking the whole file).
+          tag_name: "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}"
+          name: "Aegent ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build #{0}', github.run_number) }}"
           body: |
             Debug APK built from ${{ github.sha }}.
             Pointed at API: ${{ steps.api.outputs.url }}
