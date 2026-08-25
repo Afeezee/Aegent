@@ -43,8 +43,9 @@ ENV PORT=8787
 WORKDIR /app/server
 EXPOSE 8787
 
-# The persistent volume MUST be mounted here — this is where SQLite lives.
-# Losing this directory means losing every message.
-VOLUME ["/app/server/data"]
+# NOTE: the persistent volume MUST be mounted at /app/server/data by the
+# platform (Railway Volume, docker -v, k8s PVC — whatever). SQLite lives
+# there. Losing that directory means losing every message.
+# (No `VOLUME` directive here — Railway rejects it and manages mounts itself.)
 
 CMD ["node", "dist/index.js"]
