@@ -40,9 +40,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Haptics on send / confirm. -->
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- Reading device contacts for the phone-contact importer. The Web
-         Contact Picker API needs this to prompt the OS at runtime. -->
+    <!-- Reading device contacts for the phone-contact importer. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Required by @capacitor-community/contacts on init even though we
+         only ever call getContacts() (read). The runtime prompt only
+         appears if we actually attempt a write, which Aegent never does. -->
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
     <!-- Camera + microphone are surfaced through the WebView's
          getUserMedia flow. -->
     <uses-permission android:name="android.permission.CAMERA" />
