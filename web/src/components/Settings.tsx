@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api } from "../lib/api.js";
 import { currentSession, logout, refreshMe } from "../lib/session.js";
+import { saveContactToPhone } from "../lib/contacts-integration.js";
 
 export function Settings({
   open, onClose, onSignedOut,
@@ -13,6 +14,8 @@ export function Settings({
   const me = currentSession()?.user;
   const [readReceipts, setReadReceipts] = useState(!!me?.settings.readReceipts);
   const [presence, setPresence] = useState(!!me?.settings.presence);
+  const [phone, setPhoneInput] = useState(me?.phone ?? "");
+  const [phoneBusy, setPhoneBusy] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function toggle(key: "readReceipts" | "presence", v: boolean) {
@@ -25,6 +28,30 @@ export function Settings({
     finally { setBusy(false); }
   }
 
+  async function savePhone() {
+    setPhoneBusy(true);
+    try {
+      await api.setPhone(phone.trim() || null);
+      await refreshMe();
+      toast(phone.trim() ? "Phone number saved" : "Phone number removed", "ok");
+    } catch (e) { toast(`Failed: ${(e as Error).message}`, "error"); }
+    finally { setPhoneBusy(false); }
+  }
+
+  async function saveMyCard() {
+    if (!me) return;
+    try {
+      const how = await saveContactToPhone({
+        displayName: me.displayName,
+        handle: me.handle,
+        email: me.email,
+        phone: me.phone,
+        note: `Aegent · @${me.handle}`,
+      });
+      toast(how === "shared" ? "Opened share sheet" : "vCard downloaded — open it to add", "ok");
+    } catch (e) { toast(`Couldn't save: ${(e as Error).message}`, "error"); }
+  }
+
   if (!me) return null;
   return (
     <Modal open={open} onClose={onClose} title="Settings" width={520}>
@@ -35,6 +62,29 @@ export function Settings({
           <div className="small">@{me.handle} · {me.email}</div>
         </div>
       </div>
+
+      <section style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>PHONE NUMBER</div>
+        <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="tel" inputMode="tel" autoComplete="tel"
+              value={phone} onChange={(e) => setPhoneInput(e.target.value)}
+              placeholder="+234 800 000 0000"
+            />
+            <Button variant="primary" onClick={savePhone}
+              disabled={phoneBusy || phone === (me.phone ?? "")}>
+              Save
+            </Button>
+          </div>
+          <div className="small" style={{ marginTop: 8 }}>
+            Lets friends who have your number find you on Aegent. Leave blank to keep hidden.
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <Button size="small" onClick={saveMyCard}><Icon.contacts /> Save my contact card to phone</Button>
+          </div>
+        </div>
+      </section>
 
       <section style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>PRIVACY</div>

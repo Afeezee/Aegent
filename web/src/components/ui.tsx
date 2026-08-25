@@ -237,8 +237,30 @@ export const Icon = {
   check: () => ico(<><path d="M4 10l4 4 8-8" /></>),
   checkDouble: () => ico(<><path d="M2 10l4 4 6-6M9 14l4 4 5-9" /></>),
   moon: () => ico(<><path d="M15 12A5 5 0 018 5a6 6 0 107 7z" /></>),
-  agent: () => ico(<><path d="M10 3a5 5 0 015 5v2a3 3 0 01-3 3H8a3 3 0 01-3-3V8a5 5 0 015-5z" /><path d="M8 15v2M12 15v2M6 19h8" /></>),
-  settings: () => ico(<><circle cx="10" cy="10" r="2.5" /><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.4 4.4l1.4 1.4M14.2 14.2l1.4 1.4M4.4 15.6l1.4-1.4M14.2 5.8l1.4-1.4" /></>),
+  // Sparkles — the near-universal AI-assistant glyph. A big 4-point star
+  // plus two smaller companions.
+  agent: () => ico(<>
+    <path d="M10 2.5l1.4 4 4 1.4-4 1.4L10 13.5 8.6 9.3 4.6 7.9l4-1.4z" fill="currentColor" stroke="none" />
+    <path d="M15.5 12l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z" fill="currentColor" stroke="none" />
+    <path d="M5.2 14.2l.4 1.1 1.1.4-1.1.4-.4 1.1-.4-1.1-1.1-.4 1.1-.4z" fill="currentColor" stroke="none" />
+  </>),
+  // Cog with real teeth — silhouette rather than the compass-lookalike
+  // we had before.
+  settings: () => ico(<>
+    <path d="M10 1.6l1 .3.3 1.4a5.5 5.5 0 011.6.7l1.3-.7 1.5 1.5-.7 1.3a5.5 5.5 0 01.7 1.6l1.4.3v2.2l-1.4.3a5.5 5.5 0 01-.7 1.6l.7 1.3-1.5 1.5-1.3-.7a5.5 5.5 0 01-1.6.7l-.3 1.4h-2.2l-.3-1.4a5.5 5.5 0 01-1.6-.7l-1.3.7-1.5-1.5.7-1.3a5.5 5.5 0 01-.7-1.6L1.6 11V8.9l1.4-.3a5.5 5.5 0 01.7-1.6l-.7-1.3 1.5-1.5 1.3.7a5.5 5.5 0 011.6-.7l.3-1.4L9 1.6z" />
+    <circle cx="10" cy="10" r="2.4" />
+  </>),
+  // Contacts book — for the "import from phone" affordance.
+  contacts: () => ico(<>
+    <rect x="4" y="3" width="12" height="14" rx="2" />
+    <path d="M4 7h-1M4 10h-1M4 13h-1" />
+    <circle cx="10" cy="9" r="2" />
+    <path d="M6.5 14a3.5 3.5 0 017 0" />
+  </>),
+  // Phone handset — for the SMS invite affordance.
+  phone: () => ico(<>
+    <path d="M4 3h3l1.5 4-2 1.5a10 10 0 005 5L13 11.5 17 13v3a2 2 0 01-2 2A12 12 0 013 5a2 2 0 011-2z" />
+  </>),
   logout: () => ico(<><path d="M12 4H4v12h8M15 10H8M12 7l3 3-3 3" /></>),
   photo: () => ico(<><rect x="3" y="4" width="14" height="12" rx="2" /><circle cx="8" cy="9" r="1.6" /><path d="M17 14l-4-4-8 6" /></>),
   play: () => ico(<><path d="M6 4l10 6-10 6V4z" fill="currentColor" stroke="none" /></>),

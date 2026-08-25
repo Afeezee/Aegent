@@ -21,6 +21,7 @@ import { embed, tokenize } from "./embeddings.js";
 export type ContactRow = {
   id: string;
   email: string;
+  phone: string | null;
   handle: string;
   displayName: string;
   publicKey: string;
@@ -82,11 +83,22 @@ export type StoredMessage = {
 
 export type ReminderRow = { id: string; text: string; whenIso: string; createdAt: number };
 
+export type ScheduledBackup = {
+  id: string;
+  peerId: string;         // thread to back up (contact id or group id)
+  peerLabel: string;      // cached at scheduling time for the reminder text
+  recipientEmail: string;
+  whenIso: string;
+  createdAt: number;
+  note?: string;
+};
+
 class AegentDB extends Dexie {
   contacts!: Table<ContactRow, string>;
   groups!: Table<GroupRow, string>;
   messages!: Table<StoredMessage, string>;
   reminders!: Table<ReminderRow, string>;
+  scheduledBackups!: Table<ScheduledBackup, string>;
   meta!: Table<{ k: string; v: string }, string>;
 
   constructor(userId: string) {
@@ -97,6 +109,12 @@ class AegentDB extends Dexie {
       messages: "id, peerId, direction, createdAt, [peerId+createdAt]",
       reminders: "id, whenIso, createdAt",
       meta: "k",
+    });
+    // v2: add scheduledBackups table. Dexie's schema migration is
+    // additive — existing stores are preserved.
+    this.version(2).stores({
+      contacts: "id, email, phone, handle, displayName, lastSeenAt",
+      scheduledBackups: "id, whenIso, peerId",
     });
   }
 }
@@ -357,6 +375,35 @@ export async function listReminders(): Promise<ReminderRow[]> {
 }
 export async function deleteReminder(id: string) {
   await requireDb().reminders.delete(id);
+}
+
+// ---- scheduled backups ----
+// A scheduled backup is a pending export that fires at whenIso. The
+// UI probes for due backups on load and surfaces each as a confirm
+// card (never sends silently — same rule as every other write).
+
+export async function addScheduledBackup(b: Omit<ScheduledBackup, "id" | "createdAt">) {
+  await requireDb().scheduledBackups.put({
+    ...b,
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+  });
+}
+export async function listScheduledBackups(): Promise<ScheduledBackup[]> {
+  return (await requireDb().scheduledBackups.toArray())
+    .sort((a, b) => a.whenIso.localeCompare(b.whenIso));
+}
+export async function takeDueScheduledBackups(now = Date.now()): Promise<ScheduledBackup[]> {
+  const all = await listScheduledBackups();
+  const due = all.filter((b) => Date.parse(b.whenIso) <= now);
+  // Consumed once they surface — the confirm card is the user's chance to act.
+  if (due.length) {
+    await requireDb().scheduledBackups.bulkDelete(due.map((b) => b.id));
+  }
+  return due;
+}
+export async function deleteScheduledBackup(id: string) {
+  await requireDb().scheduledBackups.delete(id);
 }
 
 // ---- helpers ----

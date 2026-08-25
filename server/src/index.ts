@@ -25,8 +25,8 @@ import { fileURLToPath } from "node:url";
 import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import {
-  AuthError, findUserByEmail, findUserByHandle, getUserById,
-  loginUser, registerUser, searchUsers, toPublic, updatePrivacy, verifyToken,
+  AuthError, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
+  loginUser, registerUser, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
 } from "./auth.js";
 import { db, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
@@ -56,6 +56,7 @@ app.post("/api/agent/turn", authed, (req, res) => agentTurn(req as AuthedReq, re
 
 const registerBody = z.object({
   email: z.string().email(),
+  phone: z.string().min(1).max(30).optional(),
   displayName: z.string().min(1).max(80),
   password: z.string().min(8),
   publicKey: z.string().min(1),
@@ -114,6 +115,34 @@ app.get("/api/users/by-handle/:handle", authed, (req, res) => {
   const u = findUserByHandle(req.params.handle);
   if (!u) return res.status(404).json({ error: "not_found" });
   res.json(toPublic(u, livePresence));
+});
+
+app.get("/api/users/by-phone/:phone", authed, (req, res) => {
+  const u = findUserByPhone(req.params.phone);
+  if (!u) return res.status(404).json({ error: "not_found" });
+  res.json(toPublic(u, livePresence));
+});
+
+// Set / clear the current user's phone number.
+app.put("/api/me/phone", authed, (req, res) => {
+  const body = z.object({ phone: z.string().nullable() }).parse(req.body);
+  try {
+    setPhone((req as AuthedReq).userId, body.phone);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// Bulk directory lookup by phone number — used by the "import from phone
+// contacts" flow so we can find which of your device contacts are already
+// on Aegent without a round-trip per number.
+app.post("/api/users/lookup-phones", authed, (req, res) => {
+  const body = z.object({ phones: z.array(z.string()).max(200) }).parse(req.body);
+  const found: Array<ReturnType<typeof toPublic>> = [];
+  for (const raw of body.phones) {
+    const u = findUserByPhone(raw);
+    if (u && u.id !== (req as AuthedReq).userId) found.push(toPublic(u, livePresence));
+  }
+  res.json(found);
 });
 
 app.get("/api/users/:id", authed, (req, res) => {

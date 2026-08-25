@@ -21,8 +21,9 @@
 
 import { api } from "../lib/api.js";
 import {
-  draft_message, export_to_email, forward_message,
-  list_reminders_tool, resolveTarget, search_messages, set_reminder,
+  backup_thread, draft_message, export_to_email, forward_message,
+  list_reminders_tool, resolveTarget, schedule_backup, search_messages,
+  set_reminder,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -116,6 +117,36 @@ const TOOLS = [
         note: { type: "string" },
       },
       required: ["messageIds", "recipientEmail"],
+    },
+  },
+  {
+    name: "backup_thread",
+    description:
+      "Compile an entire conversation (with a contact or group) into a plaintext email, oldest first. Prefer this over export_to_email when the user says 'backup', 'archive', or 'save the chat'. Media is referenced by type — the encrypted media itself doesn't leave the app. Surfaces a confirm card; does not send until the user approves.",
+    input_schema: {
+      type: "object",
+      properties: {
+        peerId: { type: "string", description: "The contact id or group id whose thread to back up." },
+        recipientEmail: { type: "string" },
+        note: { type: "string", description: "Optional intro line placed at the top of the backup email." },
+        sinceDaysAgo: { type: "number", description: "Optional: only include messages from the last N days." },
+      },
+      required: ["peerId", "recipientEmail"],
+    },
+  },
+  {
+    name: "schedule_backup",
+    description:
+      "Schedule a backup_thread to fire at a chosen time. Persists locally; the user will see a confirm card the next time the app is open at or after that time. Use whenever the user says 'backup at X', 'every night', 'later today'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        peerId: { type: "string" },
+        recipientEmail: { type: "string" },
+        whenIso: { type: "string", description: "ISO 8601 timestamp for when the backup should fire." },
+        note: { type: "string" },
+      },
+      required: ["peerId", "recipientEmail", "whenIso"],
     },
   },
 ] as const;
@@ -212,7 +243,7 @@ async function callTurn(messages: Message[]): Promise<Response> {
       messages,
       tools: TOOLS,
       max_tokens: 1024,
-      temperature: 0.4,
+      // `temperature` intentionally omitted — Claude 5 models reject it.
     }),
   });
   if (!r.ok) {
@@ -257,6 +288,18 @@ async function runTool(
     if (name === "export_to_email") {
       const r = await export_to_email(args as { messageIds: string[]; recipientEmail: string; note?: string });
       return stageResult(r);
+    }
+    if (name === "backup_thread") {
+      const r = await backup_thread(args as {
+        peerId: string; recipientEmail: string; note?: string; sinceDaysAgo?: number;
+      });
+      return stageResult(r);
+    }
+    if (name === "schedule_backup") {
+      const r = await schedule_backup(args as {
+        peerId: string; recipientEmail: string; whenIso: string; note?: string;
+      });
+      return { forClaude: r.ok && r.kind === "data" ? r.value : { error: (r as { error?: string }).error ?? "unavailable" } };
     }
     return { forClaude: { error: `unknown tool ${name}` } };
   } catch (e) {

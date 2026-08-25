@@ -30,7 +30,7 @@ export function currentSession(): Session | null { return CURRENT; }
 // ---- registration / login ----
 
 export async function register(input: {
-  email: string; displayName: string; password: string;
+  email: string; phone?: string; displayName: string; password: string;
 }): Promise<{ session: Session; recoveryPhrase: string }> {
   await initCrypto();
   const { phrase, entropy } = newRecoveryPhrase();
@@ -44,6 +44,7 @@ export async function register(input: {
 
   const { user, token } = await api.register({
     email: input.email,
+    phone: input.phone,
     displayName: input.displayName,
     password: input.password,
     publicKey: b64.encode(id.publicKey),
@@ -243,7 +244,7 @@ export async function ensureContact(id: string): Promise<{ id: string; publicKey
   try {
     const u = await api.byId(id);
     await upsertContact({
-      id: u.id, email: u.email, handle: u.handle,
+      id: u.id, email: u.email, phone: u.phone ?? null, handle: u.handle,
       displayName: u.displayName, publicKey: u.publicKey,
       lastSeenAt: Date.now(),
       online: u.presence?.online,

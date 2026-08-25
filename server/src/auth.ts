@@ -38,6 +38,7 @@ async function verifyPassword(hash: string, password: string): Promise<boolean> 
 
 export async function registerUser(input: {
   email: string;
+  phone?: string | null;
   displayName: string;
   password: string;
   publicKey: string;
@@ -45,8 +46,14 @@ export async function registerUser(input: {
   kdfSalt: string;
 }): Promise<{ user: PublicUser; token: string; handle: string }> {
   const email = input.email.toLowerCase().trim();
+  const phone = input.phone ? normalizePhone(input.phone) : null;
+
   const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
   if (existing) throw new AuthError("email_taken", "That email is already registered.");
+  if (phone) {
+    const clash = db.prepare("SELECT id FROM users WHERE phone = ?").get(phone);
+    if (clash) throw new AuthError("phone_taken", "That phone number is already registered.");
+  }
 
   const passwordHash = await hashPassword(input.password);
   const id = randomUUID();
@@ -55,16 +62,40 @@ export async function registerUser(input: {
 
   db.prepare(
     `INSERT INTO users
-       (id, email, display_name, handle, password_hash, public_key,
+       (id, email, phone, display_name, handle, password_hash, public_key,
         wrapped_priv, kdf_salt, read_receipts, presence, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
   ).run(
-    id, email, input.displayName, handle,
+    id, email, phone, input.displayName, handle,
     passwordHash, input.publicKey, input.wrappedPriv, input.kdfSalt, now,
   );
 
   const user = getUserById(id)!;
   return { user: toPublic(user), token: sign(id), handle };
+}
+
+// Set/clear the phone number on the current user. Enforces the unique
+// constraint here so we can return a friendly error instead of an
+// SQLITE_CONSTRAINT.
+export function setPhone(userId: string, rawPhone: string | null) {
+  const phone = rawPhone ? normalizePhone(rawPhone) : null;
+  if (phone) {
+    const clash = db.prepare(
+      "SELECT id FROM users WHERE phone = ? AND id != ?",
+    ).get(phone, userId);
+    if (clash) throw new AuthError("phone_taken", "That phone number is already registered.");
+  }
+  db.prepare("UPDATE users SET phone = ? WHERE id = ?").run(phone, userId);
+}
+
+// Very light E.164 canonicalizer — a real deployment would use libphonenumber
+// with the user's country hint. Here we accept "+" + digits, strip separators,
+// and require ≥7 digits so obvious garbage doesn't stick.
+export function normalizePhone(raw: string): string {
+  const cleaned = raw.trim().replace(/[\s()\-.]/g, "");
+  const m = /^\+?(\d{7,20})$/.exec(cleaned);
+  if (!m) throw new AuthError("bad_phone", "Enter a valid international phone number (e.g. +234701…).");
+  return "+" + m[1];
 }
 
 export async function loginUser(input: { email: string; password: string }):
@@ -108,8 +139,29 @@ export function findUserByHandle(handle: string): UserRow | undefined {
   return db.prepare("SELECT * FROM users WHERE lower(handle) = ?").get(h) as UserRow | undefined;
 }
 
+export function findUserByPhone(rawPhone: string): UserRow | undefined {
+  try {
+    const phone = normalizePhone(rawPhone);
+    return db.prepare("SELECT * FROM users WHERE phone = ?").get(phone) as UserRow | undefined;
+  } catch { return undefined; }
+}
+
 export function searchUsers(q: string, excludeId: string): PublicUser[] {
-  const like = `%${q.toLowerCase().replace(/^@/, "")}%`;
+  // If the query looks like a phone number, do a normalized-equality match
+  // — LIKE across "+2347..." with a mix of hyphens, spaces, and country
+  // codes gets noisy fast.
+  const trimmed = q.trim();
+  if (/^\+?\d[\d\s()\-.]{5,}$/.test(trimmed)) {
+    try {
+      const phone = normalizePhone(trimmed);
+      const row = db.prepare(
+        "SELECT * FROM users WHERE phone = ? AND id != ?",
+      ).get(phone, excludeId) as UserRow | undefined;
+      return row ? [toPublic(row)] : [];
+    } catch { return []; }
+  }
+
+  const like = `%${trimmed.toLowerCase().replace(/^@/, "")}%`;
   const rows = db.prepare(
     `SELECT * FROM users
        WHERE id != ?
@@ -138,6 +190,7 @@ export function updatePrivacy(userId: string, patch: { readReceipts?: boolean; p
 export type PublicUser = {
   id: string;
   email: string;
+  phone: string | null;
   displayName: string;
   handle: string;
   publicKey: string;
@@ -147,7 +200,8 @@ export type PublicUser = {
 
 export function toPublic(u: UserRow, live?: Map<string, number>): PublicUser {
   const out: PublicUser = {
-    id: u.id, email: u.email, displayName: u.display_name,
+    id: u.id, email: u.email, phone: u.phone ?? null,
+    displayName: u.display_name,
     handle: u.handle, publicKey: u.public_key,
   };
   if (u.presence) {

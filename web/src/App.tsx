@@ -36,7 +36,8 @@ export default function App() {
       try {
         const u = await api.byHandle(handle);
         await upsertContact({
-          id: u.id, email: u.email, handle: u.handle, displayName: u.displayName,
+          id: u.id, email: u.email, phone: u.phone ?? null,
+          handle: u.handle, displayName: u.displayName,
           publicKey: u.publicKey, lastSeenAt: Date.now(), online: u.presence?.online,
         });
         toast(`Added @${handle}`, "ok");

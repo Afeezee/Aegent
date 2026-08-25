@@ -5,8 +5,8 @@
 import { api } from "../lib/api.js";
 import { cosine, embed, tokenize } from "../lib/embeddings.js";
 import {
-  everyMessage, getContact, getGroup, listContacts, listGroups,
-  listReminders, saveReminder,
+  addScheduledBackup, everyMessage, getContact, getGroup, listContacts,
+  listGroups, listReminders, saveReminder, threadWith,
 } from "../lib/store.js";
 import {
   currentSession, sendMedia, sendText,
@@ -154,6 +154,111 @@ export async function export_to_email(args: {
       leavesE2E: true,
     },
     explain: `This will leave Aegent's E2E boundary — email isn't encrypted the same way. Review before sending.`,
+  };
+}
+
+// ---- backup: whole thread → email ----
+//
+// Compiles the entire conversation with a peer or group into a
+// plaintext email body, oldest first, with senders and timestamps.
+// Media is referenced as its type ("[voice 12s]", "[photo 2.1MB]")
+// rather than attached — E2E media stays on-server as ciphertext and
+// its content key deliberately does not leave the app.
+
+export async function backup_thread(args: {
+  peerId: string; recipientEmail: string; note?: string;
+  sinceDaysAgo?: number;
+}): Promise<ToolResult> {
+  const label = (await getContact(args.peerId))?.displayName
+    ?? (await getGroup(args.peerId))?.name;
+  if (!label) return { ok: false, error: "unknown_thread" };
+  const isGroup = !!(await getGroup(args.peerId));
+
+  const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
+  const rows = (await threadWith(args.peerId, 5000))
+    .filter((m) => !m.deletedAt && m.createdAt >= since);
+  if (rows.length === 0) return { ok: false, error: "empty_thread" };
+
+  const nameOf = new Map<string, string>();
+  nameOf.set(myId(), "You");
+  for (const m of rows) {
+    if (nameOf.has(m.senderId)) continue;
+    const c = await getContact(m.senderId);
+    nameOf.set(m.senderId, c?.displayName ?? "Someone");
+  }
+  const lines = rows.map((m) => {
+    const when = new Date(m.createdAt).toLocaleString();
+    const who = nameOf.get(m.senderId) ?? "Someone";
+    let body: string;
+    if (m.media) {
+      const size = m.media.byteSize > 1e6
+        ? `${(m.media.byteSize / 1e6).toFixed(1)}MB`
+        : `${Math.round(m.media.byteSize / 1024)}KB`;
+      const label = m.media.kind === "voice" && m.media.durationMs
+        ? `voice ${Math.round(m.media.durationMs / 1000)}s`
+        : `${m.media.kind} ${size}`;
+      body = `[${label}${m.caption ? ` — ${m.caption}` : ""}]`;
+    } else {
+      body = m.editedBody ?? m.body ?? "";
+    }
+    return `[${when}] ${who}: ${body}`;
+  });
+
+  const header = [
+    args.note ?? `Aegent backup of ${isGroup ? "group" : "conversation"} with ${label}.`,
+    `Messages: ${rows.length}`,
+    `Range: ${new Date(rows[0].createdAt).toLocaleString()} — ${new Date(rows[rows.length - 1].createdAt).toLocaleString()}`,
+    "",
+  ].join("\n");
+  const footer = [
+    "",
+    "— Sent via Aegent. Note: email is not end-to-end encrypted the way Aegent messages are.",
+    "  Media is referenced by type — the encrypted files stay on your device.",
+  ].join("\n");
+  const body = header + lines.join("\n") + footer;
+
+  return {
+    ok: true, kind: "pending",
+    action: {
+      kind: "email",
+      recipientEmail: args.recipientEmail,
+      subject: `Aegent backup: ${label} (${rows.length} messages)`,
+      body,
+      leavesE2E: true,
+    },
+    explain: `I've compiled ${rows.length} messages from ${label}. Email isn't E2E encrypted — review before sending.`,
+  };
+}
+
+// Schedule the backup to happen at a chosen time. Persists in the local
+// store; when whenIso passes and the app is open (now or next time),
+// the UI surfaces a confirm card for the actual send. No silent send.
+
+export async function schedule_backup(args: {
+  peerId: string; recipientEmail: string; whenIso: string; note?: string;
+}): Promise<ToolResult> {
+  const when = new Date(args.whenIso);
+  if (Number.isNaN(when.getTime())) return { ok: false, error: "bad_time" };
+  const label = (await getContact(args.peerId))?.displayName
+    ?? (await getGroup(args.peerId))?.name;
+  if (!label) return { ok: false, error: "unknown_thread" };
+
+  await addScheduledBackup({
+    peerId: args.peerId,
+    peerLabel: label,
+    recipientEmail: args.recipientEmail,
+    whenIso: when.toISOString(),
+    note: args.note,
+  });
+  // Also drop a plain reminder so the user sees it in their reminders list.
+  await saveReminder(`Backup ${label} to ${args.recipientEmail}`, when.toISOString());
+  return {
+    ok: true, kind: "data",
+    value: {
+      scheduled: true,
+      when: when.toLocaleString(),
+      note: "You'll see a confirm card the next time the app is open at or after that time.",
+    },
   };
 }
 

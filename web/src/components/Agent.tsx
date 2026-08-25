@@ -3,9 +3,10 @@
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import { Avatar, Button, Icon } from "./ui.js";
+import { Avatar, Button, Icon, toast } from "./ui.js";
 import { runAgent, type AgentEvent } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
+import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
 
 type UiMsg =
   | { id: string; kind: "you"; text: string }
@@ -13,6 +14,15 @@ type UiMsg =
   | { id: string; kind: "reply"; text: string }
   | { id: string; kind: "error"; text: string }
   | { id: string; kind: "confirm"; action: PendingAction; explain: string; resolved?: "sent" | "cancelled" };
+
+// External-event bus. Anything in the app can push a UI message into the
+// Agent panel — currently used by the scheduled-backup runner to surface
+// due backups as confirm cards without the user having to re-ask.
+type PushKind = { kind: "reply"; text: string } | { kind: "confirm"; action: PendingAction; explain: string };
+const pushListeners = new Set<(u: PushKind) => void>();
+export function pushAgentEvent(u: PushKind) {
+  pushListeners.forEach((cb) => cb(u));
+}
 
 export function AgentSheet({
   open, onClose, onDidAct,
@@ -22,10 +32,23 @@ export function AgentSheet({
   const [busy, setBusy] = useState(false);
   const [msgs, setMsgs] = useState<UiMsg[]>([initialGreeting()]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const speechSupported = isSpeechSupported();
+  const [listening, setListening] = useState(false);
+  const [interim, setInterim] = useState("");
+  const speechRef = useRef<SpeechSession | null>(null);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
+
+  // Subscribe to external pushes (e.g. scheduled backups coming due).
+  useEffect(() => {
+    const cb = (u: { kind: "reply"; text: string } | { kind: "confirm"; action: PendingAction; explain: string }) => {
+      setMsgs((xs) => [...xs, { ...u, id: crypto.randomUUID() } as UiMsg]);
+    };
+    pushListeners.add(cb);
+    return () => { pushListeners.delete(cb); };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -58,6 +81,33 @@ export function AgentSheet({
   function cancel(id: string) {
     setMsgs((xs) => xs.map((m) => (m.id === id && m.kind === "confirm" ? { ...m, resolved: "cancelled" } : m)));
   }
+
+  function toggleMic() {
+    if (listening) {
+      speechRef.current?.stop();
+      return;
+    }
+    if (!speechSupported) { toast("Voice input isn't supported in this browser", "warn"); return; }
+    setInterim(""); setListening(true);
+    speechRef.current = startSpeech({
+      onInterim: (t) => { setInterim(t); setInput(t); },
+      onFinal: (t) => {
+        setListening(false); setInterim("");
+        speechRef.current = null;
+        if (t.trim()) { setInput(t); ask(t); }
+      },
+      onError: (msg) => {
+        setListening(false); setInterim("");
+        speechRef.current = null;
+        if (!/no-speech|aborted/i.test(msg)) toast(`Voice: ${msg}`, "error");
+      },
+    });
+  }
+  // Cleanup on close/unmount.
+  useEffect(() => {
+    if (!open && speechRef.current) { speechRef.current.abort(); speechRef.current = null; setListening(false); setInterim(""); }
+  }, [open]);
+  useEffect(() => () => { speechRef.current?.abort(); }, []);
 
   return (
     <AnimatePresence>
@@ -104,15 +154,36 @@ export function AgentSheet({
               </AnimatePresence>
             </div>
 
-            <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "flex", gap: 8 }}>
-              <input value={input} onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") ask(input); }}
-                placeholder="Ask the agent…"
+            <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "flex", gap: 8, alignItems: "center" }}>
+              {speechSupported && (
+                <Button variant="icon"
+                  onClick={toggleMic}
+                  title={listening ? "Stop listening" : "Speak"}
+                  aria-label={listening ? "Stop listening" : "Speak"}
+                  style={listening
+                    ? { background: "var(--danger)", color: "#0f1226", borderColor: "transparent" }
+                    : undefined}
+                >
+                  <Icon.mic />
+                </Button>
+              )}
+              <input value={listening && interim ? interim : input}
+                onChange={(e) => { if (!listening) setInput(e.target.value); }}
+                onKeyDown={(e) => { if (e.key === "Enter" && !listening) ask(input); }}
+                placeholder={listening ? "Listening…" : "Ask the agent…"}
+                disabled={listening}
                 autoFocus
               />
-              <Button variant="primary" onClick={() => ask(input)} disabled={busy || !input.trim()}
+              <Button variant="primary" onClick={() => ask(input)} disabled={busy || listening || !input.trim()}
                 aria-label="Ask"><Icon.send /></Button>
             </div>
+            {listening && (
+              <div style={{ padding: "0 14px 8px", display: "flex", gap: 6, alignItems: "center", color: "var(--text-dim)", fontSize: 12 }}>
+                <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ duration: 1.1, repeat: Infinity }}
+                  style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--danger)" }} />
+                <span>Listening — tap the mic again to send.</span>
+              </div>
+            )}
 
             {msgs.length <= 1 && (
               <div style={{ padding: "0 14px 14px", display: "flex", flexWrap: "wrap", gap: 6 }}>

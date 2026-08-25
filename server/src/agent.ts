@@ -63,10 +63,14 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
     return res.status(400).json({ error: "bad_request", message: "messages required" });
   }
 
+  // Note: Claude 5 models reject `temperature`. Only include it when the
+  // caller explicitly asks and the model looks like a pre-5 build.
+  const model = body.model ?? DEFAULT_MODEL;
+  const includeTemp = body.temperature != null && !/(claude-(?:sonnet|opus|fable)-5)|(claude-haiku-4)/.test(model);
   const upstreamBody = {
-    model: body.model ?? DEFAULT_MODEL,
+    model,
     max_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, 2048),
-    temperature: body.temperature ?? 0.4,
+    ...(includeTemp ? { temperature: body.temperature } : {}),
     system: body.system,
     messages: body.messages,
     tools: body.tools,

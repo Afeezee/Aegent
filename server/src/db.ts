@@ -32,6 +32,9 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id             TEXT PRIMARY KEY,
     email          TEXT UNIQUE NOT NULL,
+    -- Optional phone number in E.164 form ("+" + digits). Unique when set;
+    -- NULL is allowed for accounts that never add one.
+    phone          TEXT,
     display_name   TEXT NOT NULL,
     handle         TEXT UNIQUE NOT NULL,       -- @-handle for search / invite links
     password_hash  TEXT NOT NULL,              -- Argon2id, server auth only
@@ -44,6 +47,7 @@ db.exec(`
     last_seen_at   INTEGER,
     created_at     INTEGER NOT NULL
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS groups (
     id           TEXT PRIMARY KEY,
@@ -98,6 +102,20 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_blobs_owner ON blobs(owner_id, created_at);
 `);
 
+// Idempotent migration: for accounts created before the `phone` column,
+// add it in-place. SQLite has no "ADD COLUMN IF NOT EXISTS", so we
+// probe pragma_table_info and only ALTER when it isn't there. Safe to
+// run every boot.
+try {
+  const columns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === "phone")) {
+    db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
+  }
+} catch (e) {
+  console.warn("[aegent] phone-column migration skipped:", (e as Error).message);
+}
+
 // Live in-memory presence (last time we saw this user's socket).
 // Persisted-to-DB only when they disconnect, and only if they've opted
 // in to `presence`. Otherwise their last_seen_at stays NULL and other
@@ -107,6 +125,7 @@ export const livePresence = new Map<string, number>();
 export type UserRow = {
   id: string;
   email: string;
+  phone: string | null;
   display_name: string;
   handle: string;
   password_hash: string;

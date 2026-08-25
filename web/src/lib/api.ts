@@ -3,6 +3,7 @@
 export type PublicUser = {
   id: string;
   email: string;
+  phone: string | null;
   displayName: string;
   handle: string;
   publicKey: string;
@@ -62,10 +63,17 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const api = {
   register: (body: {
-    email: string; displayName: string; password: string;
+    email: string; phone?: string; displayName: string; password: string;
     publicKey: string; wrappedPriv: string; kdfSalt: string;
   }) => req<{ user: PublicUser; token: string; handle: string }>("/api/register", {
     method: "POST", body: JSON.stringify(body),
+  }),
+  setPhone: (phone: string | null) => req<{ ok: true }>("/api/me/phone", {
+    method: "PUT", body: JSON.stringify({ phone }),
+  }),
+  byPhone: (phone: string) => req<PublicUser>(`/api/users/by-phone/${encodeURIComponent(phone)}`),
+  lookupPhones: (phones: string[]) => req<PublicUser[]>("/api/users/lookup-phones", {
+    method: "POST", body: JSON.stringify({ phones }),
   }),
   login: (body: { email: string; password: string }) =>
     req<{ user: PublicUser; token: string; wrappedPriv: string; kdfSalt: string }>(

@@ -11,6 +11,7 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,7 +22,10 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
     setError(null); setBusy(true);
     try {
       if (mode === "register") {
-        const { recoveryPhrase } = await register({ email, displayName, password });
+        const { recoveryPhrase } = await register({
+          email, displayName, password,
+          phone: phone.trim() || undefined,
+        });
         setRecovery(recoveryPhrase);
       } else {
         await login({ email, password });
@@ -91,10 +95,21 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
                     <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" placeholder="you@somewhere.com" />
                   </div>
                   {mode === "register" && (
-                    <div>
-                      <label>Display name</label>
-                      <input required value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" />
-                    </div>
+                    <>
+                      <div>
+                        <label>Display name</label>
+                        <input required value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" />
+                      </div>
+                      <div>
+                        <label>Phone number <span style={{ color: "var(--text-mute)" }}>(optional)</span></label>
+                        <input type="tel" inputMode="tel" autoComplete="tel"
+                          value={phone} onChange={(e) => setPhone(e.target.value)}
+                          placeholder="+234 800 000 0000" />
+                        <div className="small" style={{ marginTop: 6 }}>
+                          Lets friends find you by number. You can add or change it later.
+                        </div>
+                      </div>
+                    </>
                   )}
                   <div>
                     <label>Password</label>

@@ -3,13 +3,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Avatar, Button, Glass, Icon, toast } from "../components/ui.js";
+import { Avatar, Button, Glass, Icon } from "../components/ui.js";
 import { Chat } from "../components/Chat.js";
 import { ThreadList } from "../components/ThreadList.js";
 import { ComposeOverlay } from "../components/ComposeOverlay.js";
 import { GlobalSearch } from "../components/GlobalSearch.js";
 import { Settings } from "../components/Settings.js";
-import { AgentSheet } from "../components/Agent.js";
+import { AgentSheet, pushAgentEvent } from "../components/Agent.js";
 import { ForwardSheet } from "../components/ForwardSheet.js";
 import { Brand } from "./Onboarding.js";
 import { api } from "../lib/api.js";
@@ -19,8 +19,11 @@ import {
 import { onMessage, onPresence, onRead } from "../lib/socket.js";
 import {
   getContact, listGroups, listThreads, markRead, setContactPresence,
+  takeDueScheduledBackups,
   upsertContact, upsertGroup, type OpenedMessage, type Thread,
 } from "../lib/store.js";
+import { backup_thread } from "../agent/tools.js";
+import { toast } from "../components/ui.js";
 
 export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [thread, setThread] = useState<Thread | null>(null);
@@ -85,6 +88,35 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission().catch(() => { /* ignore */ });
     }
+  }, []);
+
+  // Poll for due scheduled backups: on load and every minute after. Each
+  // due backup surfaces a confirm card in the Agent panel — we auto-open
+  // the panel so the user can't miss it.
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      const due = await takeDueScheduledBackups();
+      if (cancelled || due.length === 0) return;
+      setAgentOpen(true);
+      for (const b of due) {
+        const r = await backup_thread({
+          peerId: b.peerId, recipientEmail: b.recipientEmail, note: b.note,
+        });
+        if (r.ok && r.kind === "pending") {
+          pushAgentEvent({
+            kind: "reply",
+            text: `Scheduled backup of ${b.peerLabel} is due — I've prepared it. Confirm to send.`,
+          });
+          pushAgentEvent({ kind: "confirm", action: r.action, explain: r.explain });
+        } else if (!r.ok) {
+          toast(`Scheduled backup for ${b.peerLabel} failed: ${r.error}`, "error");
+        }
+      }
+    }
+    tick();
+    const iv = window.setInterval(tick, 60_000);
+    return () => { cancelled = true; window.clearInterval(iv); };
   }, []);
 
   // Keyboard shortcuts.

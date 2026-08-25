@@ -15,8 +15,9 @@
 // server tells us whether it has a key without exposing it.
 
 import {
-  draft_message, export_to_email, forward_message,
-  list_reminders_tool, resolveTarget, search_messages, set_reminder,
+  backup_thread, draft_message, export_to_email, forward_message,
+  list_reminders_tool, resolveTarget, schedule_backup, search_messages,
+  set_reminder,
   type PendingAction,
 } from "./tools.js";
 import { runLlm } from "./llm.js";
@@ -61,6 +62,26 @@ async function* runOffline(input: string): AsyncGenerator<AgentEvent> {
     const res = await set_reminder({ text, whenIso: when.toISOString() });
     if (res.ok && res.kind === "pending") yield { kind: "confirm", action: res.action, explain: res.explain };
     else if (!res.ok) yield { kind: "error", text: res.error };
+    return;
+  }
+
+  // Backup: "backup <chat> to me@example.com [at X | tomorrow …]"
+  const backupMatch = /(?:back\s*up|backup|archive|save).+?(?:with|of|from)?\s*([@\w.-]+).+?([\w.+-]+@[\w-]+\.[\w.-]+)/i.exec(input);
+  if (backupMatch && /back\s*up|backup|archive/i.test(input)) {
+    const [, who, addr] = backupMatch;
+    const target = await resolveTarget(who);
+    if (!target) { yield { kind: "reply", text: `I don't have a contact called "${who}".` }; return; }
+    const when = parseWhen(input);
+    if (when) {
+      const r = await schedule_backup({ peerId: target.id, recipientEmail: addr, whenIso: when.toISOString() });
+      yield { kind: "reply", text: r.ok && r.kind === "data"
+        ? `Scheduled backup of ${target.label} → ${addr} for ${when.toLocaleString()}.`
+        : `Couldn't schedule: ${(r as { error?: string }).error}` };
+      return;
+    }
+    const r = await backup_thread({ peerId: target.id, recipientEmail: addr });
+    if (r.ok && r.kind === "pending") yield { kind: "confirm", action: r.action, explain: r.explain };
+    else if (!r.ok) yield { kind: "error", text: r.error };
     return;
   }
 
