@@ -29,3 +29,17 @@ yarn-error.log*
 
 # TypeScript incremental cache
 *.tsbuildinfo
+
+# Android build outputs (the project source under web/android IS
+# committed so anyone can build locally, but its build artefacts
+# shouldn't bloat the repo).
+web/android/.gradle/
+web/android/build/
+web/android/app/build/
+web/android/local.properties
+web/android/captures/
+web/android/.idea/
+*.apk
+*.aab
+*.keystore
+!aegent-release.keystore.example

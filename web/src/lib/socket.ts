@@ -8,8 +8,11 @@ let sock: Socket | null = null;
 
 export function connectSocket(token: string): Socket {
   disconnectSocket();
-  // In dev the server runs on 8787; in prod, same origin.
-  const url = import.meta.env.DEV ? "http://localhost:8787" : location.origin;
+  // Priority: explicit VITE_API_URL (Capacitor / cross-origin deploys)
+  //         > localhost:8787 in dev
+  //         > same origin (single-origin web deploy).
+  const url = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "")
+    ?? (import.meta.env.DEV ? "http://localhost:8787" : location.origin);
   sock = io(url, { auth: { token }, transports: ["websocket", "polling"] });
   return sock;
 }

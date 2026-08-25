@@ -1,0 +1,97 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Absolute URL of the Aegent relay the APK should hit"
+        required: true
+        default: "https://aegent-production.up.railway.app"
+
+env:
+  # Default target for push builds. Change once when your Railway
+  # domain is stable, then every commit produces an APK pointed at it.
+  DEFAULT_API_URL: "https://aegent-production.up.railway.app"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Determine API URL
+        id: api
+        run: |
+          if [ -n "${{ github.event.inputs.api_url }}" ]; then
+            echo "url=${{ github.event.inputs.api_url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=${{ env.DEFAULT_API_URL }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build web bundle
+        working-directory: web
+        env:
+          VITE_API_URL: ${{ steps.api.outputs.url }}
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        working-directory: web
+        run: npx cap sync android
+
+      - name: Assemble debug APK
+        working-directory: web/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: |
+          SRC="web/android/app/build/outputs/apk/debug/app-debug.apk"
+          DST="aegent-${{ github.sha }}.apk"
+          cp "$SRC" "$DST"
+          echo "path=$DST" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegent-apk
+          path: aegent-*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Publish a Release for tag pushes so downloads have a stable link
+      # you can share. Manual runs also publish, tagged by the run id.
+      - name: Publish as GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aegent-*.apk
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: Aegent ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build #{0}', github.run_number) }}
+          body: |
+            Debug APK built from ${{ github.sha }}.
+            Pointed at API: ${{ steps.api.outputs.url }}
+            Install on Android with "Install from unknown sources" enabled.
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

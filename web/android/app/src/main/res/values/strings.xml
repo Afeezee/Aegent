@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Aegent</string>
+    <string name="title_activity_main">Aegent</string>
+    <string name="package_name">com.aegent.app</string>
+    <string name="custom_url_scheme">com.aegent.app</string>
+</resources>

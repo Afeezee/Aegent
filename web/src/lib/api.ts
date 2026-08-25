@@ -31,6 +31,17 @@ export type MeApi = PublicUser & {
   settings: { readReceipts: boolean; presence: boolean };
 };
 
+// Absolute base URL for the relay. In the web deploy the SPA and the
+// relay share an origin, so relative paths ("/api/...") are correct
+// and API_BASE stays empty. In a Capacitor APK the WebView's origin is
+// `capacitor://localhost` — relative paths would resolve to the local
+// asset shell, so we prefix them with VITE_API_URL (e.g.
+// "https://aegent-production.up.railway.app").
+export const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+export function apiUrl(path: string): string {
+  return API_BASE + path;
+}
+
 let TOKEN: string | null = null;
 export function setToken(t: string | null) {
   TOKEN = t;
@@ -49,7 +60,7 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const t = loadToken();
   if (t) headers.set("authorization", `Bearer ${t}`);
-  const r = await fetch(path, { ...init, headers });
+  const r = await fetch(apiUrl(path), { ...init, headers });
   if (!r.ok) {
     let msg = `${r.status}`;
     try {
@@ -109,7 +120,7 @@ export const api = {
     if (t) headers.set("authorization", `Bearer ${t}`);
     // Blob constructor's typing narrows to ArrayBuffer; a plain Uint8Array
     // is fine at runtime but TS 5+ objects to the SharedArrayBuffer overlap.
-    const r = await fetch("/api/blobs", {
+    const r = await fetch(apiUrl("/api/blobs"), {
       method: "POST",
       body: new Blob([bytes as BlobPart], { type: "application/octet-stream" }),
       headers,
@@ -119,7 +130,7 @@ export const api = {
   },
   downloadBlob: async (id: string): Promise<Uint8Array> => {
     const t = loadToken();
-    const r = await fetch(`/api/blobs/${id}`, {
+    const r = await fetch(apiUrl(`/api/blobs/${id}`), {
       headers: t ? { authorization: `Bearer ${t}` } : {},
     });
     if (!r.ok) throw new Error(`download ${r.status}`);

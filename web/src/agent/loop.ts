@@ -21,6 +21,7 @@ import {
   type PendingAction,
 } from "./tools.js";
 import { runLlm } from "./llm.js";
+import { apiUrl } from "../lib/api.js";
 
 export type AgentEvent =
   | { kind: "thought"; text: string }
@@ -33,7 +34,7 @@ export type AgentEvent =
 let llmProbe: Promise<boolean> | null = null;
 function isLlmAvailable(): Promise<boolean> {
   if (!llmProbe) {
-    llmProbe = fetch("/healthz")
+    llmProbe = fetch(apiUrl("/healthz"))
       .then((r) => r.json())
       .then((j: { llm?: boolean }) => !!j.llm)
       .catch(() => false);

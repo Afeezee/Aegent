@@ -57,6 +57,50 @@ web/              Vite + React + TS client
   src/agent/      tools.ts, loop.ts (offline planner + LLM scaffold)
 ```
 
+## Android APK
+
+Aegent ships as a native Android app via Capacitor. The web codebase is
+reused as-is inside a native WebView, and native APIs (contacts, share
+sheet, local notifications, camera, haptics) are exposed through
+Capacitor plugins.
+
+**Get the latest APK** — either from GitHub Actions (last successful
+run under Actions → "Android APK" → `aegent-apk` artifact) or, when a
+tag is published, from the Releases page.
+
+**Build locally** (needs Android Studio or the Android command-line
+tools + JDK 21):
+
+```bash
+cd web
+# One-time: generate the Android project (already committed, but this
+# is how you regenerate after wiping android/).
+npm run android:sync
+# Then either open in Android Studio and hit Run, or from the command line:
+cd android
+./gradlew assembleDebug
+# APK lands at android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Build via GitHub Actions** — every push to `main` runs
+`.github/workflows/android.yml`, which builds a debug APK pointed at
+your Railway relay and uploads it as a downloadable artifact. Change
+`DEFAULT_API_URL` in that file to your Railway domain.
+
+**Point the APK at your relay** — the native shell has no origin of
+its own, so the client needs an absolute URL at build time:
+
+```bash
+# for local builds
+VITE_API_URL=https://your-app.up.railway.app npm run android:sync
+# for CI, edit .github/workflows/android.yml's DEFAULT_API_URL
+```
+
+**Sharing the APK** — copy the file to Google Drive / Dropbox / a
+Release, share the link, recipient enables "Install from unknown
+sources" once and taps it. For Play Store distribution you'll need a
+signed release build and a keystore — see the DEPLOYMENT guide.
+
 ## Run it
 
 ```bash

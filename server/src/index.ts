@@ -36,7 +36,16 @@ import { agentTurn } from "./agent.js";
 const PORT = Number(process.env.PORT ?? 8787);
 
 const app = express();
-app.use(cors());
+
+// CORS: allow the browser deploy (any origin — we're auth'd via bearer
+// token, not cookies, so credential-cross-origin isn't a concern) and
+// the Capacitor WebView origins (https://localhost on Android, and
+// capacitor://localhost on iOS). This is a wide-open allow for a
+// prototype; production should allowlist explicit origins here.
+app.use(cors({
+  origin: (origin, cb) => cb(null, true),
+  credentials: false,
+}));
 app.use(express.json({ limit: "2mb" }));
 app.use("/api/blobs", express.raw({ type: "*/*", limit: MAX_BLOB_BYTES + 1024 }));
 

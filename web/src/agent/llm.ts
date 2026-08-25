@@ -19,7 +19,7 @@
 // The retrieval-locality invariant from spec §5.2 still holds: only the
 // matched messages ever leave the device, and only inside the LLM turn.
 
-import { api } from "../lib/api.js";
+import { api, apiUrl } from "../lib/api.js";
 import {
   backup_thread, draft_message, export_to_email, forward_message,
   list_reminders_tool, resolveTarget, schedule_backup, search_messages,
@@ -241,7 +241,7 @@ export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
 }
 
 async function callTurn(messages: Message[]): Promise<Response> {
-  const r = await fetch("/api/agent/turn", {
+  const r = await fetch(apiUrl("/api/agent/turn"), {
     method: "POST",
     headers: {
       "content-type": "application/json",

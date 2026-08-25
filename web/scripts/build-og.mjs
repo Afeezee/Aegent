@@ -40,4 +40,25 @@ console.log("Rendering OG + icon PNGs…");
 await renderSvg("og.svg", "og.png", { width: 1200 });
 await renderSvg("favicon.svg", "apple-touch-icon.png", { width: 180 });
 await renderSvg("favicon.svg", "favicon-32.png", { width: 32 });
+
+// Big icon source for @capacitor/assets → android/ mipmaps.
+// Written into ../resources/ so it's not shipped in the SPA bundle.
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+const RES = resolve(HERE, "../resources");
+if (!existsSync(RES)) await mkdir(RES, { recursive: true });
+async function renderTo(inFile, outAbs, width) {
+  const svg = await readFile(resolve(PUBLIC, inFile), "utf8");
+  const png = new Resvg(svg, {
+    fitTo: { mode: "width", value: width },
+    font: { loadSystemFonts: true, defaultFontFamily: "Inter" },
+  }).render().asPng();
+  await writeFile(outAbs, png);
+  console.log(`  ${inFile}  →  ${outAbs}  (${png.byteLength.toLocaleString()} bytes)`);
+}
+await renderTo("favicon.svg", resolve(RES, "icon.png"), 1024);
+// Splash: a centred badge on a solid canvas. Reuse the favicon.svg
+// but padded generously; @capacitor/assets crops to safe zones.
+await renderTo("favicon.svg", resolve(RES, "icon-only.png"), 1024);
+await renderTo("favicon.svg", resolve(RES, "icon-foreground.png"), 1024);
 console.log("Done.");
