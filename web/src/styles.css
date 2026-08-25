@@ -9,6 +9,15 @@
 :root {
   color-scheme: dark;
 
+  /* Safe-area insets from the OS (nav bar at the bottom, notch at the
+     top on some Androids / iPhones). Populated when index.html has
+     viewport-fit=cover — which it does. Default to 0 on browsers /
+     surfaces that don't set them, so the CSS below still works. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
   /* Palette — cool violet + aurora accents, gentle enough for long reads. */
   --ink-0: #05070d;
   --ink-1: #0b0f1a;
@@ -306,6 +315,22 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 /* ---- selection ---- */
 
 ::selection { background: color-mix(in oklab, var(--accent) 40%, transparent); color: var(--text); }
+
+/* ---- Android / iOS safe area ---- */
+/* The WebView is edge-to-edge in viewport-fit=cover mode, which means
+   the 3-button nav bar at the bottom of Android (and any notch at the
+   top) would otherwise cover our composer. These utility classes let
+   any component pad itself around the system UI without knowing the
+   exact device geometry. */
+
+.pad-safe-bottom { padding-bottom: calc(14px + var(--safe-bottom)); }
+.pad-safe-top    { padding-top:    calc(14px + var(--safe-top)); }
+.inset-safe {
+  padding-top:    var(--safe-top);
+  padding-right:  var(--safe-right);
+  padding-bottom: var(--safe-bottom);
+  padding-left:   var(--safe-left);
+}
 
 /* ---- agent markdown ---- */
 /* Scoped styles for the on-device agent's rendered markdown so

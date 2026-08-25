@@ -34,12 +34,22 @@ export type MeApi = PublicUser & {
 // Absolute base URL for the relay. In the web deploy the SPA and the
 // relay share an origin, so relative paths ("/api/...") are correct
 // and API_BASE stays empty. In a Capacitor APK the WebView's origin is
-// `capacitor://localhost` — relative paths would resolve to the local
-// asset shell, so we prefix them with VITE_API_URL (e.g.
-// "https://aegent-production.up.railway.app").
+// `https://localhost` — relative paths would resolve to the local
+// asset shell, so we prefix them with VITE_API_URL.
 export const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 export function apiUrl(path: string): string {
   return API_BASE + path;
+}
+
+// Publicly shareable URL for invite links, QR codes, deep links, etc.
+// - Web deploy: same as location.origin.
+// - APK: location.origin is "https://localhost" (useless for sharing),
+//   so we use the Railway base URL. Since our single-origin deploy
+//   serves the SPA and the API together, the API base *is* the public
+//   site URL.
+export function siteUrl(path: string): string {
+  const base = API_BASE || location.origin;
+  return base + path;
 }
 
 let TOKEN: string | null = null;

@@ -24,6 +24,7 @@ import {
 } from "../lib/store.js";
 import { backup_thread } from "../agent/tools.js";
 import { toast } from "../components/ui.js";
+import { siteUrl } from "../lib/api.js";
 
 export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [thread, setThread] = useState<Thread | null>(null);
@@ -147,7 +148,15 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     <div style={{
       display: "grid",
       gridTemplateColumns: bp === "sm" ? "1fr" : "320px 1fr",
-      height: "100vh", padding: 12, gap: 12, position: "relative",
+      height: "100vh",
+      // Reserve space around the OS chrome (Android nav bar at the
+      // bottom, notch at the top). On desktop / web these insets are 0
+      // so nothing changes.
+      paddingTop: "calc(12px + var(--safe-top))",
+      paddingBottom: "calc(12px + var(--safe-bottom))",
+      paddingLeft: "calc(12px + var(--safe-left))",
+      paddingRight: "calc(12px + var(--safe-right))",
+      gap: 12, position: "relative",
     }}>
       {showSidebar && (
         <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -213,7 +222,10 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
             title="Open agent (Ctrl+J)"
             aria-label="Open agent"
             style={{
-              position: "fixed", right: 20, bottom: 20, zIndex: 400,
+              position: "fixed",
+              right: "calc(20px + var(--safe-right))",
+              bottom: "calc(20px + var(--safe-bottom))",
+              zIndex: 400,
               width: 56, height: 56, borderRadius: 999, border: "none", cursor: "pointer",
               background: "linear-gradient(135deg, var(--violet), var(--aqua))",
               color: "#10132a",
@@ -256,7 +268,7 @@ function EmptyRight({ onCompose }: { onCompose: () => void }) {
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
           <Button variant="primary" onClick={onCompose}><Icon.plus /> New chat</Button>
-          <Button onClick={() => { try { navigator.clipboard.writeText(location.origin); toast("Link copied", "ok"); } catch { /* ignore */ } }}>
+          <Button onClick={() => { try { navigator.clipboard.writeText(siteUrl("/")); toast("Link copied", "ok"); } catch { /* ignore */ } }}>
             <Icon.link /> Copy invite link
           </Button>
         </div>

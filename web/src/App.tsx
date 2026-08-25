@@ -9,7 +9,7 @@ import { AuthScreen } from "./pages/Auth.js";
 import { Home } from "./pages/Home.js";
 import { hasOnboarded, Onboarding } from "./pages/Onboarding.js";
 import { api } from "./lib/api.js";
-import { currentSession } from "./lib/session.js";
+import { currentSession, tryRestoreSession } from "./lib/session.js";
 import { initCrypto } from "./lib/crypto.js";
 import { upsertContact } from "./lib/store.js";
 
@@ -22,6 +22,11 @@ export default function App() {
     (async () => {
       await initCrypto();
       setOnboarded(hasOnboarded());
+      // Silent session restore — if we have a valid JWT + persisted
+      // crypto keys, jump straight into the app instead of showing
+      // the auth screen.
+      const restored = await tryRestoreSession();
+      if (restored) setSignedIn(true);
       setReady(true);
     })();
   }, []);

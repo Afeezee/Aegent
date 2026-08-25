@@ -27,6 +27,42 @@ export type Session = {
 let CURRENT: Session | null = null;
 export function currentSession(): Session | null { return CURRENT; }
 
+// ---- persisted-session keys ----
+//
+// The JWT alone isn't enough to restore a session — we also need the
+// private key (to decrypt inbound messages) and the local-store key
+// (to open the encrypted IndexedDB). We persist both in localStorage,
+// which on Android's Capacitor WebView lives in app-private storage
+// (SharedPreferences-equivalent) — not readable by other apps without
+// root. This is MVP-grade session persistence; a production build
+// should upgrade to Android Keystore via a Capacitor plugin.
+//
+// Sign-out clears everything explicitly.
+
+const KEY_PRIV = "aegent.priv";
+const KEY_STORE = "aegent.storekey";
+
+function persistKeys(privateKey: Uint8Array, storeKey: Uint8Array) {
+  try {
+    localStorage.setItem(KEY_PRIV, b64.encode(privateKey));
+    localStorage.setItem(KEY_STORE, b64.encode(storeKey));
+  } catch { /* private-browsing / storage-full — silently degrade */ }
+}
+function loadPersistedKeys(): { privateKey: Uint8Array; storeKey: Uint8Array } | null {
+  try {
+    const p = localStorage.getItem(KEY_PRIV);
+    const s = localStorage.getItem(KEY_STORE);
+    if (!p || !s) return null;
+    return { privateKey: b64.decode(p), storeKey: b64.decode(s) };
+  } catch { return null; }
+}
+function clearPersistedKeys() {
+  try {
+    localStorage.removeItem(KEY_PRIV);
+    localStorage.removeItem(KEY_STORE);
+  } catch { /* ignore */ }
+}
+
 // ---- registration / login ----
 
 export async function register(input: {
@@ -57,6 +93,7 @@ export async function register(input: {
 
   const me = await api.me();
   CURRENT = { user: me, privateKey: id.privateKey, publicKey: id.publicKey };
+  persistKeys(id.privateKey, storeKey);
   return { session: CURRENT, recoveryPhrase: phrase };
 }
 
@@ -74,13 +111,43 @@ export async function login(input: { email: string; password: string }): Promise
   const me = await api.me();
   openStore(me.id, storeKey);
   CURRENT = { user: me, privateKey, publicKey: b64.decode(me.publicKey) };
+  persistKeys(privateKey, storeKey);
   return CURRENT;
+}
+
+// Attempt a silent session restore at boot: if we have a JWT and both
+// persisted keys, validate the JWT by fetching /me, then reopen the
+// store and socket. Any failure (bad/expired token, tampered keys)
+// falls back to a clean state so the user sees the auth screen.
+export async function tryRestoreSession(): Promise<Session | null> {
+  await initCrypto();
+  const token = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.token");
+  const keys = loadPersistedKeys();
+  if (!token || !keys) return null;
+  setToken(token);
+  try {
+    const me = await api.me(); // implicitly validates the token
+    connectSocket(token);
+    openStore(me.id, keys.storeKey);
+    CURRENT = {
+      user: me,
+      privateKey: keys.privateKey,
+      publicKey: b64.decode(me.publicKey),
+    };
+    return CURRENT;
+  } catch {
+    // Token no longer valid, or /me refused — full reset so the user
+    // isn't stuck in a half-restored state.
+    logout();
+    return null;
+  }
 }
 
 export function logout() {
   disconnectSocket();
   closeStore();
   setToken(null);
+  clearPersistedKeys();
   CURRENT = null;
 }
 

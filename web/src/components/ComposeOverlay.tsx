@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import QRCode from "qrcode";
 import { Avatar, Button, Glass, Icon, Modal, toast } from "./ui.js";
-import { api, type PublicUser } from "../lib/api.js";
+import { api, siteUrl, type PublicUser } from "../lib/api.js";
 import { currentSession } from "../lib/session.js";
 import { upsertContact, upsertGroup } from "../lib/store.js";
 import {
@@ -110,7 +110,10 @@ export function ComposeOverlay({
     } catch (e) { toast(`Failed: ${(e as Error).message}`, "error"); }
   }
 
-  const inviteLink = useMemo(() => me ? `${location.origin}/#/i/${me.handle}` : "", [me]);
+  // Use the public site URL, not location.origin — inside the APK the
+  // WebView's origin is https://localhost and would produce
+  // unusable share links.
+  const inviteLink = useMemo(() => me ? siteUrl(`/#/i/${me.handle}`) : "", [me]);
 
   return (
     <Modal open={open} onClose={onClose} title={<TabRow mode={mode} setMode={setMode} />}>
@@ -194,15 +197,18 @@ function TabRow({ mode, setMode }: { mode: Mode; setMode: (m: Mode) => void }) {
   const tab = (m: Mode, label: string, icon: React.ReactNode) => (
     <button onClick={() => setMode(m)}
       style={{
-        display: "flex", alignItems: "center", gap: 6,
-        padding: "6px 12px", fontSize: 13, borderRadius: 999,
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "6px 10px", fontSize: 13, borderRadius: 999,
         background: mode === m ? "var(--glass-bg-hi)" : "transparent",
         border: mode === m ? "1px solid var(--glass-border-hi)" : "1px solid transparent",
         cursor: "pointer", color: "inherit",
-      }}>{icon} {label}</button>
+        whiteSpace: "nowrap", flex: "0 1 auto", minWidth: 0,
+      }}>{icon} <span>{label}</span></button>
   );
   return (
-    <div style={{ display: "flex", gap: 4 }}>
+    // Wrap when the three chips exceed the modal header width so the
+    // "Invite" tab can never fall off the right edge on a phone.
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", minWidth: 0, maxWidth: "100%" }}>
       {tab("chat", "New chat", <Icon.plus />)}
       {tab("group", "New group", <Icon.users />)}
       {tab("invite", "Invite", <Icon.link />)}
@@ -327,7 +333,7 @@ function PhonePickList({
               <Button size="small" onClick={() => {
                 const me = currentSession()?.user;
                 if (!me) return;
-                inviteBySms(p.phone, `${location.origin}/#/i/${me.handle}`, me.displayName);
+                inviteBySms(p.phone, siteUrl(`/#/i/${me.handle}`), me.displayName);
               }}>
                 <Icon.phone /> Invite
               </Button>

@@ -115,7 +115,13 @@ export function Modal({
           style={{
             position: "fixed", inset: 0, zIndex: 1000,
             background: "rgba(4, 6, 16, 0.55)",
-            display: "grid", placeItems: "center", padding: 20,
+            display: "grid", placeItems: "center",
+            // Safe-area padding so the modal doesn't clip under the
+            // Android nav bar or a top notch.
+            paddingTop: "calc(20px + var(--safe-top))",
+            paddingBottom: "calc(20px + var(--safe-bottom))",
+            paddingLeft: "calc(20px + var(--safe-left))",
+            paddingRight: "calc(20px + var(--safe-right))",
             backdropFilter: "blur(10px)",
           }}
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -126,11 +132,13 @@ export function Modal({
             className="glass glass-hi"
             style={{
               width: "100%", maxWidth: width, borderRadius: 20,
-              // Fit inside the viewport with padding on both sides. When
-              // the body would overflow, it scrolls — header + footer stay put.
-              maxHeight: "calc(100vh - 40px)",
+              // Fit inside the viewport with safe-area on both sides.
+              // Body scrolls when it would overflow; header + footer stay put.
+              maxHeight: "calc(100vh - 40px - var(--safe-top) - var(--safe-bottom))",
               display: "flex", flexDirection: "column",
               overflow: "hidden",
+              // Never scroll sideways — every child wraps or scrolls-its-own.
+              overflowX: "hidden",
             }}
             initial={{ y: 24, scale: 0.98, opacity: 0 }}
             animate={{ y: 0, scale: 1, opacity: 1 }}
@@ -139,10 +147,12 @@ export function Modal({
           >
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "18px 22px 12px", flexShrink: 0,
+              gap: 12,
+              padding: "18px 18px 12px", flexShrink: 0,
               borderBottom: "1px solid var(--line)",
+              minWidth: 0,
             }}>
-              <h2 style={{ fontSize: 18 }}>{title}</h2>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 18 }}>{title}</div>
               <Button variant="icon" onClick={onClose} aria-label="Close">✕</Button>
             </div>
             <div style={{
@@ -182,7 +192,12 @@ export function ToastHost() {
   const [list, setList] = useState<Toast[]>([]);
   useEffect(() => { toastListeners.add(setList); return () => { toastListeners.delete(setList); }; }, []);
   return (
-    <div style={{ position: "fixed", right: 20, bottom: 20, display: "flex", flexDirection: "column", gap: 8, zIndex: 2000, maxWidth: 320 }}>
+    <div style={{
+      position: "fixed",
+      right: "calc(20px + var(--safe-right))",
+      bottom: "calc(20px + var(--safe-bottom))",
+      display: "flex", flexDirection: "column", gap: 8, zIndex: 2000, maxWidth: 320,
+    }}>
       <AnimatePresence>
         {list.map((t) => (
           <motion.div

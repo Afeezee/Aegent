@@ -285,11 +285,44 @@ export async function executePending(action: PendingAction) {
   return { ok: false, error: "unknown_action" } as const;
 }
 
-function schedule(text: string, whenIso: string) {
-  const at = new Date(whenIso).getTime() - Date.now();
-  if (at <= 0 || at > 24 * 3600_000) return;
+// Schedule a reminder notification. Prefers Capacitor's native
+// LocalNotifications so the notification fires even when the app is
+// backgrounded / the WebView is killed. Falls back to a plain browser
+// Notification in web contexts.
+async function schedule(text: string, whenIso: string) {
+  const when = new Date(whenIso);
+  const at = when.getTime() - Date.now();
+  if (at <= 0 || at > 30 * 86400_000) return; // reject past + >30d ahead
+
+  try {
+    const { LocalNotifications } = await import("@capacitor/local-notifications");
+    let perm = await LocalNotifications.checkPermissions();
+    if (perm.display !== "granted") {
+      perm = await LocalNotifications.requestPermissions();
+      if (perm.display !== "granted") throw new Error("perm_denied");
+    }
+    await LocalNotifications.schedule({
+      notifications: [{
+        // 32-bit id required by the plugin.
+        id: Math.floor(Date.now() / 1000) % 2147483647,
+        title: "Aegent reminder",
+        body: text,
+        schedule: { at: when },
+        smallIcon: "ic_stat_icon_config_sample",
+      }],
+    });
+    return;
+  } catch { /* fall through to web fallback */ }
+
+  // Web fallback — only fires while the tab is open.
   window.setTimeout(async () => {
-    if (Notification.permission === "granted") new Notification("Aegent reminder", { body: text });
+    try {
+      if (Notification.permission !== "granted") {
+        const r = await Notification.requestPermission();
+        if (r !== "granted") return;
+      }
+      new Notification("Aegent reminder", { body: text });
+    } catch { /* ignore */ }
   }, at);
 }
 

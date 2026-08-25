@@ -32,4 +32,20 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Voice-note recording (composer mic) + agent voice input. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Reminder + scheduled-backup notifications (Android 13+ requires runtime grant). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Haptics on send / confirm. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Reading device contacts for the phone-contact importer. The Web
+         Contact Picker API needs this to prompt the OS at runtime. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Camera + microphone are surfaced through the WebView's
+         getUserMedia flow. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 </manifest>
