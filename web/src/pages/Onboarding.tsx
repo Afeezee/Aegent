@@ -43,8 +43,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <div style={{
-      minHeight: "100vh", display: "grid", placeItems: "center",
-      padding: 24,
+      height: "100vh", overflowY: "auto", overflowX: "hidden", padding: 24,
+      display: "flex", justifyContent: "center", alignItems: "safe center",
+      WebkitOverflowScrolling: "touch",
     }}>
       <FadeIn>
         <Glass raised style={{ width: "min(520px, 100%)", padding: 32, borderRadius: 22 }}>

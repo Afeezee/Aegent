@@ -3,6 +3,8 @@
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Avatar, Button, Icon, toast } from "./ui.js";
 import { runAgent, type AgentEvent } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
@@ -147,7 +149,12 @@ export function AgentSheet({
               flex: 1, overflowY: "auto", padding: 14,
               display: "flex", flexDirection: "column", gap: 10,
             }}>
-              {msgs.map((m) => renderMsg(m, confirm, cancel))}
+              {groupMsgs(msgs).map((entry, i) => {
+                if (entry.kind === "thoughts") {
+                  return <ThoughtStrip key={`t-${i}`} steps={entry.steps} />;
+                }
+                return renderMsg(entry.msg, confirm, cancel);
+              })}
               <AnimatePresence>
                 {busy && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                   className="small" style={{ padding: "6px 12px", color: "var(--text-dim)" }}>thinking…</motion.div>}
@@ -216,20 +223,33 @@ function renderMsg(
   confirm: (id: string, a: PendingAction) => void,
   cancel: (id: string) => void,
 ) {
-  const base: React.CSSProperties = { padding: "10px 12px", borderRadius: 12, fontSize: 14, whiteSpace: "pre-wrap", wordBreak: "break-word" };
+  const base: React.CSSProperties = { padding: "10px 12px", borderRadius: 12, fontSize: 14, wordBreak: "break-word" };
   switch (m.kind) {
     case "you": return (
-      <div key={m.id} style={{ ...base, alignSelf: "flex-end", maxWidth: "88%",
+      <div key={m.id} style={{ ...base, alignSelf: "flex-end", maxWidth: "88%", whiteSpace: "pre-wrap",
         background: "linear-gradient(135deg, var(--violet), var(--violet-2))", color: "#10132a" }}>{m.text}</div>
     );
-    case "thought": return (
-      <div key={m.id} style={{ ...base, color: "var(--text-dim)", fontStyle: "italic", border: "1px dashed var(--line-strong)" }}>{m.text}</div>
-    );
+    case "thought":
+      // Standalone thoughts render subtly; consecutive ones get grouped
+      // upstream by groupMsgs → ThoughtStrip.
+      return (
+        <div key={m.id} className="small" style={{ padding: "2px 8px", color: "var(--text-mute)", fontStyle: "italic" }}>{m.text}</div>
+      );
     case "reply": return (
-      <div key={m.id} style={{ ...base, background: "var(--glass-bg-hi)", border: "1px solid var(--glass-border-hi)" }}>{m.text}</div>
+      <div key={m.id} style={{ ...base, background: "var(--glass-bg-hi)", border: "1px solid var(--glass-border-hi)" }}>
+        <div className="agent-md">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              // Open outbound links in a new tab, and never leak referrer.
+              a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+            }}
+          >{m.text}</ReactMarkdown>
+        </div>
+      </div>
     );
     case "error": return (
-      <div key={m.id} style={{ ...base, color: "var(--danger)", border: "1px solid var(--danger)" }}>{m.text}</div>
+      <div key={m.id} style={{ ...base, color: "var(--danger)", border: "1px solid var(--danger)", whiteSpace: "pre-wrap" }}>{m.text}</div>
     );
     case "confirm": return (
       <div key={m.id} className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
@@ -272,6 +292,72 @@ function uiFor(ev: AgentEvent): UiMsg {
     case "confirm": return { id, kind: "confirm", action: ev.action, explain: ev.explain };
     case "error": return { id, kind: "error", text: ev.text };
   }
+}
+
+// Consecutive `thought` UiMsgs get folded into one compact strip so the
+// intermediate reasoning doesn't dominate the visual stream. Everything
+// else passes through unchanged.
+type GroupedEntry =
+  | { kind: "msg"; msg: UiMsg }
+  | { kind: "thoughts"; steps: string[] };
+function groupMsgs(msgs: UiMsg[]): GroupedEntry[] {
+  const out: GroupedEntry[] = [];
+  let bucket: string[] | null = null;
+  for (const m of msgs) {
+    if (m.kind === "thought") {
+      if (!bucket) { bucket = []; out.push({ kind: "thoughts", steps: bucket }); }
+      bucket.push(m.text);
+    } else {
+      bucket = null;
+      out.push({ kind: "msg", msg: m });
+    }
+  }
+  return out;
+}
+
+function ThoughtStrip({ steps }: { steps: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (steps.length === 0) return null;
+  return (
+    <div style={{ paddingLeft: 4 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: "transparent", border: "none", padding: "2px 6px",
+          color: "var(--text-mute)", fontSize: 11, cursor: "pointer",
+          display: "inline-flex", alignItems: "center", gap: 6, letterSpacing: 0.4,
+        }}
+        aria-label={open ? "Hide reasoning" : "Show reasoning"}
+      >
+        <span style={{
+          display: "inline-block",
+          transform: open ? "rotate(90deg)" : "rotate(0deg)",
+          transition: "transform .15s ease",
+        }}>▸</span>
+        {steps.length} step{steps.length === 1 ? "" : "s"}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            style={{ overflow: "hidden" }}
+          >
+            <div style={{
+              padding: "6px 10px 4px 22px",
+              display: "flex", flexDirection: "column", gap: 4,
+              color: "var(--text-mute)", fontSize: 11, fontStyle: "italic",
+              borderLeft: "2px solid var(--line)", marginLeft: 8,
+            }}>
+              {steps.map((s, i) => <div key={i}>{s}</div>)}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 function initialGreeting(): UiMsg {

@@ -45,7 +45,13 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+    <div style={{
+      // Scroll container: centre when it fits, top-align when it overflows
+      // (so the tall registration form stays fully reachable on short viewports).
+      height: "100vh", overflowY: "auto", overflowX: "hidden", padding: 24,
+      display: "flex", justifyContent: "center", alignItems: "safe center",
+      WebkitOverflowScrolling: "touch",
+    }}>
       <FadeIn>
         <Glass raised style={{ width: "min(460px, 100%)", padding: 32, borderRadius: 22 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>

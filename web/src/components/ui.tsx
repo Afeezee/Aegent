@@ -124,18 +124,38 @@ export function Modal({
         >
           <motion.div
             className="glass glass-hi"
-            style={{ width: "100%", maxWidth: width, padding: 22, borderRadius: 20 }}
+            style={{
+              width: "100%", maxWidth: width, borderRadius: 20,
+              // Fit inside the viewport with padding on both sides. When
+              // the body would overflow, it scrolls — header + footer stay put.
+              maxHeight: "calc(100vh - 40px)",
+              display: "flex", flexDirection: "column",
+              overflow: "hidden",
+            }}
             initial={{ y: 24, scale: 0.98, opacity: 0 }}
             animate={{ y: 0, scale: 1, opacity: 1 }}
             exit={{ y: 12, scale: 0.98, opacity: 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 26 }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "18px 22px 12px", flexShrink: 0,
+              borderBottom: "1px solid var(--line)",
+            }}>
               <h2 style={{ fontSize: 18 }}>{title}</h2>
               <Button variant="icon" onClick={onClose} aria-label="Close">✕</Button>
             </div>
-            <div>{children}</div>
-            {footer && <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>{footer}</div>}
+            <div style={{
+              flex: 1, minHeight: 0, overflowY: "auto",
+              padding: "16px 22px",
+            }}>{children}</div>
+            {footer && (
+              <div style={{
+                display: "flex", gap: 8, justifyContent: "flex-end",
+                padding: "12px 22px 18px", flexShrink: 0,
+                borderTop: "1px solid var(--line)",
+              }}>{footer}</div>
+            )}
           </motion.div>
         </motion.div>
       )}
