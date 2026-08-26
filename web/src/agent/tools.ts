@@ -16,11 +16,12 @@
 // helpful) teach the offline planner to route to it too.
 
 import { api } from "../lib/api.js";
+import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { cosine, embed, tokenize } from "../lib/embeddings.js";
 import {
   addScheduledBackup, deleteReminder, everyMessage, getContact, getGroup,
   listContacts, listGroups, listReminders, markThreadRead, saveReminder,
-  threadWith, upsertContact, type OpenedMessage,
+  threadWith, updateMessageMedia, upsertContact, type OpenedMessage,
 } from "../lib/store.js";
 import {
   currentSession, sendDelete, sendMedia, sendText,
@@ -639,23 +640,65 @@ export async function transcribe_voice(args: { messageId: string }): Promise<Too
   if (msg.media.transcript) return { ok: true, kind: "data", value: { transcript: msg.media.transcript, cached: true } };
 
   try {
-    const [{ transcribeAudio }, { objectUrlFor }] = await Promise.all([
-      import("../lib/transcribe.js"),
-      import("../lib/media.js"),
-    ]);
-    // objectUrlFor decrypts the blob locally and hands back an
-    // ObjectURL — we grab the bytes from that URL via fetch.
-    const url = await objectUrlFor(msg.media);
-    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
-    const { text } = await transcribeAudio(bytes);
+    const { transcribeAudio } = await import("../lib/transcribe.js");
+    // Fetch the encrypted bytes ourselves and decrypt with the ref's
+    // content key. Avoids going through objectUrlFor which returns
+    // an ObjectURL (extra copy) and then fetching that URL.
+    const enc = await api.downloadBlob(msg.media.blobId);
+    const pt = secretBoxOpenBytes(b64.decode(msg.media.contentKey), enc);
+    const { text } = await transcribeAudio(pt);
     if (text) {
-      // Persist the transcript onto the message so future queries hit
-      // it cached, and it feeds the search index next time saveMedia
-      // touches this row. (For MVP we just return it — a full write-
-      // back would upsert with a new tokens/embedding computation.)
-      msg.media.transcript = text;
+      // Persist onto the message so future queries hit cache AND the
+      // search index picks it up on the next re-tokenise.
+      await updateMessageMedia(args.messageId, { transcript: text });
     }
     return { ok: true, kind: "data", value: { transcript: text, cached: false } };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+// ---- describe_image ----
+//
+// Return an image message's decrypted bytes to the LLM as a vision
+// content block. Claude 5 (Sonnet/Opus/Haiku 4.5) has native vision;
+// no separate OCR service needed. Works for receipts, screenshots,
+// documents photographed with a phone — anything the model can look
+// at.
+//
+// The llm loop looks for the `_agent_image` marker on this tool's
+// return value and repackages the tool_result as an image + text
+// content block. Data never leaves the LLM proxy path; the image is
+// only sent for that one turn.
+
+export async function describe_image(args: { messageId: string; question?: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  const msg = rows.find((m) => m.id === args.messageId);
+  if (!msg) return { ok: false, error: "message_not_found" };
+  if (!msg.media || msg.media.kind !== "image") return { ok: false, error: "not_an_image" };
+  // Anthropic's Messages API accepts base64 images up to ~5 MB.
+  // We keep our own attach cap at 19 MB; guard here.
+  const MAX_INLINE_MB = 4.5;
+  if (msg.media.byteSize > MAX_INLINE_MB * 1024 * 1024) {
+    return { ok: false, error: `image too large for inline vision (${(msg.media.byteSize/1024/1024).toFixed(1)} MB > ${MAX_INLINE_MB} MB)` };
+  }
+  try {
+    const enc = await api.downloadBlob(msg.media.blobId);
+    const pt = secretBoxOpenBytes(b64.decode(msg.media.contentKey), enc);
+    return {
+      ok: true,
+      kind: "data",
+      value: {
+        _agent_image: {
+          mime: msg.media.mime || "image/jpeg",
+          base64: b64.encode(pt),
+        },
+        caption: msg.caption ?? undefined,
+        senderName: (await getContact(msg.senderId))?.displayName ?? "someone",
+        when: msg.createdAt,
+        question: args.question,
+      },
+    };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }

@@ -1,7 +1,11 @@
 // One message. Handles text, media, reply-to preview, reactions,
-// per-side alignment, and the on-hover action bar with the four
-// actions everyone actually uses (react, reply, edit, delete, forward,
-// copy). Long-press on touch triggers the same menu.
+// per-side alignment, and a **kebab-menu-on-edge** action pattern:
+// a small ⋯ button sits absolutely-positioned at the trailing edge
+// of every bubble. Because it's absolute-positioned it can never
+// push the bubble sideways when it appears (the old symptom the user
+// hit). Clicking it opens a floating menu anchored to the button;
+// the menu carries the quick-emoji strip *inside* it, so the reactor
+// never floats up above the bubble and gets clipped.
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
@@ -28,26 +32,31 @@ const QUICK_EMOJI = ["❤️", "😂", "👍", "😮", "😢", "🙏"];
 
 export function MessageBubble(p: BubbleProps) {
   const { msg, isMine } = p;
-  const [showActions, setShowActions] = useState(false);
-  const [showReactor, setShowReactor] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
 
-  // Close reactor on outside click.
   useEffect(() => {
-    if (!showReactor) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setShowReactor(false);
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent | TouchEvent) => {
+      if (!rowRef.current?.contains(e.target as Node)) setMenuOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [showReactor]);
+    document.addEventListener("touchstart", onDoc, { passive: true });
+    const onEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("keydown", onEsc);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("touchstart", onDoc);
+      document.removeEventListener("keydown", onEsc);
+    };
+  }, [menuOpen]);
 
   const body = msg.editedBody ?? msg.body;
   const deleted = !!msg.deletedAt;
 
   return (
     <motion.div
-      ref={rootRef}
+      ref={rowRef}
       initial={{ opacity: 0, y: 8, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 380, damping: 30 }}
@@ -56,8 +65,6 @@ export function MessageBubble(p: BubbleProps) {
         justifyContent: isMine ? "flex-end" : "flex-start",
         alignItems: "flex-end",
       }}
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => { setShowActions(false); setShowReactor(false); }}
     >
       {!isMine && p.showAvatar && <Avatar name={p.senderName} size="sm" />}
       {!isMine && !p.showAvatar && <div style={{ width: 30 }} />}
@@ -106,7 +113,7 @@ export function MessageBubble(p: BubbleProps) {
             <span style={{ opacity: 0.7, fontStyle: "italic" }}>Message deleted</span>
           ) : (
             <>
-              {msg.media && <MediaView media={msg.media} caption={msg.caption ?? undefined} isMine={isMine} />}
+              {msg.media && <MediaView media={msg.media} caption={msg.caption ?? undefined} isMine={isMine} messageId={msg.id} />}
               {body && !msg.media && <span>{body}</span>}
               {body && msg.media && (
                 <div style={{ padding: "8px 8px 4px", fontSize: 14 }}>{body}</div>
@@ -134,6 +141,33 @@ export function MessageBubble(p: BubbleProps) {
               </span>
             )}
           </div>
+
+          {/* Kebab — absolute-positioned on the bubble's trailing edge.
+              Because it's absolute, its appearance/disappearance never
+              shifts the bubble's own layout. */}
+          {!deleted && (
+            <button
+              className="bubble-kebab"
+              onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o); }}
+              aria-label="Message actions"
+              style={{
+                position: "absolute",
+                top: 4,
+                [isMine ? "left" : "right"]: -32,
+                width: 28, height: 28, borderRadius: 999,
+                border: "none", cursor: "pointer",
+                display: "grid", placeItems: "center",
+                background: menuOpen ? "var(--glass-bg-hi)" : "transparent",
+                color: "var(--text-dim)",
+                opacity: menuOpen ? 1 : 0.65,
+                transition: "opacity .12s, background .12s",
+              } as React.CSSProperties}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = menuOpen ? "1" : "0.65")}
+            >
+              <Icon.kebab />
+            </button>
+          )}
         </div>
 
         {/* reactions row */}
@@ -145,75 +179,92 @@ export function MessageBubble(p: BubbleProps) {
                 style={{
                   padding: "2px 8px", fontSize: 12, borderRadius: 999,
                   background: "var(--glass-bg-hi)", border: "1px solid var(--glass-border-hi)",
-                  display: "inline-flex", gap: 4, alignItems: "center",
+                  display: "inline-flex", gap: 4, alignItems: "center", cursor: "pointer",
                 }}>
                 <span>{emoji}</span><span style={{ opacity: 0.8 }}>{users.length}</span>
               </button>
             ))}
           </div>
         )}
+
+        {/* Floating action menu — absolute-positioned so it appears
+            over other content instead of pushing the bubble. */}
+        <AnimatePresence>
+          {menuOpen && !deleted && (
+            <motion.div
+              initial={{ opacity: 0, y: -4, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -4, scale: 0.96 }}
+              transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+              className="glass glass-hi"
+              style={{
+                position: "absolute",
+                top: 34,
+                [isMine ? "left" : "right"]: -32,
+                zIndex: 40,
+                padding: 6,
+                display: "flex", flexDirection: "column", gap: 2,
+                borderRadius: 12, boxShadow: "var(--shadow-md)",
+                minWidth: 170,
+              } as React.CSSProperties}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Quick emoji strip — inside the menu, never floats up. */}
+              <div style={{
+                display: "flex", gap: 2, padding: 4,
+                borderBottom: "1px solid var(--line)", marginBottom: 4,
+              }}>
+                {QUICK_EMOJI.map((e) => (
+                  <button key={e}
+                    onClick={() => { p.onReact(e); setMenuOpen(false); }}
+                    style={{
+                      padding: "4px 8px", fontSize: 18, background: "none",
+                      border: "none", cursor: "pointer", borderRadius: 6,
+                    }}
+                  >{e}</button>
+                ))}
+              </div>
+
+              <MenuItem icon={<Icon.reply />} label="Reply"
+                onClick={() => { p.onReply(); setMenuOpen(false); }} />
+              {isMine && !msg.media && (
+                <MenuItem icon={<Icon.edit />} label="Edit"
+                  onClick={() => { p.onEdit(); setMenuOpen(false); }} />
+              )}
+              <MenuItem icon={<Icon.forward />} label="Forward"
+                onClick={() => { p.onForward(); setMenuOpen(false); }} />
+              <MenuItem icon={<Icon.copy />} label="Copy"
+                onClick={() => { p.onCopy(); setMenuOpen(false); }} />
+              {isMine && (
+                <MenuItem icon={<Icon.trash />} label="Delete" danger
+                  onClick={() => { p.onDelete(); setMenuOpen(false); }} />
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-
-      {/* hover action bar */}
-      <AnimatePresence>
-        {showActions && !deleted && (
-          <motion.div
-            initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 4 }}
-            transition={{ duration: 0.15 }}
-            className="glass"
-            style={{
-              alignSelf: "flex-start",
-              padding: 4, display: "flex", gap: 2, borderRadius: 12,
-              boxShadow: "var(--shadow-md)",
-            }}
-          >
-            <IconAction title="React" onClick={() => setShowReactor((s) => !s)}><Icon.smile /></IconAction>
-            <IconAction title="Reply" onClick={p.onReply}><Icon.reply /></IconAction>
-            {isMine && !msg.media && <IconAction title="Edit" onClick={p.onEdit}><Icon.edit /></IconAction>}
-            <IconAction title="Forward" onClick={p.onForward}><Icon.forward /></IconAction>
-            <IconAction title="Copy" onClick={p.onCopy}><Icon.copy /></IconAction>
-            {isMine && <IconAction title="Delete" onClick={p.onDelete}><Icon.trash /></IconAction>}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showReactor && (
-          <motion.div
-            initial={{ opacity: 0, y: 6, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 4, scale: 0.95 }}
-            className="glass glass-hi"
-            style={{
-              position: "absolute", top: -44, right: isMine ? 40 : undefined, left: isMine ? undefined : 40,
-              padding: 6, display: "flex", gap: 4, borderRadius: 999, zIndex: 5,
-            }}
-          >
-            {QUICK_EMOJI.map((e) => (
-              <button key={e} onClick={() => { p.onReact(e); setShowReactor(false); }}
-                style={{
-                  padding: "4px 8px", fontSize: 18, background: "none",
-                  border: "none", cursor: "pointer", borderRadius: 8,
-                }}>
-                {e}
-              </button>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
     </motion.div>
   );
 }
 
-function IconAction({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title: string }) {
+function MenuItem({ icon, label, onClick, danger }: {
+  icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean;
+}) {
   return (
-    <button onClick={onClick} title={title} aria-label={title}
+    <button onClick={onClick}
       style={{
-        padding: 6, background: "transparent", border: "none",
-        borderRadius: 8, cursor: "pointer", color: "var(--text-dim)",
-        display: "grid", placeItems: "center",
-      }}>
-      {children}
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "8px 10px", borderRadius: 8,
+        background: "transparent", border: "none",
+        color: danger ? "var(--danger)" : "var(--text)",
+        cursor: "pointer", fontSize: 13, textAlign: "left",
+        transition: "background .1s",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      <span style={{ display: "inline-flex", opacity: 0.8 }}>{icon}</span>
+      <span>{label}</span>
     </button>
   );
 }

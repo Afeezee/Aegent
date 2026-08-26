@@ -334,4 +334,6 @@ export const Icon = {
   pause: () => ico(<><rect x="5" y="4" width="4" height="12" rx="1" fill="currentColor" stroke="none" /><rect x="11" y="4" width="4" height="12" rx="1" fill="currentColor" stroke="none" /></>),
   chevron: () => ico(<><path d="M6 4l6 6-6 6" /></>),
   link: () => ico(<><path d="M8 12l4-4M6 10a3.5 3.5 0 015-5l2 2M14 8a3.5 3.5 0 01-5 5l-2-2" /></>),
+  kebab: () => ico(<><circle cx="10" cy="4.5" r="1.4" fill="currentColor" stroke="none" /><circle cx="10" cy="10" r="1.4" fill="currentColor" stroke="none" /><circle cx="10" cy="15.5" r="1.4" fill="currentColor" stroke="none" /></>),
+  transcribe: () => ico(<><path d="M4 4h8M4 8h12M4 12h9M4 16h6" /><path d="M15 14l3 3" /><circle cx="15" cy="14" r="2.5" /></>),
 };

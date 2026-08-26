@@ -5,15 +5,18 @@
 import { useEffect, useRef, useState } from "react";
 import { objectUrlFor } from "../lib/media.js";
 import type { MediaRef } from "../lib/store.js";
-import { Icon } from "./ui.js";
+import { updateMessageMedia } from "../lib/store.js";
+import { api } from "../lib/api.js";
+import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
+import { Icon, toast } from "./ui.js";
 
 // NOTE: prop is deliberately named `media`, NOT `ref` — React
 // intercepts a prop literally named `ref` as a forwarded-ref and
 // never delivers it to the component, so any read from it would
 // throw "Cannot read properties of undefined (reading 'blobId')".
 export function MediaView({
-  media, caption, isMine,
-}: { media: MediaRef; caption?: string; isMine?: boolean }) {
+  media, caption, isMine, messageId,
+}: { media: MediaRef; caption?: string; isMine?: boolean; messageId?: string }) {
   const [url, setUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -37,18 +40,7 @@ export function MediaView({
     return <video src={url} controls style={{ maxWidth: "100%", borderRadius: 12 }} />;
   }
   if (media.kind === "voice") return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <VoicePlayer url={url} durationMs={media.durationMs} isMine={isMine} />
-      {media.transcript && (
-        <div style={{
-          padding: "2px 8px 6px", fontSize: 12, fontStyle: "italic",
-          color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
-          lineHeight: 1.4,
-        }} title="On-device transcript">
-          “{media.transcript}”
-        </div>
-      )}
-    </div>
+    <VoiceCell url={url} media={media} isMine={isMine} messageId={messageId} />
   );
   if (media.kind === "audio") return <audio src={url} controls style={{ width: "100%" }} />;
   return <FileCard url={url} filename={media.filename ?? "file"} size={media.byteSize} />;
@@ -86,6 +78,77 @@ function FileCard({ url, filename, size }: { url: string; filename: string; size
         <div className="small">{formatSize(size)}</div>
       </div>
     </a>
+  );
+}
+
+// Voice-note cell: waveform player + on-demand Transcribe button +
+// persisted transcript text. Transcription is opt-in per-tap so
+// nothing downloads the ~40 MB Whisper model unless the user actually
+// asks for it.
+function VoiceCell({
+  url, media, isMine, messageId,
+}: { url: string; media: MediaRef; isMine?: boolean; messageId?: string }) {
+  const [transcript, setTranscript] = useState<string | undefined>(media.transcript);
+  const [busy, setBusy] = useState(false);
+
+  async function runTranscribe() {
+    if (!messageId) return;
+    setBusy(true);
+    toast("Preparing on-device transcription…", "info");
+    try {
+      // Pull the raw ciphertext bytes; decrypt locally with the ref's
+      // content key (never leaves the app). Then hand the plaintext
+      // audio to the on-device Whisper pipeline.
+      const enc = await api.downloadBlob(media.blobId);
+      const pt = secretBoxOpenBytes(b64.decode(media.contentKey), enc);
+      const { transcribeAudio } = await import("../lib/transcribe.js");
+      const { text } = await transcribeAudio(pt, {
+        onProgress: (p) => {
+          if (p.status === "progress" && typeof p.progress === "number") {
+            // First-time download can take a while — show a coarse hint.
+            if (p.progress < 1) toast(`Loading model… ${Math.round(p.progress * 100)}%`, "info");
+          }
+        },
+      });
+      if (!text) { toast("Couldn't hear anything to transcribe", "warn"); return; }
+      const opened = await updateMessageMedia(messageId, { transcript: text });
+      setTranscript(opened?.media?.transcript ?? text);
+      toast("Transcribed on-device", "ok");
+    } catch (e) {
+      toast(`Transcribe failed: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <VoicePlayer url={url} durationMs={media.durationMs} isMine={isMine} />
+      {transcript
+        ? (
+          <div style={{
+            padding: "2px 8px 6px", fontSize: 12, fontStyle: "italic",
+            color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
+            lineHeight: 1.4,
+          }} title="On-device transcript">
+            “{transcript}”
+          </div>
+        ) : messageId ? (
+          <button onClick={runTranscribe} disabled={busy}
+            style={{
+              alignSelf: "flex-start",
+              margin: "2px 6px 4px",
+              padding: "3px 10px", fontSize: 11, borderRadius: 999,
+              background: isMine ? "rgba(16,19,42,0.16)" : "rgba(255,255,255,0.06)",
+              color: isMine ? "rgba(16,19,42,0.9)" : "var(--text-dim)",
+              border: "1px solid " + (isMine ? "rgba(16,19,42,0.2)" : "var(--line-strong)"),
+              cursor: busy ? "wait" : "pointer",
+              display: "inline-flex", alignItems: "center", gap: 5,
+            }}
+            title="Transcribe on device — audio never leaves your phone"
+          >
+            <Icon.transcribe /> {busy ? "Transcribing…" : "Transcribe"}
+          </button>
+        ) : null}
+    </div>
   );
 }
 

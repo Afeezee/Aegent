@@ -27,7 +27,7 @@ import {
   save_contact_to_phone, schedule_backup, schedule_message,
   search_by_date_range, search_by_media_type, search_by_sender,
   search_exact, search_links_and_patterns, search_messages,
-  set_reminder, summarize_thread, tone_adjust, transcribe_voice,
+  set_reminder, summarize_thread, tone_adjust, transcribe_voice, describe_image,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -131,6 +131,18 @@ const TOOLS = [
     name: "transcribe_voice",
     description: "Run on-device Whisper against a voice-note message and return the transcript. Returns the cached transcript if one already exists. Warn the user that the first call may take up to a minute (model download).",
     input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
+  },
+  {
+    name: "describe_image",
+    description: "Look at an image message the user has in a conversation. Decrypts it locally and hands the bytes to your own vision so you can describe what's in it, read text off a receipt/document, or answer a specific question about it. Use this whenever the user asks about an image — e.g. 'what does that receipt say', 'read this document', 'what's in the photo Ada sent last week'. Requires the image's messageId (get it from search_messages first). Images larger than 4.5 MB are refused; ask the user to send a smaller copy.",
+    input_schema: {
+      type: "object",
+      properties: {
+        messageId: { type: "string" },
+        question: { type: "string", description: "Optional. What the user asked about the image — helps you focus." },
+      },
+      required: ["messageId"],
+    },
   },
 
   // Writes (all confirm-gated)
@@ -279,13 +291,57 @@ export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
     const toolUses = resp.content.filter(
       (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
     );
-    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }> = [];
+    // Anthropic tool_result.content accepts either a string or an
+    // array of content blocks (text + image). We use the array form
+    // whenever a tool wants to hand Claude an image (describe_image),
+    // and the plain string form otherwise.
+    type ToolResultBlock =
+      | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }
+      | {
+          type: "tool_result"; tool_use_id: string;
+          content: Array<
+            | { type: "text"; text: string }
+            | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+          >;
+          is_error?: boolean;
+        };
+    const toolResults: ToolResultBlock[] = [];
 
     for (const use of toolUses) {
       yield { kind: "tool_call", name: use.name, args: use.input };
       const { forClaude, event } = await runTool(use.name, use.input);
       if (event) yield event;
       yield { kind: "tool_result", name: use.name, value: forClaude };
+
+      // Vision fast-path: describe_image returns { _agent_image: {mime,base64}, ... }.
+      // Repackage as a tool_result with an image + text block so Claude
+      // can actually see the pixels.
+      const asObj = forClaude as { _agent_image?: { mime: string; base64: string }; caption?: string; senderName?: string; when?: number; question?: string; error?: string } | null;
+      if (asObj && asObj._agent_image) {
+        const meta = [
+          asObj.senderName ? `From ${asObj.senderName}` : null,
+          asObj.when ? `on ${new Date(asObj.when).toLocaleString()}` : null,
+          asObj.caption ? `Caption: ${asObj.caption}` : null,
+          asObj.question ? `User asked: ${asObj.question}` : null,
+        ].filter(Boolean).join(" · ");
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: use.id,
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: asObj._agent_image.mime,
+                data: asObj._agent_image.base64,
+              },
+            },
+            { type: "text", text: `Image contents above.${meta ? " " + meta : ""}` },
+          ],
+        });
+        continue;
+      }
+
       toolResults.push({
         type: "tool_result",
         tool_use_id: use.id,
@@ -341,6 +397,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
     if (name === "transcribe_voice")    return dataOnly(await transcribe_voice(args as never));
+    if (name === "describe_image")      return dataOnly(await describe_image(args as never));
     if (name === "tone_adjust")         return dataOnly(await tone_adjust(args as never));
     if (name === "mark_thread_read")    return dataOnly(await mark_thread_read(args as never));
 

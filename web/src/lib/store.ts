@@ -310,6 +310,35 @@ export async function saveMediaMessage(input: {
   return openMessage(stored);
 }
 
+// Merge a patch into a message's media ref. Used by voice-note
+// transcription (stores the transcript on the message so it survives
+// re-open and appears under the waveform). Also re-indexes the
+// message's search tokens so a `search_messages` hit can find voice
+// notes by their transcript.
+export async function updateMessageMedia(
+  msgId: string,
+  patch: Partial<MediaRef>,
+): Promise<OpenedMessage | null> {
+  const row = await requireDb().messages.get(msgId);
+  if (!row || !row.media) return null;
+  const nextMedia: MediaRef = { ...row.media, ...patch };
+  // Rebuild the search index text to include the transcript.
+  const opened = openMessage(row);
+  const searchText = [
+    opened.caption ?? "",
+    nextMedia.filename ?? "",
+    nextMedia.kind,
+    nextMedia.transcript ?? "",
+  ].filter(Boolean).join(" ");
+  await requireDb().messages.update(msgId, {
+    media: nextMedia,
+    tokens: tokenize(searchText).join(" "),
+    embedding: embed(searchText),
+  });
+  const fresh = await requireDb().messages.get(msgId);
+  return fresh ? openMessage(fresh) : null;
+}
+
 // Reactions arrive as tiny E2E messages; we merge them into the target.
 export async function applyReaction(targetId: string, userId: string, emoji: string) {
   const target = await requireDb().messages.get(targetId);

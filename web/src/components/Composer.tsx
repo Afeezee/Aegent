@@ -220,7 +220,7 @@ export function Composer({
         </motion.div>
       ) : (
         <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-          <input ref={fileRef} type="file" style={{ display: "none" }}
+          <input ref={fileRef} type="file" accept="*/*" style={{ display: "none" }}
             onChange={(e) => { const f = e.target.files?.[0]; if (f) { attach(f); e.target.value = ""; } }} />
           <Button variant="icon" onClick={() => fileRef.current?.click()} title="Attach"><Icon.paperclip /></Button>
           <textarea
