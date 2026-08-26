@@ -126,6 +126,11 @@ export function Settings({
         />
       </section>
 
+      <section style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>VOICE NOTES</div>
+        <VoiceTranscribeToggle />
+      </section>
+
       <section style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>SECURITY</div>
         <div className="glass" style={{ padding: 12, borderRadius: 12, fontSize: 13 }}>
@@ -162,6 +167,28 @@ export function Settings({
         </Button>
       </div>
     </Modal>
+  );
+}
+
+function VoiceTranscribeToggle() {
+  const [on, setOn] = useState<boolean>(() => localStorage.getItem("aegent.transcribeVoice") === "1");
+  function set(v: boolean) {
+    setOn(v);
+    try {
+      if (v) localStorage.setItem("aegent.transcribeVoice", "1");
+      else localStorage.removeItem("aegent.transcribeVoice");
+    } catch { /* ignore */ }
+    if (v) toast("Voice notes will transcribe on this device", "ok");
+  }
+  return (
+    <>
+      <Toggle
+        label="Transcribe voice notes on this device"
+        hint="Runs Whisper locally in this WebView — your audio never leaves the phone. First use downloads a ~40 MB model to your browser cache."
+        checked={on}
+        onChange={set}
+      />
+    </>
   );
 }
 

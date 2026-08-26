@@ -125,9 +125,37 @@ export function Composer({
     setSending(true);
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
+
+      // Best-effort on-device transcription — only runs if the user has
+      // opted in via Settings (avoids the ~40 MB Whisper download on
+      // first send for people who didn't ask for it). Never blocks the
+      // send: on error we still upload the audio, just without the
+      // transcript sidecar.
+      let transcript: string | undefined;
+      const wantsTranscript = localStorage.getItem("aegent.transcribeVoice") === "1";
+      if (wantsTranscript) {
+        toast("Transcribing…", "info");
+        try {
+          const { transcribeAudio } = await import("../lib/transcribe.js");
+          const { text } = await transcribeAudio(bytes, {
+            onProgress: (p) => {
+              if (p.status === "progress" && typeof p.progress === "number") {
+                if (Math.round(p.progress) % 25 === 0 && p.progress > 0) {
+                  toast(`Loading transcription model… ${Math.round(p.progress)}%`, "info");
+                }
+              }
+            },
+          });
+          if (text) transcript = text;
+        } catch (e) {
+          toast(`Transcription skipped: ${(e as Error).message}`, "warn");
+        }
+      }
+
       const ref = await uploadMedia({
         bytes, mime: blob.type, kind: "voice", durationMs, filename: "voice.webm",
       });
+      if (transcript) (ref as { transcript?: string }).transcript = transcript;
       const res = await sendMedia(peerId, isGroup, ref, undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Voice send failed: ${res.error}`, "error");
       else onClearReply();

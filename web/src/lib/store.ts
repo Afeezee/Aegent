@@ -48,6 +48,10 @@ export type MediaRef = {
   height?: number;
   filename?: string;
   contentKey: string; // base64
+  // Locally-produced Whisper transcript (voice notes only). Rides
+  // along inside the E2E-encrypted payload — server never sees it.
+  // Receivers get it without having to run Whisper themselves.
+  transcript?: string;
 };
 
 export type StoredMessage = {
@@ -290,7 +294,15 @@ export async function saveMediaMessage(input: {
     caption_ct: input.caption ? sealText(input.caption) : null,
     media: input.media,
   });
-  const searchText = [input.caption ?? "", input.media.filename ?? "", input.media.kind].join(" ");
+  // Voice-note transcripts (Whisper-produced, ride along in the E2E
+  // payload) contribute to the search index too, so "find that voice
+  // note about the invoice" resolves via `search_messages`.
+  const searchText = [
+    input.caption ?? "",
+    input.media.filename ?? "",
+    input.media.kind,
+    input.media.transcript ?? "",
+  ].join(" ");
   stored.tokens = tokenize(searchText).join(" ");
   stored.embedding = embed(searchText);
   await requireDb().messages.put(stored);

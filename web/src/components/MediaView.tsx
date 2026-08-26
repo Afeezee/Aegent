@@ -32,7 +32,20 @@ export function MediaView({
   if (ref.kind === "video") {
     return <video src={url} controls style={{ maxWidth: "100%", borderRadius: 12 }} />;
   }
-  if (ref.kind === "voice") return <VoicePlayer url={url} durationMs={ref.durationMs} isMine={isMine} />;
+  if (ref.kind === "voice") return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <VoicePlayer url={url} durationMs={ref.durationMs} isMine={isMine} />
+      {ref.transcript && (
+        <div style={{
+          padding: "2px 8px 6px", fontSize: 12, fontStyle: "italic",
+          color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
+          lineHeight: 1.4,
+        }} title="On-device transcript">
+          “{ref.transcript}”
+        </div>
+      )}
+    </div>
+  );
   if (ref.kind === "audio") return <audio src={url} controls style={{ width: "100%" }} />;
   return <FileCard url={url} filename={ref.filename ?? "file"} size={ref.byteSize} />;
 }

@@ -27,7 +27,7 @@ import {
   save_contact_to_phone, schedule_backup, schedule_message,
   search_by_date_range, search_by_media_type, search_by_sender,
   search_exact, search_links_and_patterns, search_messages,
-  set_reminder, summarize_thread, tone_adjust,
+  set_reminder, summarize_thread, tone_adjust, transcribe_voice,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -126,6 +126,11 @@ const TOOLS = [
     name: "calculate",
     description: "Evaluate an arithmetic expression safely (numbers, + - * / parens, %). No variables, no functions.",
     input_schema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] },
+  },
+  {
+    name: "transcribe_voice",
+    description: "Run on-device Whisper against a voice-note message and return the transcript. Returns the cached transcript if one already exists. Warn the user that the first call may take up to a minute (model download).",
+    input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
   },
 
   // Writes (all confirm-gated)
@@ -335,6 +340,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
+    if (name === "transcribe_voice")    return dataOnly(await transcribe_voice(args as never));
     if (name === "tone_adjust")         return dataOnly(await tone_adjust(args as never));
     if (name === "mark_thread_read")    return dataOnly(await mark_thread_read(args as never));
 

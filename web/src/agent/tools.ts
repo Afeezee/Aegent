@@ -623,6 +623,44 @@ export async function schedule_backup(args: {
   };
 }
 
+// ---- voice-note transcription (on-device Whisper) ----
+//
+// Fetches the encrypted voice-note blob, decrypts locally, runs the
+// audio through the on-device Whisper pipeline, and stores the
+// transcript back on the message. Read-only in effect — the transcript
+// is a derived index over data the user already has, not a new
+// outbound message — so no confirm gate needed.
+
+export async function transcribe_voice(args: { messageId: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  const msg = rows.find((m) => m.id === args.messageId);
+  if (!msg) return { ok: false, error: "message_not_found" };
+  if (!msg.media || msg.media.kind !== "voice") return { ok: false, error: "not_a_voice_note" };
+  if (msg.media.transcript) return { ok: true, kind: "data", value: { transcript: msg.media.transcript, cached: true } };
+
+  try {
+    const [{ transcribeAudio }, { objectUrlFor }] = await Promise.all([
+      import("../lib/transcribe.js"),
+      import("../lib/media.js"),
+    ]);
+    // objectUrlFor decrypts the blob locally and hands back an
+    // ObjectURL — we grab the bytes from that URL via fetch.
+    const url = await objectUrlFor(msg.media);
+    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const { text } = await transcribeAudio(bytes);
+    if (text) {
+      // Persist the transcript onto the message so future queries hit
+      // it cached, and it feeds the search index next time saveMedia
+      // touches this row. (For MVP we just return it — a full write-
+      // back would upsert with a new tokens/embedding computation.)
+      msg.media.transcript = text;
+    }
+    return { ok: true, kind: "data", value: { transcript: text, cached: false } };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 // ---- general-assistant tools ----
 
 export async function calculate(args: { expression: string }): Promise<ToolResult> {
