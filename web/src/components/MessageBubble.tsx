@@ -106,7 +106,7 @@ export function MessageBubble(p: BubbleProps) {
             <span style={{ opacity: 0.7, fontStyle: "italic" }}>Message deleted</span>
           ) : (
             <>
-              {msg.media && <MediaView ref={msg.media} caption={msg.caption ?? undefined} isMine={isMine} />}
+              {msg.media && <MediaView media={msg.media} caption={msg.caption ?? undefined} isMine={isMine} />}
               {body && !msg.media && <span>{body}</span>}
               {body && msg.media && (
                 <div style={{ padding: "8px 8px 4px", fontSize: 14 }}>{body}</div>

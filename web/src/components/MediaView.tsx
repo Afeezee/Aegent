@@ -7,47 +7,51 @@ import { objectUrlFor } from "../lib/media.js";
 import type { MediaRef } from "../lib/store.js";
 import { Icon } from "./ui.js";
 
+// NOTE: prop is deliberately named `media`, NOT `ref` — React
+// intercepts a prop literally named `ref` as a forwarded-ref and
+// never delivers it to the component, so any read from it would
+// throw "Cannot read properties of undefined (reading 'blobId')".
 export function MediaView({
-  ref, caption, isMine,
-}: { ref: MediaRef; caption?: string; isMine?: boolean }) {
+  media, caption, isMine,
+}: { media: MediaRef; caption?: string; isMine?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    objectUrlFor(ref).then((u) => { if (alive) setUrl(u); }).catch((e) => setErr(String(e)));
+    objectUrlFor(media).then((u) => { if (alive) setUrl(u); }).catch((e) => setErr(String(e)));
     return () => { alive = false; };
-  }, [ref.blobId]);
+  }, [media.blobId]);
 
   if (err) return <div style={{ padding: 8, color: "var(--danger)", fontSize: 12 }}>media failed: {err}</div>;
-  if (!url) return <MediaSkeleton kind={ref.kind} />;
+  if (!url) return <MediaSkeleton kind={media.kind} />;
 
-  if (ref.kind === "image") {
+  if (media.kind === "image") {
     return (
       <img src={url} alt={caption ?? ""} style={{
         maxWidth: "100%", maxHeight: 360, borderRadius: 12, display: "block",
       }} />
     );
   }
-  if (ref.kind === "video") {
+  if (media.kind === "video") {
     return <video src={url} controls style={{ maxWidth: "100%", borderRadius: 12 }} />;
   }
-  if (ref.kind === "voice") return (
+  if (media.kind === "voice") return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <VoicePlayer url={url} durationMs={ref.durationMs} isMine={isMine} />
-      {ref.transcript && (
+      <VoicePlayer url={url} durationMs={media.durationMs} isMine={isMine} />
+      {media.transcript && (
         <div style={{
           padding: "2px 8px 6px", fontSize: 12, fontStyle: "italic",
           color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
           lineHeight: 1.4,
         }} title="On-device transcript">
-          “{ref.transcript}”
+          “{media.transcript}”
         </div>
       )}
     </div>
   );
-  if (ref.kind === "audio") return <audio src={url} controls style={{ width: "100%" }} />;
-  return <FileCard url={url} filename={ref.filename ?? "file"} size={ref.byteSize} />;
+  if (media.kind === "audio") return <audio src={url} controls style={{ width: "100%" }} />;
+  return <FileCard url={url} filename={media.filename ?? "file"} size={media.byteSize} />;
 }
 
 function MediaSkeleton({ kind }: { kind: MediaRef["kind"] }) {

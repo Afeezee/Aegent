@@ -5,8 +5,7 @@
 import { useEffect, useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api } from "../lib/api.js";
-import { backupKey, currentSession, logout, refreshMe } from "../lib/session.js";
-import { forceNextAutoBackup, pushBackup } from "../lib/backup.js";
+import { currentSession, logout, refreshMe } from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 
 export function Settings({
@@ -19,13 +18,12 @@ export function Settings({
   const [phoneBusy, setPhoneBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [backupInfo, setBackupInfo] = useState<{ size: number; createdAt: number } | null>(null);
-  const [backupBusy, setBackupBusy] = useState(false);
-  const hasBackupKey = !!backupKey();
 
   useEffect(() => {
     if (!open) return;
+    // Just for the "last backup" line under the note — no button anymore.
     api.backupMeta().then(setBackupInfo).catch(() => setBackupInfo(null));
-  }, [open, backupBusy]);
+  }, [open]);
 
   async function toggle(key: "readReceipts" | "presence", v: boolean) {
     setBusy(true);
@@ -45,21 +43,6 @@ export function Settings({
       toast(phone.trim() ? "Phone number saved" : "Phone number removed", "ok");
     } catch (e) { toast(`Failed: ${(e as Error).message}`, "error"); }
     finally { setPhoneBusy(false); }
-  }
-
-  async function backupNow() {
-    const bk = backupKey();
-    if (!bk || !me) { toast("No backup key on this device", "warn"); return; }
-    setBackupBusy(true);
-    try {
-      forceNextAutoBackup();
-      const out = await pushBackup(bk, {
-        id: me.id, email: me.email, handle: me.handle,
-        displayName: me.displayName, publicKey: me.publicKey,
-      });
-      toast(`Backup uploaded (${(out.size / 1024).toFixed(0)} KB)`, "ok");
-    } catch (e) { toast(`Backup failed: ${(e as Error).message}`, "error"); }
-    finally { setBackupBusy(false); }
   }
 
   async function saveMyCard() {
@@ -143,22 +126,18 @@ export function Settings({
       <section style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>ENCRYPTED BACKUP</div>
         <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
-          <div style={{ fontSize: 13, marginBottom: 8 }}>
-            Your local messages + contacts + reminders are periodically
-            snapshotted, encrypted with a key that only your account can
-            derive, and uploaded to Aegent as opaque bytes. When you sign
-            in on a new device, this device's messages come back
-            automatically — no separate recovery step needed. Aegent's
-            servers cannot decrypt any of it.
+          <div style={{ fontSize: 13, marginBottom: backupInfo ? 8 : 0 }}>
+            Your messages are automatically backed up in the background,
+            encrypted with a key only your account can derive. Sign in on
+            any other device with the same email and password — your
+            chats come back on their own. Aegent's servers only ever hold
+            opaque bytes.
           </div>
-          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
-            {backupInfo
-              ? `Last backup: ${new Date(backupInfo.createdAt).toLocaleString()} · ${(backupInfo.size / 1024).toFixed(0)} KB`
-              : hasBackupKey ? "Automatic backups happen after messages you send. You can also force one now." : "Backup key will appear on next login."}
-          </div>
-          <Button size="small" variant="primary" onClick={backupNow} disabled={!hasBackupKey || backupBusy}>
-            {backupBusy ? "Uploading…" : "Back up now"}
-          </Button>
+          {backupInfo && (
+            <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+              Last backup: {new Date(backupInfo.createdAt).toLocaleString()} · {(backupInfo.size / 1024).toFixed(0)} KB
+            </div>
+          )}
         </div>
       </section>
 
