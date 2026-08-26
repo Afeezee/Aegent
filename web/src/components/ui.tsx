@@ -3,7 +3,39 @@
 // it belongs to a single design system rather than a stack of screens.
 
 import { AnimatePresence, motion, useReducedMotion, type MotionProps } from "framer-motion";
-import { forwardRef, useEffect, useState, type CSSProperties, type MouseEvent, type PropsWithChildren, type ReactNode } from "react";
+import { Component, forwardRef, useEffect, useState, type CSSProperties, type ErrorInfo, type MouseEvent, type PropsWithChildren, type ReactNode } from "react";
+
+// ---- error boundary ----
+// Wraps any subtree so an exception during render or in an effect
+// shows an inline retry card instead of nuking the whole page to a
+// blank white screen. Used around Chat, Agent, and Modal contents.
+
+type EBState = { error: Error | null };
+export class ErrorBoundary extends Component<PropsWithChildren<{ label?: string }>, EBState> {
+  state: EBState = { error: null };
+  static getDerivedStateFromError(error: Error): EBState { return { error }; }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    // Surface once in the console so USB-debugging picks it up. Never
+    // toasts — a toast would just re-render into whatever tore up.
+    console.error(`[ErrorBoundary${this.props.label ? ` ${this.props.label}` : ""}]`, error, info.componentStack);
+  }
+  reset = () => this.setState({ error: null });
+  render(): ReactNode {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={{ padding: 24, textAlign: "center", color: "var(--text-dim)" }}>
+        <div style={{ fontSize: 28, marginBottom: 8 }}>⚠️</div>
+        <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+          Something went sideways rendering this view.
+        </div>
+        <div className="small" style={{ marginBottom: 12, wordBreak: "break-word" }}>
+          {this.state.error.message}
+        </div>
+        <button className="btn small" onClick={this.reset}>Try again</button>
+      </div>
+    );
+  }
+}
 
 // ---- glass panels ----
 

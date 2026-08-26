@@ -13,7 +13,7 @@ import { emitTyping } from "../lib/socket.js";
 export type ReplyTarget = { id: string; preview: string; author: string };
 
 export function Composer({
-  peerId, isGroup, replyTo, onClearReply, editing, onCancelEdit, onEditCommit,
+  peerId, isGroup, replyTo, onClearReply, editing, onCancelEdit, onEditCommit, onSent,
 }: {
   peerId: string;
   isGroup: boolean;
@@ -22,6 +22,11 @@ export function Composer({
   editing: { id: string; body: string } | null;
   onCancelEdit: () => void;
   onEditCommit: (newBody: string) => Promise<void>;
+  // Fires whenever a message / media / voice note has landed in the
+  // local store, so the surrounding Chat can re-read and render it.
+  // Without this, outbound sends only appeared after the next
+  // inbound socket event bumped the shell's refreshKey.
+  onSent: () => void;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -53,14 +58,20 @@ export function Composer({
     const body = text.trim();
     if (!body || sending) return;
     setSending(true);
-    if (editing) {
-      await onEditCommit(body);
-    } else {
-      const res = await sendText(peerId, isGroup, body, replyTo ?? undefined);
-      if (!res.ok) toast(`Send failed: ${res.error}`, "error");
-      else onClearReply();
-    }
-    setText(""); setSending(false);
+    try {
+      if (editing) {
+        await onEditCommit(body);
+        onSent();
+      } else {
+        const res = await sendText(peerId, isGroup, body, replyTo ?? undefined);
+        if (!res.ok) { toast(`Send failed: ${res.error}`, "error"); return; }
+        onClearReply();
+        onSent();
+      }
+      setText("");
+    } catch (e) {
+      toast(`Send failed: ${(e as Error).message}`, "error");
+    } finally { setSending(false); }
   }
 
   // Server cap - 1 MB safety margin (server rejects > 20 MB with 413).
@@ -86,7 +97,7 @@ export function Composer({
       const ref = await uploadMedia(picked);
       const res = await sendMedia(peerId, isGroup, ref, text.trim() || undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Send failed: ${res.error}`, "error");
-      else { setText(""); onClearReply(); toast(`${label} sent`, "ok"); }
+      else { setText(""); onClearReply(); toast(`${label} sent`, "ok"); onSent(); }
     } catch (e) {
       // Common causes: OOM on very large files, network dropout mid-upload,
       // WebView blob API quirks on Android. Surface the actual reason.
@@ -158,7 +169,7 @@ export function Composer({
       if (transcript) (ref as { transcript?: string }).transcript = transcript;
       const res = await sendMedia(peerId, isGroup, ref, undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Voice send failed: ${res.error}`, "error");
-      else onClearReply();
+      else { onClearReply(); onSent(); }
     } catch (e) { toast(`Voice send failed: ${(e as Error).message}`, "error"); }
     finally { setSending(false); }
   }

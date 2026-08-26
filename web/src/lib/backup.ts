@@ -13,12 +13,7 @@
 // without touching the on-server bytes.
 
 import { apiUrl, loadToken } from "./api.js";
-import {
-  b64, backupKeyFromRecovery, secretBoxOpenBytes, secretBoxSealBytes,
-} from "./crypto.js";
-// Keep backupKeyFromRecovery reachable from callers importing it via
-// this module's re-export path (currently only in tests).
-export { backupKeyFromRecovery };
+import { secretBoxOpenBytes, secretBoxSealBytes } from "./crypto.js";
 import { retryFetch } from "./retry.js";
 import {
   everyMessage, listContacts, listGroups, listReminders,
@@ -118,25 +113,11 @@ export const _toWire = toWireInput;
 
 // ---- restore ----
 
-// Given a recovery phrase (as base32 or the derived entropy) and the
-// user's public key, pull the encrypted backup and decrypt it. Does
-// NOT touch the local store — caller decides what to do with the
-// payload (usually: open the local store with a fresh key, then
-// rehydrateInto()).
-export async function fetchAndDecryptBackup(
-  recoveryEntropy: Uint8Array,
-  publicKeyB64: string,
-): Promise<BackupPayload> {
-  const r = await retryFetch(apiUrl("/api/backup/by-pubkey"), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ publicKey: publicKeyB64 }),
-  });
-  if (!r.ok) throw new Error(r.status === 404 ? "no_backup" : `backup_fetch_${r.status}`);
-  const body = await r.json() as { backup: string; createdAt: number };
-  const ct = b64.decode(body.backup);
-  const key = backupKeyFromRecovery(recoveryEntropy);
-  const pt = secretBoxOpenBytes(key, ct);
+// Decrypt a raw backup ciphertext with the caller-supplied key.
+// Session.attemptCloudRestore() fetches the bytes via the authed
+// endpoint and hands them here.
+export function openBackupCiphertext(key: Uint8Array, ciphertext: Uint8Array): BackupPayload {
+  const pt = secretBoxOpenBytes(key, ciphertext);
   const payload = JSON.parse(new TextDecoder().decode(pt)) as BackupPayload;
   if (payload.v > SCHEMA_VERSION) throw new Error(`backup_from_newer_version_${payload.v}`);
   return payload;

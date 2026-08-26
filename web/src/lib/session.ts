@@ -6,17 +6,17 @@
 // so the components never have to know about crypto or envelopes.
 
 import {
-  b64, backupKeyFromRecovery, decryptFromPeer, deriveKey, encryptForPeer,
-  entropyFromPhrase, identityFromRecovery,
+  b64, backupKeyFromPrivate, decryptFromPeer, deriveKey, encryptForPeer,
+  identityFromRecovery,
   initCrypto, newKdfSalt, newRecoveryPhrase, secretBoxOpen, secretBoxSeal,
 } from "./crypto.js";
-import { api, setToken, type MeApi, type PublicUser } from "./api.js";
+import { api, apiUrl, loadToken, setToken, type MeApi, type PublicUser } from "./api.js";
 import {
   applyDelete, applyEdit, applyReaction, closeStore, getContact, getGroup,
   markDelivered, markRead, openStore, saveMediaMessage, saveTextMessage,
   upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
-import { fetchAndDecryptBackup, rehydrateInto, scheduleAutoBackup } from "./backup.js";
+import { scheduleAutoBackup } from "./backup.js";
 import { connectSocket, disconnectSocket, sendCipher } from "./socket.js";
 import { newMsgId, packPayload, unpackPayload, type Payload } from "./protocol.js";
 
@@ -111,70 +111,9 @@ export async function register(input: {
 
   const me = await api.me();
   CURRENT = { user: me, privateKey: id.privateKey, publicKey: id.publicKey };
-  // Derive the backup key from the same recovery entropy — separate
-  // KDF context so it's cryptographically independent from the
-  // identity secret. Persist so pushBackup can use it later.
-  const bk = backupKeyFromRecovery(entropy);
+  const bk = backupKeyFromPrivate(id.privateKey);
   persistKeys(id.privateKey, storeKey, bk);
   return { session: CURRENT, recoveryPhrase: phrase };
-}
-
-// Recover the backup key from a fresh recovery phrase — used by the
-// "restore on this device" flow when we don't have the cached one.
-export function backupKeyFromPhrase(phrase: string): Uint8Array {
-  return backupKeyFromRecovery(entropyFromPhrase(phrase));
-}
-
-// Restore-on-new-device orchestration:
-//   1. Derive identity keypair + backup key from the recovery phrase.
-//   2. Fetch the encrypted backup by public key (server has no key).
-//   3. Decrypt; extract self.email so the UI can prompt for password.
-//   4. Return a "half-restored" state — the caller then runs login()
-//      with the email + password to establish a session and finish
-//      the rehydrate() with the fresh local-store key.
-export type PendingRestore = {
-  email: string;
-  handle: string;
-  displayName: string;
-  backup: import("./backup.js").BackupPayload;
-  privateKey: Uint8Array;
-  publicKey: Uint8Array;
-  backupKey: Uint8Array;
-};
-
-export async function beginRestoreFromRecovery(phrase: string): Promise<PendingRestore> {
-  await initCrypto();
-  const entropy = entropyFromPhrase(phrase.trim());
-  const id = identityFromRecovery(entropy);
-  const backupKey = backupKeyFromRecovery(entropy);
-  const backup = await fetchAndDecryptBackup(entropy, b64.encode(id.publicKey));
-  return {
-    email: backup.self.email,
-    handle: backup.self.handle,
-    displayName: backup.self.displayName,
-    backup,
-    privateKey: id.privateKey,
-    publicKey: id.publicKey,
-    backupKey,
-  };
-}
-
-// After beginRestoreFromRecovery returns, the caller logs in with the
-// user's password to establish a live session (JWT + open socket). This
-// function finishes the job: opens the local store with the current
-// login's storeKey, rehydrates from the decrypted backup, and persists
-// the phrase-derived backup key so future auto-backups don't need the
-// phrase again.
-export async function finishRestore(pending: PendingRestore): Promise<void> {
-  if (!CURRENT) throw new Error("no_session");
-  await rehydrateInto(pending.backup, {
-    id: CURRENT.user.id,
-    storeKey: (loadPersistedKeys()?.storeKey)!,
-  });
-  // Persist the phrase-derived backup key so subsequent scheduleAutoBackup
-  // calls have something to encrypt with — the phrase itself never
-  // touches disk.
-  persistKeys(pending.privateKey, (loadPersistedKeys()?.storeKey)!, pending.backupKey);
 }
 
 // Called after every successful send to keep the cloud backup fresh.
@@ -203,8 +142,40 @@ export async function login(input: { email: string; password: string }): Promise
   const me = await api.me();
   openStore(me.id, storeKey);
   CURRENT = { user: me, privateKey, publicKey: b64.decode(me.publicKey) };
-  persistKeys(privateKey, storeKey);
+  // Backup key is deterministic from the private key, so this login
+  // on a brand-new device gets the same key that produced any prior
+  // backups on the account — no separate recovery-code prompt needed.
+  const bk = backupKeyFromPrivate(privateKey);
+  persistKeys(privateKey, storeKey, bk);
+  // Best-effort cloud-restore: if this account has a backup on the
+  // relay and our local store is empty (or missing content), pull
+  // and rehydrate. Runs in the background — login returns
+  // immediately either way.
+  attemptCloudRestore(bk, me.id, storeKey).catch(() => { /* silent */ });
   return CURRENT;
+}
+
+// Fetch the encrypted backup with the JWT already established by
+// login(), decrypt with the private-key-derived backup key, and merge
+// missing messages/contacts into the local store. Idempotent — running
+// twice does nothing the second time.
+async function attemptCloudRestore(bk: Uint8Array, userId: string, storeKey: Uint8Array): Promise<void> {
+  const t = loadToken();
+  if (!t) return;
+  const r = await fetch(apiUrl("/api/backup"), {
+    headers: { authorization: `Bearer ${t}` },
+  });
+  if (!r.ok) return; // 404 = no backup yet, treat as "nothing to restore"
+  const ct = new Uint8Array(await r.arrayBuffer());
+  try {
+    const { openBackupCiphertext, rehydrateInto } = await import("./backup.js");
+    const payload = openBackupCiphertext(bk, ct);
+    await rehydrateInto(payload, { id: userId, storeKey });
+  } catch (e) {
+    // Wrong key (old v1 backup encrypted with recovery-phrase key), or
+    // corrupted bytes. Silent — user still has their live session.
+    console.warn("[session] cloud restore skipped:", (e as Error).message);
+  }
 }
 
 // Attempt a silent session restore at boot: if we have a JWT and both

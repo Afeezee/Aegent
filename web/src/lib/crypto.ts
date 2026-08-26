@@ -187,9 +187,25 @@ export function identityFromRecovery(entropy: Uint8Array): IdentityKeys {
   return { publicKey: kp.publicKey, privateKey: kp.secretKey };
 }
 
-// Backup encryption key, deterministic from the recovery phrase. Distinct
-// from the identity secret (different SHA-512 context prefix) so a
-// compromise of one doesn't reveal the other. 32 bytes for secretbox.
+// Backup encryption key, deterministic from the identity private key.
+// The private key is available at register AND at login (unwrapped from
+// wrapped_priv with the password), so this scheme lets *any* login on
+// *any* device automatically re-derive the same backup key — no
+// recovery-phrase prompt needed for restore.
+//
+// Uses a distinct KDF context prefix so a compromise of the backup key
+// doesn't reveal the private key or the message-encryption key.
+export function backupKeyFromPrivate(privateKey: Uint8Array): Uint8Array {
+  const ctx = new TextEncoder().encode("aegent:backup:v2");
+  const material = new Uint8Array(ctx.length + privateKey.length);
+  material.set(ctx, 0);
+  material.set(privateKey, ctx.length);
+  return nacl.hash(material).slice(0, 32);
+}
+
+// Kept for the small number of installs that ran the v1 phrase-derived
+// path. New installs won't produce v1 backups; if we see one at restore
+// time we'd need to fall back to this. Callers should try both.
 export function backupKeyFromRecovery(entropy: Uint8Array): Uint8Array {
   const ctx = new TextEncoder().encode("aegent:backup:v1");
   const material = new Uint8Array(ctx.length + entropy.length);

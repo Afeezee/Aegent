@@ -145,15 +145,16 @@ export function Settings({
         <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
           <div style={{ fontSize: 13, marginBottom: 8 }}>
             Your local messages + contacts + reminders are periodically
-            snapshotted, encrypted with a key derived from your recovery
-            code, and uploaded to Aegent as opaque bytes. On a new device
-            you restore by entering the same recovery code — Aegent's
+            snapshotted, encrypted with a key that only your account can
+            derive, and uploaded to Aegent as opaque bytes. When you sign
+            in on a new device, this device's messages come back
+            automatically — no separate recovery step needed. Aegent's
             servers cannot decrypt any of it.
           </div>
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
             {backupInfo
               ? `Last backup: ${new Date(backupInfo.createdAt).toLocaleString()} · ${(backupInfo.size / 1024).toFixed(0)} KB`
-              : hasBackupKey ? "No backup uploaded yet." : "No backup key on this device — restore from recovery code to enable."}
+              : hasBackupKey ? "Automatic backups happen after messages you send. You can also force one now." : "Backup key will appear on next login."}
           </div>
           <Button size="small" variant="primary" onClick={backupNow} disabled={!hasBackupKey || backupBusy}>
             {backupBusy ? "Uploading…" : "Back up now"}

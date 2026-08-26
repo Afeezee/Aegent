@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Avatar, Button, Glass, Icon } from "../components/ui.js";
+import { Avatar, Button, ErrorBoundary, Glass, Icon } from "../components/ui.js";
 import { Chat } from "../components/Chat.js";
 import { ThreadList } from "../components/ThreadList.js";
 import { ComposeOverlay } from "../components/ComposeOverlay.js";
@@ -201,12 +201,15 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                 transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                 style={{ height: "100%", display: "flex", flexDirection: "column" }}
               >
-                <Chat
-                  thread={thread}
-                  refreshKey={refresh}
-                  onOpenForward={(m) => setForwardMsg(m)}
-                  onBack={bp === "sm" ? () => setThread(null) : undefined}
-                />
+                <ErrorBoundary label="Chat">
+                  <Chat
+                    thread={thread}
+                    refreshKey={refresh}
+                    onOpenForward={(m) => setForwardMsg(m)}
+                    onBack={bp === "sm" ? () => setThread(null) : undefined}
+                    onSent={() => setRefresh((k) => k + 1)}
+                  />
+                </ErrorBoundary>
               </motion.div>
             ) : (
               <EmptyRight onCompose={() => setCompose(true)} />

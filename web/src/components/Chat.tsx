@@ -17,13 +17,16 @@ import {
 } from "../lib/session.js";
 
 export function Chat({
-  thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey,
+  thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
   onOpenGroupInfo?: () => void;
   onBack?: () => void;
   refreshKey: number;
+  // Bubbled from the Composer to the shell so a fresh outbound send
+  // triggers the thread re-read that renders it.
+  onSent: () => void;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -34,30 +37,43 @@ export function Chat({
   const streamRef = useRef<HTMLDivElement>(null);
   const me = myId();
 
-  // Load thread on peer change / on refresh.
+  // Load thread on peer change / on refresh. Every step is swaddled
+  // in try/catch so a single bad DB row or missing contact can't
+  // leave the pane in a half-mounted / blank state.
   useEffect(() => {
     let alive = true;
     (async () => {
-      const rows = await threadWith(thread.peerId, 800);
-      if (!alive) return;
-      setMsgs(rows);
-      queueMicrotask(() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight }));
+      try {
+        const rows = await threadWith(thread.peerId, 800);
+        if (!alive) return;
+        setMsgs(rows);
+        queueMicrotask(() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight }));
+      } catch (e) {
+        console.warn("[Chat] threadWith failed:", e);
+        if (alive) setMsgs([]); // render empty state rather than blanking
+      }
     })();
     (async () => {
-      if (thread.isGroup) {
-        const g = await getGroup(thread.peerId);
-        setPeerMeta({ group: g });
-        const map = new Map<string, string>();
-        for (const uid of g?.memberIds ?? []) {
-          if (uid === me) { map.set(uid, "You"); continue; }
-          const c = await getContact(uid);
-          map.set(uid, c?.displayName ?? "Unknown");
+      try {
+        if (thread.isGroup) {
+          const g = await getGroup(thread.peerId);
+          if (!alive) return;
+          setPeerMeta({ group: g });
+          const map = new Map<string, string>();
+          for (const uid of g?.memberIds ?? []) {
+            if (uid === me) { map.set(uid, "You"); continue; }
+            const c = await getContact(uid);
+            map.set(uid, c?.displayName ?? "Unknown");
+          }
+          if (alive) setPeers(map);
+        } else {
+          const c = await getContact(thread.peerId);
+          if (!alive) return;
+          setPeerMeta({ contact: c });
+          setPeers(new Map([[thread.peerId, c?.displayName ?? "?"], [me, "You"]]));
         }
-        setPeers(map);
-      } else {
-        const c = await getContact(thread.peerId);
-        setPeerMeta({ contact: c });
-        setPeers(new Map([[thread.peerId, c?.displayName ?? "?"], [me, "You"]]));
+      } catch (e) {
+        console.warn("[Chat] peer resolve failed:", e);
       }
     })();
     return () => { alive = false; };
@@ -154,16 +170,21 @@ export function Chat({
         {msgs.length === 0 ? (
           <EmptyChat title={thread.title} isGroup={thread.isGroup} />
         ) : (
-          renderWithDayBreaks(msgs).map((entry, i) => {
+          renderWithDayBreaks(msgs).map((entry) => {
             if (entry.kind === "day") return (
               <div key={`day-${entry.at}`} style={{ textAlign: "center", margin: "10px 0" }}>
                 <span className="tag">{formatDay(entry.at)}</span>
               </div>
             );
             const m = entry.msg;
-            const prev = msgs[i - 1];
+            // Look up the actual previous *message* (not the previous
+            // grouped entry, which might be a day separator) so
+            // consecutive-sender collapsing is correct.
+            const j = msgs.indexOf(m);
+            const prev = j > 0 ? msgs[j - 1] : undefined;
             const isMine = m.senderId === me;
-            const consecutive = prev && prev.senderId === m.senderId
+            const consecutive = !!prev
+              && prev.senderId === m.senderId
               && Math.abs(m.createdAt - prev.createdAt) < 6 * 60_000;
             return (
               <MessageBubble
@@ -210,6 +231,7 @@ export function Chat({
         editing={editing}
         onCancelEdit={() => setEditing(null)}
         onEditCommit={commitEdit}
+        onSent={onSent}
       />
     </div>
   );
