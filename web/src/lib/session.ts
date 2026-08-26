@@ -6,7 +6,8 @@
 // so the components never have to know about crypto or envelopes.
 
 import {
-  b64, decryptFromPeer, deriveKey, encryptForPeer, identityFromRecovery,
+  b64, backupKeyFromRecovery, decryptFromPeer, deriveKey, encryptForPeer,
+  entropyFromPhrase, identityFromRecovery,
   initCrypto, newKdfSalt, newRecoveryPhrase, secretBoxOpen, secretBoxSeal,
 } from "./crypto.js";
 import { api, setToken, type MeApi, type PublicUser } from "./api.js";
@@ -15,6 +16,7 @@ import {
   markDelivered, markRead, openStore, saveMediaMessage, saveTextMessage,
   upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
+import { fetchAndDecryptBackup, rehydrateInto, scheduleAutoBackup } from "./backup.js";
 import { connectSocket, disconnectSocket, sendCipher } from "./socket.js";
 import { newMsgId, packPayload, unpackPayload, type Payload } from "./protocol.js";
 
@@ -41,25 +43,41 @@ export function currentSession(): Session | null { return CURRENT; }
 
 const KEY_PRIV = "aegent.priv";
 const KEY_STORE = "aegent.storekey";
+const KEY_BACKUP = "aegent.backupkey";
 
-function persistKeys(privateKey: Uint8Array, storeKey: Uint8Array) {
+let CACHED_BACKUP_KEY: Uint8Array | null = null;
+export function backupKey(): Uint8Array | null { return CACHED_BACKUP_KEY; }
+
+function persistKeys(privateKey: Uint8Array, storeKey: Uint8Array, backupKey?: Uint8Array | null) {
   try {
     localStorage.setItem(KEY_PRIV, b64.encode(privateKey));
     localStorage.setItem(KEY_STORE, b64.encode(storeKey));
+    if (backupKey) {
+      localStorage.setItem(KEY_BACKUP, b64.encode(backupKey));
+      CACHED_BACKUP_KEY = backupKey;
+    }
   } catch { /* private-browsing / storage-full — silently degrade */ }
 }
-function loadPersistedKeys(): { privateKey: Uint8Array; storeKey: Uint8Array } | null {
+function loadPersistedKeys(): { privateKey: Uint8Array; storeKey: Uint8Array; backupKey?: Uint8Array } | null {
   try {
     const p = localStorage.getItem(KEY_PRIV);
     const s = localStorage.getItem(KEY_STORE);
     if (!p || !s) return null;
-    return { privateKey: b64.decode(p), storeKey: b64.decode(s) };
+    const bk = localStorage.getItem(KEY_BACKUP);
+    if (bk) CACHED_BACKUP_KEY = b64.decode(bk);
+    return {
+      privateKey: b64.decode(p),
+      storeKey: b64.decode(s),
+      backupKey: bk ? b64.decode(bk) : undefined,
+    };
   } catch { return null; }
 }
 function clearPersistedKeys() {
   try {
     localStorage.removeItem(KEY_PRIV);
     localStorage.removeItem(KEY_STORE);
+    localStorage.removeItem(KEY_BACKUP);
+    CACHED_BACKUP_KEY = null;
   } catch { /* ignore */ }
 }
 
@@ -93,8 +111,82 @@ export async function register(input: {
 
   const me = await api.me();
   CURRENT = { user: me, privateKey: id.privateKey, publicKey: id.publicKey };
-  persistKeys(id.privateKey, storeKey);
+  // Derive the backup key from the same recovery entropy — separate
+  // KDF context so it's cryptographically independent from the
+  // identity secret. Persist so pushBackup can use it later.
+  const bk = backupKeyFromRecovery(entropy);
+  persistKeys(id.privateKey, storeKey, bk);
   return { session: CURRENT, recoveryPhrase: phrase };
+}
+
+// Recover the backup key from a fresh recovery phrase — used by the
+// "restore on this device" flow when we don't have the cached one.
+export function backupKeyFromPhrase(phrase: string): Uint8Array {
+  return backupKeyFromRecovery(entropyFromPhrase(phrase));
+}
+
+// Restore-on-new-device orchestration:
+//   1. Derive identity keypair + backup key from the recovery phrase.
+//   2. Fetch the encrypted backup by public key (server has no key).
+//   3. Decrypt; extract self.email so the UI can prompt for password.
+//   4. Return a "half-restored" state — the caller then runs login()
+//      with the email + password to establish a session and finish
+//      the rehydrate() with the fresh local-store key.
+export type PendingRestore = {
+  email: string;
+  handle: string;
+  displayName: string;
+  backup: import("./backup.js").BackupPayload;
+  privateKey: Uint8Array;
+  publicKey: Uint8Array;
+  backupKey: Uint8Array;
+};
+
+export async function beginRestoreFromRecovery(phrase: string): Promise<PendingRestore> {
+  await initCrypto();
+  const entropy = entropyFromPhrase(phrase.trim());
+  const id = identityFromRecovery(entropy);
+  const backupKey = backupKeyFromRecovery(entropy);
+  const backup = await fetchAndDecryptBackup(entropy, b64.encode(id.publicKey));
+  return {
+    email: backup.self.email,
+    handle: backup.self.handle,
+    displayName: backup.self.displayName,
+    backup,
+    privateKey: id.privateKey,
+    publicKey: id.publicKey,
+    backupKey,
+  };
+}
+
+// After beginRestoreFromRecovery returns, the caller logs in with the
+// user's password to establish a live session (JWT + open socket). This
+// function finishes the job: opens the local store with the current
+// login's storeKey, rehydrates from the decrypted backup, and persists
+// the phrase-derived backup key so future auto-backups don't need the
+// phrase again.
+export async function finishRestore(pending: PendingRestore): Promise<void> {
+  if (!CURRENT) throw new Error("no_session");
+  await rehydrateInto(pending.backup, {
+    id: CURRENT.user.id,
+    storeKey: (loadPersistedKeys()?.storeKey)!,
+  });
+  // Persist the phrase-derived backup key so subsequent scheduleAutoBackup
+  // calls have something to encrypt with — the phrase itself never
+  // touches disk.
+  persistKeys(pending.privateKey, (loadPersistedKeys()?.storeKey)!, pending.backupKey);
+}
+
+// Called after every successful send to keep the cloud backup fresh.
+// Throttled inside scheduleAutoBackup; safe to spam.
+export function tickAutoBackup(): void {
+  const bk = backupKey();
+  const me = CURRENT?.user;
+  if (!bk || !me) return;
+  scheduleAutoBackup(bk, {
+    id: me.id, email: me.email, handle: me.handle,
+    displayName: me.displayName, publicKey: me.publicKey,
+  });
 }
 
 export async function login(input: { email: string; password: string }): Promise<Session> {
@@ -209,6 +301,7 @@ export async function sendText(
     body,
     replyTo,
   });
+  tickAutoBackup();
   return { ok: true };
 }
 
@@ -230,6 +323,7 @@ export async function sendMedia(
     createdAt: Date.now(),
     caption, media, replyTo,
   });
+  tickAutoBackup();
   return { ok: true };
 }
 

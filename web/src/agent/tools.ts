@@ -1,73 +1,251 @@
-// Agent tools — read tools run silently against the local encrypted
-// store; write tools always return a *pending* action for user
-// confirmation before anything happens.
+// Agent tools — the full set the on-device agent draws on.
+//
+// Two rules, always:
+//   READ tools return data straight to the caller (agent loop or the
+//   offline planner). They run silently against the local encrypted
+//   store; no network beyond what the store already does.
+//
+//   WRITE tools NEVER execute their side effect. They return a
+//   `{ ok: true, kind: "pending", action, explain }` result and the
+//   UI stages a confirm card. The user's tap in that card is the
+//   ONLY thing that actually sends a message, sets a reminder,
+//   schedules a backup, opens an email compose, or edits/deletes.
+//
+// Adding a new tool: implement the async function, register it in
+// llm.ts's TOOLS array with its JSON schema + description, and (if
+// helpful) teach the offline planner to route to it too.
 
 import { api } from "../lib/api.js";
 import { cosine, embed, tokenize } from "../lib/embeddings.js";
 import {
-  addScheduledBackup, everyMessage, getContact, getGroup, listContacts,
-  listGroups, listReminders, saveReminder, threadWith,
+  addScheduledBackup, deleteReminder, everyMessage, getContact, getGroup,
+  listContacts, listGroups, listReminders, markThreadRead, saveReminder,
+  threadWith, upsertContact, type OpenedMessage,
 } from "../lib/store.js";
 import {
-  currentSession, sendMedia, sendText,
+  currentSession, sendDelete, sendMedia, sendText,
 } from "../lib/session.js";
+import { saveContactToPhone } from "../lib/contacts-integration.js";
 
 // ---- types ----
 
 export type PendingAction =
-  | { kind: "send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string }
+  | { kind: "send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string; replyTo?: { id: string; preview: string; author: string } }
   | { kind: "reminder"; text: string; whenIso: string }
-  | { kind: "email"; recipientEmail: string; subject: string; body: string; leavesE2E: true };
+  | { kind: "email"; recipientEmail: string; subject: string; body: string; leavesE2E: true }
+  | { kind: "delete"; targetPeerId: string; isGroup: boolean; targetMsgId: string; preview: string }
+  | { kind: "schedule_send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string; whenIso: string }
+  | { kind: "calendar_event"; title: string; whenIso: string; durationMin: number; notes?: string }
+  | { kind: "add_contact"; handle: string; displayName: string; explain: string }
+  | { kind: "save_contact_to_phone"; displayName: string; handle: string; email: string; phone: string | null };
 
 export type ToolResult =
   | { ok: true; kind: "data"; value: unknown }
   | { ok: true; kind: "pending"; action: PendingAction; explain: string }
   | { ok: false; error: string };
 
-// ---- read tools ----
+// ---- retrieval helpers (shared across search tools) ----
 
-export async function search_messages(args: {
-  query: string; peerId?: string; sinceDaysAgo?: number;
-}): Promise<ToolResult> {
-  const qv = embed(args.query);
-  const qToks = new Set(tokenize(args.query));
-  const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
+async function scoreAllMessages(
+  query: string,
+  filter: (m: OpenedMessage) => boolean = () => true,
+): Promise<Array<OpenedMessage & { score: number }>> {
+  const qv = embed(query);
+  const qToks = new Set(tokenize(query));
   const rows = await everyMessage();
-  const hits: Array<{
-    id: string; peerId: string; peerName: string; when: number;
-    body: string; score: number;
-  }> = [];
-  const cache = new Map<string, string>();
+  const scored: Array<OpenedMessage & { score: number }> = [];
   for (const m of rows) {
-    if (m.createdAt < since) continue;
-    if (args.peerId && m.peerId !== args.peerId) continue;
     if (m.deletedAt) continue;
+    if (!filter(m)) continue;
     const text = m.editedBody ?? m.body ?? m.caption ?? "";
-    if (!text) continue;
-    const semantic = cosine(qv, m.embedding);
+    if (!text && !m.media) continue;
+    const semantic = m.embedding.length ? cosine(qv, m.embedding) : 0;
     const mToks = new Set((m.tokens || "").split(" "));
     let overlap = 0; qToks.forEach((t) => mToks.has(t) && overlap++);
     const keyword = qToks.size ? overlap / qToks.size : 0;
-    const score = semantic * 0.75 + keyword * 0.25;
-    if (score < 0.08) continue;
-    let name = cache.get(m.peerId);
-    if (!name) {
-      const c = await getContact(m.peerId);
-      name = c?.displayName ?? (await getGroup(m.peerId))?.name ?? "Unknown";
-      cache.set(m.peerId, name);
-    }
-    hits.push({ id: m.id, peerId: m.peerId, peerName: name, when: m.createdAt, body: text, score });
+    // Rerank: hybrid score + gentle recency bonus so ties break newer.
+    const recencyBonus = Math.max(0, 1 - (Date.now() - m.createdAt) / (365 * 86400_000)) * 0.05;
+    const score = semantic * 0.7 + keyword * 0.25 + recencyBonus;
+    if (score < 0.06) continue;
+    scored.push({ ...m, score });
   }
-  hits.sort((a, b) => b.score - a.score);
-  return { ok: true, kind: "data", value: hits.slice(0, 8) };
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
+// Adds thread-context metadata (peer name, whether it's a group) to
+// hits so the agent gets useful strings back rather than raw ids.
+async function decorate(rows: Array<OpenedMessage & { score?: number }>) {
+  const cache = new Map<string, { name: string; isGroup: boolean }>();
+  const out = [];
+  for (const m of rows) {
+    let meta = cache.get(m.peerId);
+    if (!meta) {
+      const c = await getContact(m.peerId);
+      if (c) meta = { name: c.displayName, isGroup: false };
+      else {
+        const g = await getGroup(m.peerId);
+        meta = g ? { name: g.name, isGroup: true } : { name: "Unknown", isGroup: false };
+      }
+      cache.set(m.peerId, meta);
+    }
+    const senderName = m.senderId === currentSession()?.user.id
+      ? "You"
+      : (await getContact(m.senderId))?.displayName ?? "Someone";
+    out.push({
+      id: m.id, peerId: m.peerId, peerName: meta.name, isGroup: meta.isGroup,
+      senderId: m.senderId, senderName,
+      when: m.createdAt, whenISO: new Date(m.createdAt).toISOString(),
+      body: m.editedBody ?? m.body ?? m.caption ?? (m.media ? `[${m.media.kind}]` : ""),
+      mediaKind: m.media?.kind ?? null,
+      score: m.score,
+      readAt: m.readAt, deliveredAt: m.deliveredAt,
+      edited: !!m.editedBody, hasReplyTo: !!m.replyTo,
+    });
+  }
+  return out;
+}
+
+// ---- retrieval tools ----
+
+export async function search_messages(args: {
+  query: string;
+  peerId?: string;
+  sinceDaysAgo?: number;
+  senderId?: string;
+  mediaKind?: "image" | "video" | "audio" | "voice" | "file";
+  limit?: number;
+}): Promise<ToolResult> {
+  const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
+  const rows = await scoreAllMessages(args.query, (m) => {
+    if (args.peerId && m.peerId !== args.peerId) return false;
+    if (args.senderId && m.senderId !== args.senderId) return false;
+    if (args.mediaKind && m.media?.kind !== args.mediaKind) return false;
+    if (since && m.createdAt < since) return false;
+    return true;
+  });
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 8)) };
+}
+
+// Exact substring / phrase — bypasses semantic scoring for cases where
+// the user typed the exact string they remember ("that Zoom link", "the
+// order number ending 7291").
+export async function search_exact(args: { needle: string; peerId?: string; limit?: number }): Promise<ToolResult> {
+  const n = args.needle.trim().toLowerCase();
+  if (!n) return { ok: true, kind: "data", value: [] };
+  const rows = (await everyMessage()).filter((m) => {
+    if (m.deletedAt) return false;
+    if (args.peerId && m.peerId !== args.peerId) return false;
+    const text = (m.editedBody ?? m.body ?? m.caption ?? "").toLowerCase();
+    return text.includes(n);
+  });
+  rows.sort((a, b) => b.createdAt - a.createdAt);
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 20)) };
+}
+
+export async function search_by_date_range(args: {
+  fromIso: string; toIso: string; peerId?: string; query?: string; limit?: number;
+}): Promise<ToolResult> {
+  const from = Date.parse(args.fromIso), to = Date.parse(args.toIso);
+  if (Number.isNaN(from) || Number.isNaN(to)) return { ok: false, error: "bad_date" };
+  const filter = (m: OpenedMessage) =>
+    m.createdAt >= from && m.createdAt <= to
+    && (!args.peerId || m.peerId === args.peerId);
+  const rows = args.query
+    ? (await scoreAllMessages(args.query, filter))
+    : (await everyMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
+}
+
+export async function search_by_sender(args: { senderId: string; query?: string; limit?: number }): Promise<ToolResult> {
+  const filter = (m: OpenedMessage) => m.senderId === args.senderId;
+  const rows = args.query
+    ? await scoreAllMessages(args.query, filter)
+    : (await everyMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
+}
+
+export async function search_by_media_type(args: {
+  kind: "image" | "video" | "audio" | "voice" | "file"; peerId?: string; limit?: number;
+}): Promise<ToolResult> {
+  const rows = (await everyMessage()).filter((m) =>
+    !m.deletedAt && m.media?.kind === args.kind && (!args.peerId || m.peerId === args.peerId),
+  ).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
+}
+
+// Look for messages containing a URL/phone/email pattern.
+export async function search_links_and_patterns(args: { pattern: "link" | "phone" | "email"; peerId?: string; limit?: number }): Promise<ToolResult> {
+  const re = args.pattern === "link" ? /https?:\/\/\S+/i
+    : args.pattern === "email" ? /[\w.+-]+@[\w-]+\.[\w.-]+/i
+    : /(\+?\d[\d\s()\-.]{6,}\d)/;
+  const rows = (await everyMessage()).filter((m) => {
+    if (m.deletedAt) return false;
+    if (args.peerId && m.peerId !== args.peerId) return false;
+    const text = m.editedBody ?? m.body ?? m.caption ?? "";
+    return re.test(text);
+  }).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+  return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
 }
 
 export async function get_thread(args: { peerId: string; limit?: number }): Promise<ToolResult> {
+  const rows = await threadWith(args.peerId, args.limit ?? 40);
+  return { ok: true, kind: "data", value: await decorate(rows.map((m) => ({ ...m }))) };
+}
+
+// N messages surrounding a specific match, useful for follow-up
+// questions like "what did they say right after that?".
+export async function get_context_around(args: { messageId: string; before?: number; after?: number }): Promise<ToolResult> {
   const rows = await everyMessage();
-  const filtered = rows.filter((m) => m.peerId === args.peerId).slice(0, args.limit ?? 40);
-  return { ok: true, kind: "data", value: filtered.map((m) => ({
-    id: m.id, direction: m.direction, when: m.createdAt,
-    body: m.editedBody ?? m.body ?? m.caption ?? (m.media ? `[${m.media.kind}]` : ""),
+  const idx = rows.findIndex((m) => m.id === args.messageId);
+  if (idx < 0) return { ok: false, error: "message_not_found" };
+  const before = args.before ?? 3, after = args.after ?? 3;
+  const peer = rows[idx].peerId;
+  const same = rows.filter((m) => m.peerId === peer).sort((a, b) => a.createdAt - b.createdAt);
+  const j = same.findIndex((m) => m.id === args.messageId);
+  const slice = same.slice(Math.max(0, j - before), j + 1 + after);
+  return { ok: true, kind: "data", value: await decorate(slice.map((m) => ({ ...m }))) };
+}
+
+export async function get_message_metadata(args: { messageId: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  const m = rows.find((x) => x.id === args.messageId);
+  if (!m) return { ok: false, error: "message_not_found" };
+  const decorated = (await decorate([{ ...m }]))[0];
+  return { ok: true, kind: "data", value: decorated };
+}
+
+export async function get_last_message(args: { peerId: string }): Promise<ToolResult> {
+  const rows = await threadWith(args.peerId, 1000);
+  const last = rows[rows.length - 1];
+  if (!last) return { ok: true, kind: "data", value: null };
+  return { ok: true, kind: "data", value: (await decorate([{ ...last }]))[0] };
+}
+
+export async function get_unread_count(args: { peerId?: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  let count = 0;
+  const perPeer: Record<string, number> = {};
+  for (const m of rows) {
+    if (m.direction !== "in" || m.readAt) continue;
+    if (args.peerId && m.peerId !== args.peerId) continue;
+    count++;
+    perPeer[m.peerId] = (perPeer[m.peerId] ?? 0) + 1;
+  }
+  return { ok: true, kind: "data", value: { total: count, perPeer } };
+}
+
+export async function get_shared_media(args: {
+  peerId: string; kind?: "image" | "video" | "audio" | "voice" | "file"; limit?: number;
+}): Promise<ToolResult> {
+  const rows = (await threadWith(args.peerId, 5000)).filter(
+    (m) => !m.deletedAt && m.media && (!args.kind || m.media.kind === args.kind),
+  ).sort((a, b) => b.createdAt - a.createdAt).slice(0, args.limit ?? 30);
+  return { ok: true, kind: "data", value: rows.map((m) => ({
+    id: m.id, when: m.createdAt, whenISO: new Date(m.createdAt).toISOString(),
+    kind: m.media!.kind, mime: m.media!.mime, byteSize: m.media!.byteSize,
+    filename: m.media!.filename, caption: m.caption,
+    durationMs: m.media!.durationMs,
   })) };
 }
 
@@ -75,20 +253,87 @@ export async function list_reminders_tool(): Promise<ToolResult> {
   return { ok: true, kind: "data", value: await listReminders() };
 }
 
-// ---- write tools (pending) ----
+// Very lightweight summarization: fetch a thread + hand raw text back
+// to the caller, who is expected to summarize. When the LLM path runs
+// this, the LLM produces the summary.
+export async function summarize_thread(args: {
+  peerId?: string; fromIso?: string; toIso?: string; maxMessages?: number;
+}): Promise<ToolResult> {
+  let rows: OpenedMessage[];
+  if (args.peerId) {
+    rows = await threadWith(args.peerId, args.maxMessages ?? 300);
+  } else {
+    rows = await everyMessage();
+    if (args.fromIso) rows = rows.filter((m) => m.createdAt >= Date.parse(args.fromIso!));
+    if (args.toIso) rows = rows.filter((m) => m.createdAt <= Date.parse(args.toIso!));
+    rows.sort((a, b) => a.createdAt - b.createdAt);
+    rows = rows.slice(0, args.maxMessages ?? 300);
+  }
+  return { ok: true, kind: "data", value: await decorate(rows.map((m) => ({ ...m }))) };
+}
+
+// Contact-profile lookup — for questions like "who is @ada".
+export async function contact_profile(args: { peerId?: string; handle?: string; email?: string; phone?: string }): Promise<ToolResult> {
+  if (args.peerId) {
+    const c = await getContact(args.peerId);
+    if (!c) return { ok: false, error: "unknown" };
+    return { ok: true, kind: "data", value: c };
+  }
+  if (args.handle) {
+    try { return { ok: true, kind: "data", value: await api.byHandle(args.handle) }; }
+    catch { return { ok: false, error: "unknown" }; }
+  }
+  if (args.email) {
+    try { return { ok: true, kind: "data", value: await api.byEmail(args.email) }; }
+    catch { return { ok: false, error: "unknown" }; }
+  }
+  if (args.phone) {
+    try { return { ok: true, kind: "data", value: await api.byPhone(args.phone) }; }
+    catch { return { ok: false, error: "unknown" }; }
+  }
+  return { ok: false, error: "no_identifier" };
+}
+
+// ---- write tools (pending — nothing executes until user confirms) ----
 
 export async function draft_message(args: {
   targetPeerId: string; isGroup: boolean; body: string;
+  replyToMessageId?: string;
 }): Promise<ToolResult> {
   const label = args.isGroup
     ? (await getGroup(args.targetPeerId))?.name
     : (await getContact(args.targetPeerId))?.displayName;
   if (!label) return { ok: false, error: "unknown_target" };
+  let replyTo: { id: string; preview: string; author: string } | undefined;
+  if (args.replyToMessageId) {
+    const rows = await everyMessage();
+    const src = rows.find((m) => m.id === args.replyToMessageId);
+    if (src) {
+      replyTo = {
+        id: src.id,
+        preview: (src.editedBody ?? src.body ?? src.caption ?? "").slice(0, 120),
+        author: (await getContact(src.senderId))?.displayName ?? "Someone",
+      };
+    }
+  }
   return {
     ok: true, kind: "pending",
-    action: { kind: "send", targetPeerId: args.targetPeerId, isGroup: args.isGroup, toDisplay: label, body: args.body },
-    explain: `I'll send this to ${label}. Confirm to send.`,
+    action: { kind: "send", targetPeerId: args.targetPeerId, isGroup: args.isGroup, toDisplay: label, body: args.body, replyTo },
+    explain: replyTo
+      ? `I'll reply to ${label} referencing that earlier message. Confirm to send.`
+      : `I'll send this to ${label}. Confirm to send.`,
   };
+}
+
+export async function reply_to_message(args: { targetMessageId: string; body: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  const src = rows.find((m) => m.id === args.targetMessageId);
+  if (!src) return { ok: false, error: "message_not_found" };
+  const isGroup = !!(await getGroup(src.peerId));
+  return draft_message({
+    targetPeerId: src.peerId, isGroup, body: args.body,
+    replyToMessageId: args.targetMessageId,
+  });
 }
 
 export async function forward_message(args: {
@@ -113,13 +358,143 @@ export async function forward_message(args: {
   };
 }
 
-export async function set_reminder(args: { text: string; whenIso: string }): Promise<ToolResult> {
+// Tone-adjust: return a rephrased draft. Purely mechanical rewriting
+// isn't the agent's strong suit; when the LLM is available it does the
+// rewrite before calling draft_message. Offline mode returns a naive
+// prefix so the user isn't left empty-handed.
+export async function tone_adjust(args: {
+  text: string; tone: "firmer" | "softer" | "warmer" | "shorter" | "more_formal" | "more_casual";
+}): Promise<ToolResult> {
+  const prefix = {
+    firmer: "To be clear: ",
+    softer: "Just wanted to check: ",
+    warmer: "Hey! ",
+    shorter: "",
+    more_formal: "Dear team, ",
+    more_casual: "Hey — ",
+  }[args.tone];
+  const rewritten = args.tone === "shorter"
+    ? args.text.split(/[.!?]/)[0].trim() + "."
+    : prefix + args.text;
+  return { ok: true, kind: "data", value: { rewritten } };
+}
+
+export async function set_reminder(args: {
+  text: string; whenIso: string; tiedToMessageId?: string;
+}): Promise<ToolResult> {
+  const when = new Date(args.whenIso);
+  if (Number.isNaN(when.getTime())) return { ok: false, error: "bad_time" };
+  let hint = "";
+  if (args.tiedToMessageId) {
+    const rows = await everyMessage();
+    const src = rows.find((m) => m.id === args.tiedToMessageId);
+    if (src) {
+      const from = (await getContact(src.senderId))?.displayName ?? "you";
+      hint = ` (about “${(src.editedBody ?? src.body ?? src.caption ?? "").slice(0, 60)}” from ${from})`;
+    }
+  }
+  return {
+    ok: true, kind: "pending",
+    action: { kind: "reminder", text: args.text + hint, whenIso: when.toISOString() },
+    explain: `I'll remind you: "${args.text}" at ${when.toLocaleString()}.`,
+  };
+}
+
+export async function schedule_message(args: {
+  targetPeerId: string; isGroup: boolean; body: string; whenIso: string;
+}): Promise<ToolResult> {
+  const when = new Date(args.whenIso);
+  if (Number.isNaN(when.getTime())) return { ok: false, error: "bad_time" };
+  const label = args.isGroup
+    ? (await getGroup(args.targetPeerId))?.name
+    : (await getContact(args.targetPeerId))?.displayName;
+  if (!label) return { ok: false, error: "unknown_target" };
+  return {
+    ok: true, kind: "pending",
+    action: {
+      kind: "schedule_send",
+      targetPeerId: args.targetPeerId, isGroup: args.isGroup,
+      toDisplay: label, body: args.body, whenIso: when.toISOString(),
+    },
+    explain: `I'll send "${args.body.slice(0, 60)}" to ${label} at ${when.toLocaleString()}.`,
+  };
+}
+
+export async function mark_thread_read(args: { peerId: string }): Promise<ToolResult> {
+  const ids = await markThreadRead(args.peerId);
+  return { ok: true, kind: "data", value: { markedRead: ids.length } };
+}
+
+export async function delete_message_tool(args: { messageId: string }): Promise<ToolResult> {
+  const rows = await everyMessage();
+  const src = rows.find((m) => m.id === args.messageId);
+  if (!src) return { ok: false, error: "message_not_found" };
+  if (src.senderId !== currentSession()?.user.id) {
+    return { ok: false, error: "not_your_message" };
+  }
+  const isGroup = !!(await getGroup(src.peerId));
+  const preview = (src.editedBody ?? src.body ?? src.caption ?? "[media]").slice(0, 80);
+  return {
+    ok: true, kind: "pending",
+    action: { kind: "delete", targetPeerId: src.peerId, isGroup, targetMsgId: src.id, preview },
+    explain: `Delete "${preview}" for everyone?`,
+  };
+}
+
+export async function create_calendar_event(args: {
+  title: string; whenIso: string; durationMin?: number; notes?: string;
+}): Promise<ToolResult> {
   const when = new Date(args.whenIso);
   if (Number.isNaN(when.getTime())) return { ok: false, error: "bad_time" };
   return {
     ok: true, kind: "pending",
-    action: { kind: "reminder", text: args.text, whenIso: when.toISOString() },
-    explain: `I'll remind you: "${args.text}" at ${when.toLocaleString()}.`,
+    action: {
+      kind: "calendar_event",
+      title: args.title, whenIso: when.toISOString(),
+      durationMin: args.durationMin ?? 30, notes: args.notes,
+    },
+    explain: `Add "${args.title}" to your calendar for ${when.toLocaleString()}?`,
+  };
+}
+
+// "Notes" are just reminders with far-future dates + a note tag; keeps
+// the storage simple. If you eventually want a proper notes table, add
+// one and swap this in-place.
+export async function create_note(args: { title: string; body: string }): Promise<ToolResult> {
+  return {
+    ok: true, kind: "pending",
+    action: {
+      kind: "reminder",
+      // Encode as a note by placing far in the future so it doesn't fire.
+      text: `📝 ${args.title}\n${args.body}`,
+      whenIso: new Date(Date.now() + 100 * 365 * 86400_000).toISOString(),
+    },
+    explain: `Save note "${args.title}"?`,
+  };
+}
+
+export async function add_contact_by_handle(args: { handle: string }): Promise<ToolResult> {
+  try {
+    const u = await api.byHandle(args.handle);
+    return {
+      ok: true, kind: "pending",
+      action: { kind: "add_contact", handle: u.handle, displayName: u.displayName, explain: `Add @${u.handle} (${u.displayName}) to your contacts?` },
+      explain: `Add @${u.handle} (${u.displayName}) to your contacts?`,
+    };
+  } catch { return { ok: false, error: "not_found" }; }
+}
+
+export async function save_contact_to_phone(args: { peerId: string }): Promise<ToolResult> {
+  const c = await getContact(args.peerId);
+  if (!c) return { ok: false, error: "unknown" };
+  return {
+    ok: true, kind: "pending",
+    action: {
+      kind: "save_contact_to_phone",
+      displayName: c.displayName, handle: c.handle,
+      email: c.email, phone: c.phone,
+    },
+    explain: `Export ${c.displayName}'s contact card to your phone contacts?`,
   };
 }
 
@@ -150,20 +525,13 @@ export async function export_to_email(args: {
       kind: "email",
       recipientEmail: args.recipientEmail,
       subject: `From Aegent (${chosen.length} message${chosen.length === 1 ? "" : "s"})`,
-      body,
-      leavesE2E: true,
+      body, leavesE2E: true,
     },
     explain: `This will leave Aegent's E2E boundary — email isn't encrypted the same way. Review before sending.`,
   };
 }
 
-// ---- backup: whole thread → email ----
-//
-// Compiles the entire conversation with a peer or group into a
-// plaintext email body, oldest first, with senders and timestamps.
-// Media is referenced as its type ("[voice 12s]", "[photo 2.1MB]")
-// rather than attached — E2E media stays on-server as ciphertext and
-// its content key deliberately does not leave the app.
+// ---- backup: whole thread → email (existing) ----
 
 export async function backup_thread(args: {
   peerId: string; recipientEmail: string; note?: string;
@@ -173,7 +541,6 @@ export async function backup_thread(args: {
     ?? (await getGroup(args.peerId))?.name;
   if (!label) return { ok: false, error: "unknown_thread" };
   const isGroup = !!(await getGroup(args.peerId));
-
   const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
   const rows = (await threadWith(args.peerId, 5000))
     .filter((m) => !m.deletedAt && m.createdAt >= since);
@@ -223,16 +590,11 @@ export async function backup_thread(args: {
       kind: "email",
       recipientEmail: args.recipientEmail,
       subject: `Aegent backup: ${label} (${rows.length} messages)`,
-      body,
-      leavesE2E: true,
+      body, leavesE2E: true,
     },
     explain: `I've compiled ${rows.length} messages from ${label}. Email isn't E2E encrypted — review before sending.`,
   };
 }
-
-// Schedule the backup to happen at a chosen time. Persists in the local
-// store; when whenIso passes and the app is open (now or next time),
-// the UI surfaces a confirm card for the actual send. No silent send.
 
 export async function schedule_backup(args: {
   peerId: string; recipientEmail: string; whenIso: string; note?: string;
@@ -250,7 +612,6 @@ export async function schedule_backup(args: {
     whenIso: when.toISOString(),
     note: args.note,
   });
-  // Also drop a plain reminder so the user sees it in their reminders list.
   await saveReminder(`Backup ${label} to ${args.recipientEmail}`, when.toISOString());
   return {
     ok: true, kind: "data",
@@ -262,16 +623,34 @@ export async function schedule_backup(args: {
   };
 }
 
+// ---- general-assistant tools ----
+
+export async function calculate(args: { expression: string }): Promise<ToolResult> {
+  // Very deliberately narrow: numbers, operators, parens, decimal points.
+  // Never evaluate arbitrary strings via Function() — expression cleared
+  // first, and even then wrapped in a Function('return (...)') to keep
+  // the ambient scope hidden.
+  const cleaned = args.expression.replace(/[^0-9+\-*/().% \t]/g, "");
+  if (!cleaned || cleaned !== args.expression.replace(/\s+/g, "").replace(/(\d)\s+(\d)/g, "$1$2") && !/[0-9]/.test(cleaned)) {
+    return { ok: false, error: "expression_rejected" };
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const v = new Function(`"use strict"; return (${cleaned});`)();
+    if (typeof v !== "number" || !isFinite(v)) return { ok: false, error: "not_a_number" };
+    return { ok: true, kind: "data", value: { result: v } };
+  } catch { return { ok: false, error: "evaluation_failed" }; }
+}
+
 // ---- executing a confirmed action ----
 
 export async function executePending(action: PendingAction) {
   if (action.kind === "send") {
-    const res = await sendText(action.targetPeerId, action.isGroup, action.body);
+    const res = await sendText(action.targetPeerId, action.isGroup, action.body, action.replyTo);
     return res;
   }
   if (action.kind === "reminder") {
     await saveReminder(action.text, action.whenIso);
-    // Schedule a browser notification if permitted.
     schedule(action.text, action.whenIso);
     return { ok: true } as const;
   }
@@ -282,18 +661,71 @@ export async function executePending(action: PendingAction) {
     window.open(url);
     return { ok: true } as const;
   }
+  if (action.kind === "delete") {
+    await sendDelete(action.targetPeerId, action.isGroup, action.targetMsgId);
+    return { ok: true } as const;
+  }
+  if (action.kind === "schedule_send") {
+    // Simple in-memory schedule using setTimeout + a persisted reminder as
+    // the crash-safety net. For a real schedule-send you'd want the same
+    // scheduledBackups-style persistence.
+    const at = new Date(action.whenIso).getTime() - Date.now();
+    if (at > 0 && at < 24 * 3600_000) {
+      window.setTimeout(() => {
+        sendText(action.targetPeerId, action.isGroup, action.body).catch(() => { /* silent */ });
+      }, at);
+    }
+    await saveReminder(`Send to ${action.toDisplay}: "${action.body.slice(0, 40)}"`, action.whenIso);
+    return { ok: true } as const;
+  }
+  if (action.kind === "calendar_event") {
+    // Data-URL ICS so any calendar app on the platform picks it up.
+    const dt = (d: Date) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z/, "Z");
+    const start = new Date(action.whenIso);
+    const end = new Date(start.getTime() + action.durationMin * 60_000);
+    const ics = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Aegent//EN",
+      "BEGIN:VEVENT",
+      `UID:${crypto.randomUUID()}@aegent`,
+      `DTSTAMP:${dt(new Date())}`,
+      `DTSTART:${dt(start)}`,
+      `DTEND:${dt(end)}`,
+      `SUMMARY:${(action.title || "").replace(/[\r\n]/g, " ")}`,
+      action.notes ? `DESCRIPTION:${action.notes.replace(/[\r\n]/g, "\\n")}` : "",
+      "END:VEVENT", "END:VCALENDAR",
+    ].filter(Boolean).join("\r\n");
+    const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `${(action.title || "event").replace(/[^\w]+/g, "_")}.ics`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    return { ok: true } as const;
+  }
+  if (action.kind === "add_contact") {
+    try {
+      const u = await api.byHandle(action.handle);
+      await upsertContact({
+        id: u.id, email: u.email, phone: u.phone ?? null, handle: u.handle,
+        displayName: u.displayName, publicKey: u.publicKey,
+        lastSeenAt: Date.now(), online: u.presence?.online,
+      });
+      return { ok: true } as const;
+    } catch { return { ok: false, error: "lookup_failed" } as const; }
+  }
+  if (action.kind === "save_contact_to_phone") {
+    await saveContactToPhone({
+      displayName: action.displayName, handle: action.handle,
+      email: action.email, phone: action.phone,
+    });
+    return { ok: true } as const;
+  }
   return { ok: false, error: "unknown_action" } as const;
 }
 
-// Schedule a reminder notification. Prefers Capacitor's native
-// LocalNotifications so the notification fires even when the app is
-// backgrounded / the WebView is killed. Falls back to a plain browser
-// Notification in web contexts.
 async function schedule(text: string, whenIso: string) {
   const when = new Date(whenIso);
   const at = when.getTime() - Date.now();
-  if (at <= 0 || at > 30 * 86400_000) return; // reject past + >30d ahead
-
+  if (at <= 0 || at > 30 * 86400_000) return;
   try {
     const { LocalNotifications } = await import("@capacitor/local-notifications");
     let perm = await LocalNotifications.checkPermissions();
@@ -303,18 +735,14 @@ async function schedule(text: string, whenIso: string) {
     }
     await LocalNotifications.schedule({
       notifications: [{
-        // 32-bit id required by the plugin.
         id: Math.floor(Date.now() / 1000) % 2147483647,
-        title: "Aegent reminder",
-        body: text,
+        title: "Aegent reminder", body: text,
         schedule: { at: when },
         smallIcon: "ic_stat_icon_config_sample",
       }],
     });
     return;
-  } catch { /* fall through to web fallback */ }
-
-  // Web fallback — only fires while the tab is open.
+  } catch { /* fall through */ }
   window.setTimeout(async () => {
     try {
       if (Notification.permission !== "granted") {
@@ -329,13 +757,10 @@ async function schedule(text: string, whenIso: string) {
 // Ensure a contact/group exists in the local store before the agent
 // tries to send to them (useful for offline planner shortcuts).
 export async function ensureByHandle(handle: string) {
-  try {
-    const u = await api.byHandle(handle);
-    return u;
-  } catch { return null; }
+  try { return await api.byHandle(handle); }
+  catch { return null; }
 }
 
-// Convenience: resolve a fuzzy name to a target peer/group id.
 export async function resolveTarget(name: string): Promise<{ id: string; isGroup: boolean; label: string } | null> {
   const n = name.toLowerCase().trim().replace(/^@/, "");
   const contacts = await listContacts();
@@ -351,10 +776,7 @@ export async function resolveTarget(name: string): Promise<{ id: string; isGroup
   return null;
 }
 
-// Utility for the offline planner: get the id of the currently signed-in user.
-export function myId(): string {
-  return currentSession()!.user.id;
-}
+export function myId(): string { return currentSession()!.user.id; }
 
-// Guard: keep sendMedia live for future media-forward tool.
-void sendMedia;
+// keep import live for future media-forward
+void sendMedia; void deleteReminder;

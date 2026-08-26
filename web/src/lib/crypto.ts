@@ -186,3 +186,14 @@ export function identityFromRecovery(entropy: Uint8Array): IdentityKeys {
   const kp = nacl.box.keyPair.fromSecretKey(seed);
   return { publicKey: kp.publicKey, privateKey: kp.secretKey };
 }
+
+// Backup encryption key, deterministic from the recovery phrase. Distinct
+// from the identity secret (different SHA-512 context prefix) so a
+// compromise of one doesn't reveal the other. 32 bytes for secretbox.
+export function backupKeyFromRecovery(entropy: Uint8Array): Uint8Array {
+  const ctx = new TextEncoder().encode("aegent:backup:v1");
+  const material = new Uint8Array(ctx.length + entropy.length);
+  material.set(ctx, 0);
+  material.set(entropy, ctx.length);
+  return nacl.hash(material).slice(0, 32);
+}

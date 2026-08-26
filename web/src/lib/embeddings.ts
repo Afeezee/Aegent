@@ -27,20 +27,46 @@ export function tokenize(text: string): string[] {
 }
 
 export function embed(text: string): number[] {
-  const v = new Array<number>(DIM).fill(0);
   const toks = tokenize(text);
-  if (toks.length === 0) return v;
+  if (toks.length === 0) return new Array<number>(DIM).fill(0);
+  // Short text: one embedding covers it. Long text: sliding-window
+  // chunks (24 tokens with 8-token overlap), average-pool the chunk
+  // embeddings — captures topic drift inside long messages so the
+  // retrieval pipeline doesn't miss content buried in the middle of
+  // a paragraph.
+  if (toks.length <= 32) return embedTokens(toks);
 
-  // Unigrams + character bigrams.
+  const WIN = 24, OVERLAP = 8, STEP = WIN - OVERLAP;
+  const pooled = new Array<number>(DIM).fill(0);
+  let n = 0;
+  for (let i = 0; i < toks.length; i += STEP) {
+    const chunk = toks.slice(i, i + WIN);
+    if (chunk.length < 4 && n > 0) break;
+    const v = embedTokens(chunk);
+    for (let k = 0; k < DIM; k++) pooled[k] += v[k];
+    n++;
+    if (i + WIN >= toks.length) break;
+  }
+  if (n === 0) return embedTokens(toks);
+  for (let k = 0; k < DIM; k++) pooled[k] /= n;
+  // Re-normalise so cosine still == dot product.
+  let mag = 0;
+  for (const x of pooled) mag += x * x;
+  mag = Math.sqrt(mag) || 1;
+  for (let i = 0; i < DIM; i++) pooled[i] /= mag;
+  return pooled;
+}
+
+function embedTokens(toks: string[]): number[] {
+  const v = new Array<number>(DIM).fill(0);
   const bump = (s: string, w: number) => {
     const h = hash(s);
-    v[h % DIM] += w * (1 - ((h >>> 8) & 1) * 2); // signed contribution
+    v[h % DIM] += w * (1 - ((h >>> 8) & 1) * 2);
   };
   for (const t of toks) {
     bump(t, 1);
     for (let i = 0; i < t.length - 1; i++) bump(t.slice(i, i + 2), 0.4);
   }
-  // Normalize to unit length so cosine == dot product.
   let mag = 0;
   for (const x of v) mag += x * x;
   mag = Math.sqrt(mag) || 1;

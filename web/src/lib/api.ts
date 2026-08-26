@@ -121,6 +121,7 @@ export const api = {
   markRead: (ids: string[]) => req<{ ok: true; sent: number }>("/api/read", {
     method: "POST", body: JSON.stringify({ ids }),
   }),
+  backupMeta: () => req<{ size: number; createdAt: number }>("/api/backup/meta"),
 
   uploadBlob: async (bytes: Uint8Array, mime: string): Promise<{ id: string; size: number }> => {
     const headers = new Headers();

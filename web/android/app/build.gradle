@@ -20,6 +20,13 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Sign release APKs with the auto-generated debug keystore
+            // so `./gradlew assembleRelease` produces an installable APK
+            // out of the box (no Play Store keystore needed for local
+            // testing and sideloading). For a real Play Store submission,
+            // replace `signingConfig` here with a genuine release keystore
+            // stored outside the repo.
+            signingConfig signingConfigs.debug
         }
     }
 }

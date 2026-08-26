@@ -63,16 +63,40 @@ export function Composer({
     setText(""); setSending(false);
   }
 
+  // Server cap - 1 MB safety margin (server rejects > 20 MB with 413).
+  const MAX_ATTACH_MB = 19;
+
   async function attach(file: File) {
+    // Guard for the two crash modes: file too big for the server (413),
+    // and file too big for the browser to hold in one Uint8Array without
+    // OOMing the WebView.
+    if (file.size > MAX_ATTACH_MB * 1024 * 1024) {
+      toast(
+        `${file.name} is ${formatMB(file.size)} — max ${MAX_ATTACH_MB} MB. Try a smaller file or a link.`,
+        "warn",
+      );
+      return;
+    }
     setSending(true);
+    const label = file.name.length > 30 ? file.name.slice(0, 27) + "…" : file.name;
+    toast(`Encrypting ${label}…`, "info");
     try {
       const picked = await pickFile(file);
+      toast(`Uploading ${label}…`, "info");
       const ref = await uploadMedia(picked);
       const res = await sendMedia(peerId, isGroup, ref, text.trim() || undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Send failed: ${res.error}`, "error");
-      else { setText(""); onClearReply(); }
-    } catch (e) { toast(`Attach failed: ${(e as Error).message}`, "error"); }
+      else { setText(""); onClearReply(); toast(`${label} sent`, "ok"); }
+    } catch (e) {
+      // Common causes: OOM on very large files, network dropout mid-upload,
+      // WebView blob API quirks on Android. Surface the actual reason.
+      toast(`Attach failed: ${(e as Error).message || "unknown error"}`, "error");
+    }
     finally { setSending(false); }
+  }
+
+  function formatMB(bytes: number): string {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
 
   async function startVoice() {

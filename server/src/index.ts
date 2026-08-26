@@ -31,6 +31,7 @@ import {
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, storeBlob } from "./blobs.js";
+import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentTurn } from "./agent.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -48,6 +49,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "2mb" }));
 app.use("/api/blobs", express.raw({ type: "*/*", limit: MAX_BLOB_BYTES + 1024 }));
+app.use("/api/backup", express.raw({ type: "application/octet-stream", limit: MAX_BACKUP_BYTES + 1024 }));
 
 // Healthcheck — no auth, no state. Used by Railway / load balancers.
 app.get("/healthz", (_req, res) => res.json({
@@ -277,6 +279,66 @@ app.post("/api/blobs", authed, async (req, res) => {
     if ((e as Error).message === "blob_too_large") return res.status(413).json({ error: "too_large" });
     handleError(res, e);
   }
+});
+
+// ---- encrypted per-user backup (opaque bytes; see backups.ts) ----
+
+app.put("/api/backup", authed, async (req, res) => {
+  try {
+    const bytes = req.body as Buffer;
+    if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0) {
+      return res.status(400).json({ error: "empty_body" });
+    }
+    const out = await saveBackup((req as AuthedReq).userId, bytes);
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    if ((e as Error).message === "backup_too_large") return res.status(413).json({ error: "too_large" });
+    handleError(res, e);
+  }
+});
+
+app.get("/api/backup", authed, async (req, res) => {
+  try {
+    const row = await readBackup((req as AuthedReq).userId);
+    if (!row) return res.status(404).json({ error: "no_backup" });
+    res.setHeader("content-type", "application/octet-stream");
+    res.setHeader("x-backup-created-at", String(row.createdAt));
+    res.setHeader("x-byte-size", String(row.bytes.byteLength));
+    res.send(row.bytes);
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/backup/meta", authed, async (req, res) => {
+  try {
+    const m = await backupMeta((req as AuthedReq).userId);
+    if (!m) return res.status(404).json({ error: "no_backup" });
+    res.json(m);
+  } catch (e) { handleError(res, e); }
+});
+
+// Restore path — unauthenticated. The client derives its public key
+// deterministically from the user's recovery phrase, looks itself up
+// with that public key, and gets the ciphertext backup back. The
+// backup is opaque bytes encrypted with a key that only the phrase
+// can derive; leaking it here is cryptographically harmless.
+//
+// A small size/timing side channel (which handles have backups, and
+// roughly how big) remains — acceptable for the pilot; hide behind
+// a rate limiter for public launches.
+app.post("/api/backup/by-pubkey", async (req, res) => {
+  try {
+    const body = z.object({ publicKey: z.string().min(1) }).parse(req.body);
+    const row = await db.prepare(
+      "SELECT id FROM users WHERE public_key = ?",
+    ).get<{ id: string }>(body.publicKey);
+    if (!row) return res.status(404).json({ error: "not_found" });
+    const backup = await readBackup(row.id);
+    if (!backup) return res.status(404).json({ error: "no_backup" });
+    res.json({
+      backup: backup.bytes.toString("base64"),
+      createdAt: backup.createdAt,
+    });
+  } catch (e) { handleError(res, e); }
 });
 
 app.get("/api/blobs/:id", authed, async (req, res) => {

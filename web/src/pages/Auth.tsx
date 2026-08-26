@@ -5,10 +5,17 @@ import { motion } from "framer-motion";
 import { useState } from "react";
 import { Button, FadeIn, Glass, Icon, toast } from "../components/ui.js";
 import { Brand } from "./Onboarding.js";
-import { login, register } from "../lib/session.js";
+import { beginRestoreFromRecovery, finishRestore, login, register, type PendingRestore } from "../lib/session.js";
+
+const switchBtn: React.CSSProperties = {
+  background: "none", border: "none", padding: 0,
+  color: "var(--accent-strong)", cursor: "pointer", fontSize: 13,
+};
 
 export function AuthScreen({ onDone }: { onDone: () => void }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "restore">("login");
+  const [restorePhrase, setRestorePhrase] = useState("");
+  const [pendingRestore, setPendingRestore] = useState<PendingRestore | null>(null);
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [phone, setPhone] = useState("");
@@ -27,9 +34,23 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
           phone: phone.trim() || undefined,
         });
         setRecovery(recoveryPhrase);
-      } else {
+      } else if (mode === "login") {
         await login({ email, password });
         onDone();
+      } else if (mode === "restore") {
+        if (!pendingRestore) {
+          // Step 1: derive from phrase + fetch backup.
+          const p = await beginRestoreFromRecovery(restorePhrase);
+          setPendingRestore(p);
+          setEmail(p.email);   // pre-fill for the password step
+        } else {
+          // Step 2: log in with the recovered email + user's password,
+          // then rehydrate the store from the decrypted backup.
+          await login({ email: pendingRestore.email, password });
+          await finishRestore(pendingRestore);
+          toast(`Restored ${pendingRestore.backup.messages.length} messages`, "ok");
+          onDone();
+        }
       }
     } catch (e) {
       setError((e as Error).message);
@@ -87,19 +108,40 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
                 transition={{ duration: 0.2 }}
               >
                 <h1 style={{ marginBottom: 6 }}>
-                  {mode === "login" ? "Welcome back" : "Create your account"}
+                  {mode === "login" ? "Welcome back"
+                    : mode === "register" ? "Create your account"
+                    : pendingRestore ? "Finish restoring" : "Restore from recovery code"}
                 </h1>
                 <p style={{ color: "var(--text-dim)", marginBottom: 20 }}>
-                  {mode === "login"
-                    ? "Sign in to unlock your messages."
-                    : "One account, encrypted from the first message."}
+                  {mode === "login" ? "Sign in to unlock your messages."
+                    : mode === "register" ? "One account, encrypted from the first message."
+                    : pendingRestore
+                      ? `Signed as ${pendingRestore.displayName} (${pendingRestore.email}). Enter your password to finish restoring ${pendingRestore.backup.messages.length} messages.`
+                      : "Enter the recovery code you saved when you first created your account. Aegent will pull the encrypted backup, and once you sign in with your password, your messages come back."}
                 </p>
 
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {mode === "restore" && !pendingRestore ? (
+                    <div>
+                      <label>Recovery code</label>
+                      <input required value={restorePhrase}
+                        onChange={(e) => setRestorePhrase(e.target.value)}
+                        autoComplete="off" autoCapitalize="characters"
+                        placeholder="ABCDE-FGHIJ-KLMNP-QRSTU-VWXYZ-2345"
+                        style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", letterSpacing: 1 }} />
+                      <div className="small" style={{ marginTop: 6 }}>
+                        Case-insensitive. Hyphens optional. This runs entirely on this device — the code never leaves.
+                      </div>
+                    </div>
+                  ) : (
                   <div>
                     <label>Email</label>
-                    <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" placeholder="you@somewhere.com" />
+                    <input type="email" required value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      autoComplete="email" placeholder="you@somewhere.com"
+                      disabled={mode === "restore" && !!pendingRestore} />
                   </div>
+                  )}
                   {mode === "register" && (
                     <>
                       <div>
@@ -117,32 +159,43 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
                       </div>
                     </>
                   )}
-                  <div>
-                    <label>Password</label>
-                    <input type="password" required minLength={8}
-                      value={password} onChange={(e) => setPassword(e.target.value)}
-                      autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="8 characters minimum" />
-                    {mode === "register" && (
-                      <div className="small" style={{ marginTop: 6 }}>
-                        Also derives your local encryption keys — don't lose it.
-                      </div>
-                    )}
-                  </div>
+                  {(mode !== "restore" || pendingRestore) && (
+                    <div>
+                      <label>Password</label>
+                      <input type="password" required minLength={8}
+                        value={password} onChange={(e) => setPassword(e.target.value)}
+                        autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="8 characters minimum" />
+                      {mode === "register" && (
+                        <div className="small" style={{ marginTop: 6 }}>
+                          Also derives your local encryption keys — don't lose it.
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {error && (
                   <div style={{ marginTop: 12, color: "var(--danger)", fontSize: 13 }}>{error}</div>
                 )}
 
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 20, gap: 12 }}>
-                  <button type="button" style={{
-                    background: "none", border: "none", padding: 0, color: "var(--accent-strong)",
-                    cursor: "pointer", fontSize: 13,
-                  }} onClick={() => { setError(null); setMode(mode === "login" ? "register" : "login"); }}>
-                    {mode === "login" ? "Need an account? Register" : "Have one? Sign in"}
-                  </button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 20, gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                    <button type="button" style={switchBtn}
+                      onClick={() => { setError(null); setPendingRestore(null); setMode(mode === "login" ? "register" : "login"); }}>
+                      {mode === "login" ? "Need an account? Register" : "Have one? Sign in"}
+                    </button>
+                    {mode !== "restore" && (
+                      <button type="button" style={switchBtn}
+                        onClick={() => { setError(null); setPendingRestore(null); setMode("restore"); }}>
+                        Restore from recovery code
+                      </button>
+                    )}
+                  </div>
                   <Button type="submit" variant="primary" disabled={busy}>
-                    {busy ? "…" : mode === "login" ? "Sign in" : "Create account"}
+                    {busy ? "…"
+                      : mode === "login" ? "Sign in"
+                      : mode === "register" ? "Create account"
+                      : pendingRestore ? "Finish restore" : "Next"}
                   </Button>
                 </div>
               </motion.form>

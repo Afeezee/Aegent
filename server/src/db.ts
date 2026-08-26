@@ -260,6 +260,19 @@ const SCHEMA = `
     created_at   ${BIG} NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_blobs_owner ON blobs(owner_id, created_at);
+
+  -- Encrypted per-user backup of the client's entire local store. The
+  -- server stores nothing but opaque bytes. The key is derived on the
+  -- client from the user's recovery phrase (never touches this
+  -- process). One row per user; the newest replaces the previous.
+  CREATE TABLE IF NOT EXISTS backups (
+    user_id      TEXT PRIMARY KEY REFERENCES users(id),
+    -- Everything the client shipped: nonce || ciphertext,
+    -- schema-versioned inside the plaintext payload.
+    ciphertext   ${BYTES} NOT NULL,
+    byte_size    INTEGER NOT NULL,
+    created_at   ${BIG} NOT NULL
+  );
 `;
 
 export async function initSchema(): Promise<void> {

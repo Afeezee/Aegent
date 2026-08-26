@@ -15,15 +15,19 @@
 // pending action in the UI (via the yielded 'confirm' event) and return
 // {staged: true, ...} to Claude — the actual send/reminder/email is
 // gated on the user's explicit confirmation in the card.
-//
-// The retrieval-locality invariant from spec §5.2 still holds: only the
-// matched messages ever leave the device, and only inside the LLM turn.
 
-import { api, apiUrl } from "../lib/api.js";
+import { apiUrl } from "../lib/api.js";
 import {
-  backup_thread, draft_message, export_to_email, forward_message,
-  list_reminders_tool, resolveTarget, schedule_backup, search_messages,
-  set_reminder,
+  add_contact_by_handle, backup_thread, calculate, contact_profile,
+  create_calendar_event, create_note, delete_message_tool,
+  draft_message, export_to_email, forward_message,
+  get_context_around, get_last_message, get_message_metadata, get_shared_media,
+  get_thread, get_unread_count, list_reminders_tool,
+  mark_thread_read, reply_to_message, resolveTarget,
+  save_contact_to_phone, schedule_backup, schedule_message,
+  search_by_date_range, search_by_media_type, search_by_sender,
+  search_exact, search_links_and_patterns, search_messages,
+  set_reminder, summarize_thread, tone_adjust,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -31,123 +35,178 @@ import type { AgentEvent } from "./loop.js";
 // ---- tool definitions (Anthropic tool-use schema) ----
 
 const TOOLS = [
+  // Retrieval
   {
     name: "search_messages",
-    description:
-      "Semantic + keyword search across every conversation in the user's local encrypted store. Use this to find message(s) about a topic, or to answer 'when did X happen'. Returns the top matches with their IDs.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "The topic or phrase to look for (natural language is fine)." },
-        peerId: { type: "string", description: "Optional: restrict to one conversation (contact id or group id)." },
-        sinceDaysAgo: { type: "number", description: "Optional: only consider messages from the last N days." },
-      },
-      required: ["query"],
-    },
+    description: "Hybrid semantic + keyword search across the local encrypted store. Supports filters by contact/group (peerId), sender (senderId), date recency (sinceDaysAgo), and media type (mediaKind). Returns top matches with peerName, senderName, ISO timestamp, body, and score.",
+    input_schema: { type: "object", properties: {
+      query: { type: "string" },
+      peerId: { type: "string" }, senderId: { type: "string" },
+      sinceDaysAgo: { type: "number" },
+      mediaKind: { type: "string", enum: ["image", "video", "audio", "voice", "file"] },
+      limit: { type: "number" },
+    }, required: ["query"] },
   },
   {
-    name: "resolve_target",
-    description:
-      "Given a fuzzy name, @handle, or email fragment, find the matching contact or group. Call this to convert 'Ada' or '@ada' into a stable id before drafting or forwarding.",
-    input_schema: {
-      type: "object",
-      properties: { name: { type: "string" } },
-      required: ["name"],
-    },
+    name: "search_exact",
+    description: "Case-insensitive substring search. Use when the user quotes an exact phrase, order number, link, or handle they want to find verbatim.",
+    input_schema: { type: "object", properties: { needle: { type: "string" }, peerId: { type: "string" }, limit: { type: "number" } }, required: ["needle"] },
+  },
+  {
+    name: "search_by_date_range",
+    description: "All messages between two ISO timestamps, optionally scoped to one thread or filtered by a query.",
+    input_schema: { type: "object", properties: { fromIso: { type: "string" }, toIso: { type: "string" }, peerId: { type: "string" }, query: { type: "string" }, limit: { type: "number" } }, required: ["fromIso", "toIso"] },
+  },
+  {
+    name: "search_by_sender",
+    description: "All messages from one specific sender, optionally filtered by a query.",
+    input_schema: { type: "object", properties: { senderId: { type: "string" }, query: { type: "string" }, limit: { type: "number" } }, required: ["senderId"] },
+  },
+  {
+    name: "search_by_media_type",
+    description: "All messages containing media of a given kind (image | video | audio | voice | file).",
+    input_schema: { type: "object", properties: { kind: { type: "string", enum: ["image", "video", "audio", "voice", "file"] }, peerId: { type: "string" }, limit: { type: "number" } }, required: ["kind"] },
+  },
+  {
+    name: "search_links_and_patterns",
+    description: "Find messages containing a URL, phone number, or email address.",
+    input_schema: { type: "object", properties: { pattern: { type: "string", enum: ["link", "phone", "email"] }, peerId: { type: "string" }, limit: { type: "number" } }, required: ["pattern"] },
+  },
+  {
+    name: "get_thread",
+    description: "Return the last N messages in a specific thread with full metadata.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, limit: { type: "number" } }, required: ["peerId"] },
+  },
+  {
+    name: "get_context_around",
+    description: "Messages surrounding a specific match — useful for follow-ups like 'what did they say right after that?'.",
+    input_schema: { type: "object", properties: { messageId: { type: "string" }, before: { type: "number" }, after: { type: "number" } }, required: ["messageId"] },
+  },
+  {
+    name: "get_message_metadata",
+    description: "Full metadata for one message (timestamp, sender, edited, delivered/read state, reply target).",
+    input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
+  },
+  {
+    name: "get_last_message",
+    description: "Most recent message in a specific thread.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" } }, required: ["peerId"] },
+  },
+  {
+    name: "get_unread_count",
+    description: "Unread inbound message counts, either total or scoped to one peer.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" } } },
+  },
+  {
+    name: "get_shared_media",
+    description: "All media items exchanged with a peer, optionally filtered by kind.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, kind: { type: "string", enum: ["image", "video", "audio", "voice", "file"] }, limit: { type: "number" } }, required: ["peerId"] },
+  },
+  {
+    name: "summarize_thread",
+    description: "Return a compact transcript of a thread (or a date range across all threads) for you to summarise. Ends at maxMessages (default 300).",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, fromIso: { type: "string" }, toIso: { type: "string" }, maxMessages: { type: "number" } } },
   },
   {
     name: "list_reminders",
-    description: "List all reminders the user currently has scheduled.",
+    description: "List every reminder the user currently has scheduled.",
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "resolve_target",
+    description: "Fuzzy-resolve a name, handle, or email fragment to a contact/group id. Call before draft/forward/schedule so you have a stable id.",
+    input_schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+  },
+  {
+    name: "contact_profile",
+    description: "Look up a contact by peerId, handle, email, or phone.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, handle: { type: "string" }, email: { type: "string" }, phone: { type: "string" } } },
+  },
+  {
+    name: "calculate",
+    description: "Evaluate an arithmetic expression safely (numbers, + - * / parens, %). No variables, no functions.",
+    input_schema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] },
+  },
+
+  // Writes (all confirm-gated)
+  {
     name: "draft_message",
-    description:
-      "Stage a message to send to a contact or group. This DOES NOT send it — it surfaces a confirm card the user must approve. Use resolve_target first to get the target id.",
-    input_schema: {
-      type: "object",
-      properties: {
-        targetPeerId: { type: "string" },
-        isGroup: { type: "boolean" },
-        body: { type: "string" },
-      },
-      required: ["targetPeerId", "isGroup", "body"],
-    },
+    description: "Stage a new message to a contact/group. Optionally attach it as a reply to a specific earlier message id. Surfaces a confirm card; does not send.",
+    input_schema: { type: "object", properties: {
+      targetPeerId: { type: "string" }, isGroup: { type: "boolean" },
+      body: { type: "string" },
+      replyToMessageId: { type: "string" },
+    }, required: ["targetPeerId", "isGroup", "body"] },
+  },
+  {
+    name: "reply_to_message",
+    description: "Shortcut for draft_message that infers peer + group from the target message.",
+    input_schema: { type: "object", properties: { targetMessageId: { type: "string" }, body: { type: "string" } }, required: ["targetMessageId", "body"] },
   },
   {
     name: "forward_message",
-    description:
-      "Stage a forward of an existing message to a contact or group with an optional note. Requires the source message id (from search_messages) and the target id (from resolve_target). Surfaces a confirm card, does not send.",
-    input_schema: {
-      type: "object",
-      properties: {
-        messageId: { type: "string" },
-        toPeerId: { type: "string" },
-        toIsGroup: { type: "boolean" },
-        note: { type: "string" },
-      },
-      required: ["messageId", "toPeerId", "toIsGroup"],
-    },
+    description: "Stage a forward of an existing message to another contact/group with an optional note. Confirm-gated.",
+    input_schema: { type: "object", properties: { messageId: { type: "string" }, toPeerId: { type: "string" }, toIsGroup: { type: "boolean" }, note: { type: "string" } }, required: ["messageId", "toPeerId", "toIsGroup"] },
+  },
+  {
+    name: "tone_adjust",
+    description: "Return a rewritten version of a message body in a chosen tone (firmer | softer | warmer | shorter | more_formal | more_casual). Read-only — the caller decides whether to draft_message it.",
+    input_schema: { type: "object", properties: { text: { type: "string" }, tone: { type: "string", enum: ["firmer", "softer", "warmer", "shorter", "more_formal", "more_casual"] } }, required: ["text", "tone"] },
   },
   {
     name: "set_reminder",
-    description:
-      "Stage a reminder. Surfaces a confirm card, does not schedule until the user confirms.",
-    input_schema: {
-      type: "object",
-      properties: {
-        text: { type: "string" },
-        whenIso: {
-          type: "string",
-          description: "ISO 8601 timestamp for when the reminder should fire.",
-        },
-      },
-      required: ["text", "whenIso"],
-    },
+    description: "Stage a reminder. Optionally tie it to a specific past message so the notification references it. Confirm-gated.",
+    input_schema: { type: "object", properties: { text: { type: "string" }, whenIso: { type: "string" }, tiedToMessageId: { type: "string" } }, required: ["text", "whenIso"] },
+  },
+  {
+    name: "schedule_message",
+    description: "Stage a message to be sent at a chosen time. Confirm-gated; up to 24 h ahead currently.",
+    input_schema: { type: "object", properties: { targetPeerId: { type: "string" }, isGroup: { type: "boolean" }, body: { type: "string" }, whenIso: { type: "string" } }, required: ["targetPeerId", "isGroup", "body", "whenIso"] },
+  },
+  {
+    name: "mark_thread_read",
+    description: "Mark every inbound message in one thread as read. Immediate; no confirm.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" } }, required: ["peerId"] },
+  },
+  {
+    name: "delete_message",
+    description: "Delete-for-everyone one of the user's own messages. Confirm-gated. Server side just relays a tombstone; recipients render the message as deleted.",
+    input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
+  },
+  {
+    name: "create_calendar_event",
+    description: "Emit a .ics file the user's calendar can import. Confirm-gated.",
+    input_schema: { type: "object", properties: { title: { type: "string" }, whenIso: { type: "string" }, durationMin: { type: "number" }, notes: { type: "string" } }, required: ["title", "whenIso"] },
+  },
+  {
+    name: "create_note",
+    description: "Save a note as a reminder-with-far-future-time so it lives in the reminders list. Confirm-gated.",
+    input_schema: { type: "object", properties: { title: { type: "string" }, body: { type: "string" } }, required: ["title", "body"] },
+  },
+  {
+    name: "add_contact_by_handle",
+    description: "Add someone to the local contacts by their @handle. Confirm-gated.",
+    input_schema: { type: "object", properties: { handle: { type: "string" } }, required: ["handle"] },
+  },
+  {
+    name: "save_contact_to_phone",
+    description: "Export an existing contact as a vCard the device's Contacts app can import. Confirm-gated.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" } }, required: ["peerId"] },
   },
   {
     name: "export_to_email",
-    description:
-      "Stage an email that compiles specific messages (by id, from search_messages) into a body. Surfaces a confirm card that warns the user this leaves Aegent's E2E boundary — do not send silently.",
-    input_schema: {
-      type: "object",
-      properties: {
-        messageIds: { type: "array", items: { type: "string" } },
-        recipientEmail: { type: "string" },
-        note: { type: "string" },
-      },
-      required: ["messageIds", "recipientEmail"],
-    },
+    description: "Compile specific messages by id into an email body. Warns the user this leaves the E2E boundary. Confirm-gated.",
+    input_schema: { type: "object", properties: { messageIds: { type: "array", items: { type: "string" } }, recipientEmail: { type: "string" }, note: { type: "string" } }, required: ["messageIds", "recipientEmail"] },
   },
   {
     name: "backup_thread",
-    description:
-      "Compile an entire conversation (with a contact or group) into a plaintext email, oldest first. Prefer this over export_to_email when the user says 'backup', 'archive', or 'save the chat'. Media is referenced by type — the encrypted media itself doesn't leave the app. Surfaces a confirm card; does not send until the user approves.",
-    input_schema: {
-      type: "object",
-      properties: {
-        peerId: { type: "string", description: "The contact id or group id whose thread to back up." },
-        recipientEmail: { type: "string" },
-        note: { type: "string", description: "Optional intro line placed at the top of the backup email." },
-        sinceDaysAgo: { type: "number", description: "Optional: only include messages from the last N days." },
-      },
-      required: ["peerId", "recipientEmail"],
-    },
+    description: "Compile an entire conversation into a plaintext email backup. Media referenced by type only. Confirm-gated; warns about email leaving E2E.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, recipientEmail: { type: "string" }, note: { type: "string" }, sinceDaysAgo: { type: "number" } }, required: ["peerId", "recipientEmail"] },
   },
   {
     name: "schedule_backup",
-    description:
-      "Schedule a backup_thread to fire at a chosen time. Persists locally; the user will see a confirm card the next time the app is open at or after that time. Use whenever the user says 'backup at X', 'every night', 'later today'.",
-    input_schema: {
-      type: "object",
-      properties: {
-        peerId: { type: "string" },
-        recipientEmail: { type: "string" },
-        whenIso: { type: "string", description: "ISO 8601 timestamp for when the backup should fire." },
-        note: { type: "string" },
-      },
-      required: ["peerId", "recipientEmail", "whenIso"],
-    },
+    description: "Persist a backup to fire at a chosen time. When the app is next open at/after that time, the confirm card appears.",
+    input_schema: { type: "object", properties: { peerId: { type: "string" }, recipientEmail: { type: "string" }, whenIso: { type: "string" }, note: { type: "string" } }, required: ["peerId", "recipientEmail", "whenIso"] },
   },
 ] as const;
 
@@ -157,21 +216,25 @@ Context you can trust:
 The user's messages are end-to-end encrypted. Retrieval happens locally on their device via the tools below; you only see what a tool returns.
 
 Rules that do not bend:
-Write tools (draft_message, forward_message, set_reminder, export_to_email, backup_thread, schedule_backup) never send or execute on their own — they stage a confirm card the user must approve. When one returns {staged: true, ...}, tell the user in one sentence that you've prepared it and ask them to confirm the card. Never re-invoke the same staged action.
-Prefer resolve_target before draft_message or forward_message.
-Prefer search_messages before forward_message or export_to_email so you can hand over a specific message id.
-Email export and backup cross the E2E boundary — mention that in one short clause.
+Every write tool (draft_message, reply_to_message, forward_message, set_reminder, schedule_message, create_calendar_event, create_note, add_contact_by_handle, save_contact_to_phone, export_to_email, backup_thread, delete_message) stages a confirm card the user must approve. When one returns {staged: true, ...}, tell the user you've prepared it and ask them to confirm the card. Never re-invoke the same staged action.
+
+Read-then-write pattern:
+Prefer resolve_target before drafting/forwarding/scheduling to get a stable id from a fuzzy name.
+Prefer search_messages, search_exact, search_by_date_range, search_by_sender, or get_last_message before forward_message/export_to_email/reply_to_message so you have a specific message id.
+For "what did they say next" style follow-ups, use get_context_around with a message id you already have.
 
 Voice:
 Answer like a person, not a document. Short sentences. Plain prose.
 Only use bullets or headings when you have three or more genuinely separate items — never for two-item answers or single facts.
 Never restate a tool's raw output; summarise what matters and move on.
 If you did not find something, say so directly. Don't invent detail.
-Skip preambles ("Sure!", "Of course!"). Skip trailing offers ("let me know if…"). Just answer.
+Skip preambles ("Sure!", "Of course!") and trailing offers ("let me know if…"). Just answer.
+For tone-adjust: call tone_adjust, get the rewritten text, then call draft_message with it. Don't paste raw rewritten text into your reply.
+For email export or backup, mention in one short clause that it leaves the E2E boundary.
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. Convert relative times ("tomorrow", "next Monday", "in an hour") into concrete ISO timestamps in the user's local timezone.`;
 
-// ---- types coming back from Anthropic ----
+// ---- Anthropic types ----
 
 type ContentBlock =
   | { type: "text"; text: string }
@@ -189,35 +252,25 @@ type Message = { role: "user" | "assistant"; content: unknown };
 
 // ---- the loop ----
 
-const MAX_TURNS = 6;
+const MAX_TURNS = 8;
 
 export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
-  const messages: Message[] = [
-    { role: "user", content: userInput },
-  ];
+  const messages: Message[] = [{ role: "user", content: userInput }];
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let resp: Response;
-    try {
-      resp = await callTurn(messages);
-    } catch (e) {
-      yield { kind: "error", text: `LLM: ${(e as Error).message}` };
-      return;
-    }
+    try { resp = await callTurn(messages); }
+    catch (e) { yield { kind: "error", text: `LLM: ${(e as Error).message}` }; return; }
 
     messages.push({ role: "assistant", content: resp.content });
 
-    // Surface any assistant text.
     for (const block of resp.content) {
       if (block.type === "text" && block.text.trim()) {
         yield { kind: "reply", text: block.text.trim() };
       }
     }
-
-    // If Claude didn't ask for tools, we're done.
     if (resp.stop_reason !== "tool_use") return;
 
-    // Execute every tool_use block, gather results, feed back for the next turn.
     const toolUses = resp.content.filter(
       (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
     );
@@ -252,7 +305,6 @@ async function callTurn(messages: Message[]): Promise<Response> {
       messages,
       tools: TOOLS,
       max_tokens: 1024,
-      // `temperature` intentionally omitted — Claude 5 models reject it.
     }),
   });
   if (!r.ok) {
@@ -262,52 +314,45 @@ async function callTurn(messages: Message[]): Promise<Response> {
   return (await r.json()) as Response;
 }
 
-// Dispatch one tool call. Returns:
-//   forClaude — what the LLM sees as its tool_result
-//   event    — optional AgentEvent to yield to the UI (e.g. a confirm card)
-async function runTool(
-  name: string,
-  args: Record<string, unknown>,
-): Promise<{ forClaude: unknown; event?: AgentEvent }> {
+// Dispatch table for tool calls. Anything not in here → error result.
+async function runTool(name: string, args: Record<string, unknown>): Promise<{ forClaude: unknown; event?: AgentEvent }> {
   try {
-    if (name === "search_messages") {
-      const r = await search_messages(args as { query: string; peerId?: string; sinceDaysAgo?: number });
-      return { forClaude: r.ok && r.kind === "data" ? r.value : { error: (r as { error?: string }).error ?? "no_data" } };
-    }
-    if (name === "resolve_target") {
-      const t = await resolveTarget(String(args.name ?? ""));
-      return { forClaude: t ?? { error: "not_found" } };
-    }
-    if (name === "list_reminders") {
-      const r = await list_reminders_tool();
-      return { forClaude: r.ok && r.kind === "data" ? r.value : { error: "unavailable" } };
-    }
-    if (name === "draft_message") {
-      const r = await draft_message(args as { targetPeerId: string; isGroup: boolean; body: string });
-      return stageResult(r);
-    }
-    if (name === "forward_message") {
-      const r = await forward_message(args as { messageId: string; toPeerId: string; toIsGroup: boolean; note?: string });
-      return stageResult(r);
-    }
-    if (name === "set_reminder") {
-      const r = await set_reminder(args as { text: string; whenIso: string });
-      return stageResult(r);
-    }
-    if (name === "export_to_email") {
-      const r = await export_to_email(args as { messageIds: string[]; recipientEmail: string; note?: string });
-      return stageResult(r);
-    }
-    if (name === "backup_thread") {
-      const r = await backup_thread(args as {
-        peerId: string; recipientEmail: string; note?: string; sinceDaysAgo?: number;
-      });
-      return stageResult(r);
-    }
+    // ---- reads ----
+    if (name === "search_messages")     return dataOnly(await search_messages(args as never));
+    if (name === "search_exact")        return dataOnly(await search_exact(args as never));
+    if (name === "search_by_date_range")return dataOnly(await search_by_date_range(args as never));
+    if (name === "search_by_sender")    return dataOnly(await search_by_sender(args as never));
+    if (name === "search_by_media_type")return dataOnly(await search_by_media_type(args as never));
+    if (name === "search_links_and_patterns") return dataOnly(await search_links_and_patterns(args as never));
+    if (name === "get_thread")          return dataOnly(await get_thread(args as never));
+    if (name === "get_context_around")  return dataOnly(await get_context_around(args as never));
+    if (name === "get_message_metadata")return dataOnly(await get_message_metadata(args as never));
+    if (name === "get_last_message")    return dataOnly(await get_last_message(args as never));
+    if (name === "get_unread_count")    return dataOnly(await get_unread_count(args as never));
+    if (name === "get_shared_media")    return dataOnly(await get_shared_media(args as never));
+    if (name === "summarize_thread")    return dataOnly(await summarize_thread(args as never));
+    if (name === "list_reminders")      return dataOnly(await list_reminders_tool());
+    if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
+    if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
+    if (name === "calculate")           return dataOnly(await calculate(args as never));
+    if (name === "tone_adjust")         return dataOnly(await tone_adjust(args as never));
+    if (name === "mark_thread_read")    return dataOnly(await mark_thread_read(args as never));
+
+    // ---- writes (stage confirm cards) ----
+    if (name === "draft_message")       return stageResult(await draft_message(args as never));
+    if (name === "reply_to_message")    return stageResult(await reply_to_message(args as never));
+    if (name === "forward_message")     return stageResult(await forward_message(args as never));
+    if (name === "set_reminder")        return stageResult(await set_reminder(args as never));
+    if (name === "schedule_message")    return stageResult(await schedule_message(args as never));
+    if (name === "delete_message")      return stageResult(await delete_message_tool(args as never));
+    if (name === "create_calendar_event") return stageResult(await create_calendar_event(args as never));
+    if (name === "create_note")         return stageResult(await create_note(args as never));
+    if (name === "add_contact_by_handle") return stageResult(await add_contact_by_handle(args as never));
+    if (name === "save_contact_to_phone") return stageResult(await save_contact_to_phone(args as never));
+    if (name === "export_to_email")     return stageResult(await export_to_email(args as never));
+    if (name === "backup_thread")       return stageResult(await backup_thread(args as never));
     if (name === "schedule_backup") {
-      const r = await schedule_backup(args as {
-        peerId: string; recipientEmail: string; whenIso: string; note?: string;
-      });
+      const r = await schedule_backup(args as never);
       return { forClaude: r.ok && r.kind === "data" ? r.value : { error: (r as { error?: string }).error ?? "unavailable" } };
     }
     return { forClaude: { error: `unknown tool ${name}` } };
@@ -316,17 +361,17 @@ async function runTool(
   }
 }
 
+function dataOnly(r: Awaited<ReturnType<typeof draft_message>>): { forClaude: unknown } {
+  if (!r.ok) return { forClaude: { error: r.error } };
+  if (r.kind === "data") return { forClaude: r.value };
+  // Shouldn't happen for a read tool, but stay honest.
+  return { forClaude: { error: "unexpected_kind" } };
+}
 function stageResult(r: Awaited<ReturnType<typeof draft_message>>): { forClaude: unknown; event?: AgentEvent } {
   if (!r.ok) return { forClaude: { error: r.error } };
   if (r.kind === "pending") {
     return {
-      forClaude: {
-        staged: true,
-        summary: r.explain,
-        // Give the LLM a compact description of what it staged so it can
-        // reference it in its final reply without re-invoking the tool.
-        action_kind: (r.action as PendingAction).kind,
-      },
+      forClaude: { staged: true, summary: r.explain, action_kind: (r.action as PendingAction).kind },
       event: { kind: "confirm", action: r.action, explain: r.explain },
     };
   }

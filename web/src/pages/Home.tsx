@@ -11,6 +11,7 @@ import { GlobalSearch } from "../components/GlobalSearch.js";
 import { Settings } from "../components/Settings.js";
 import { AgentSheet, pushAgentEvent } from "../components/Agent.js";
 import { ForwardSheet } from "../components/ForwardSheet.js";
+import { ContactsSheet } from "../components/Contacts.js";
 import { Brand } from "./Onboarding.js";
 import { api } from "../lib/api.js";
 import {
@@ -35,6 +36,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [settings, setSettings] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [forwardMsg, setForwardMsg] = useState<OpenedMessage | null>(null);
+  const [contactsOpen, setContactsOpen] = useState(false);
 
   const me = currentSession()?.user;
 
@@ -166,6 +168,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           }}>
             <Brand />
             <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+              <Button variant="icon" title="Contacts" onClick={() => setContactsOpen(true)}><Icon.contacts /></Button>
               <Button variant="icon" title="Agent (Ctrl+J)" onClick={() => setAgentOpen(true)}><Icon.agent /></Button>
               <Button variant="icon" title="Settings" onClick={() => setSettings(true)}><Icon.settings /></Button>
             </div>
@@ -212,22 +215,34 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         </Glass>
       )}
 
-      {/* Floating agent button (visible when the agent isn't open). */}
+      {/*
+        Floating agent button. Rules for where it lives:
+        - Hide when the agent panel is already open.
+        - Hide on wide viewports where the sidebar's Agent icon in the
+          header is already visible (would be redundant).
+        - Hide when a chat is open on mobile — the chat composer's
+          Send button sits in the bottom-right and the FAB would tap-
+          overlap it. In that mode the agent is reachable from the
+          back button + sidebar's agent icon.
+        - When it does show, sit above the composer (~76 px) with safe-
+          area applied so the Android nav bar doesn't clip it either.
+      */}
       <AnimatePresence>
-        {!agentOpen && (
+        {!agentOpen && bp === "sm" && !thread && (
           <motion.button
             initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.6, opacity: 0 }}
             whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
             transition={{ type: "spring", stiffness: 340, damping: 24 }}
             onClick={() => setAgentOpen(true)}
-            title="Open agent (Ctrl+J)"
+            title="Open agent"
             aria-label="Open agent"
             style={{
               position: "fixed",
-              right: "calc(20px + var(--safe-right))",
-              bottom: "calc(20px + var(--safe-bottom))",
+              right: "calc(18px + var(--safe-right))",
+              // Above the composer bar so it never intercepts a Send tap.
+              bottom: "calc(90px + var(--safe-bottom))",
               zIndex: 400,
-              width: 56, height: 56, borderRadius: 999, border: "none", cursor: "pointer",
+              width: 52, height: 52, borderRadius: 999, border: "none", cursor: "pointer",
               background: "linear-gradient(135deg, var(--violet), var(--aqua))",
               color: "#10132a",
               boxShadow: "0 12px 34px rgba(138,125,255,0.5)",
@@ -245,6 +260,8 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       <Settings open={settings} onClose={() => setSettings(false)} onSignedOut={onSignedOut} />
       <AgentSheet open={agentOpen} onClose={() => setAgentOpen(false)} onDidAct={() => setRefresh((k) => k + 1)} />
       <ForwardSheet open={!!forwardMsg} onClose={() => setForwardMsg(null)} message={forwardMsg} />
+      <ContactsSheet open={contactsOpen} onClose={() => setContactsOpen(false)}
+        onOpenThread={(pid) => openThread(pid, false)} />
     </div>
   );
 }

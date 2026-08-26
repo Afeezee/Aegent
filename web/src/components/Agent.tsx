@@ -277,9 +277,25 @@ function renderMsg(
 }
 
 function previewOf(a: PendingAction): string {
-  if (a.kind === "send") return `To: ${a.toDisplay}\n\n${a.body}`;
-  if (a.kind === "reminder") return `${a.text}\n\nWhen: ${new Date(a.whenIso).toLocaleString()}`;
-  return `To: ${a.recipientEmail}\nSubject: ${a.subject}\n\n${a.body}`;
+  switch (a.kind) {
+    case "send":
+      return `To: ${a.toDisplay}\n\n${a.body}`;
+    case "reminder":
+      return `${a.text}\n\nWhen: ${new Date(a.whenIso).toLocaleString()}`;
+    case "email":
+      return `To: ${a.recipientEmail}\nSubject: ${a.subject}\n\n${a.body}`;
+    case "delete":
+      return `Delete this message for everyone:\n\n${a.preview}`;
+    case "schedule_send":
+      return `To: ${a.toDisplay}\nAt: ${new Date(a.whenIso).toLocaleString()}\n\n${a.body}`;
+    case "calendar_event":
+      return `${a.title}\n${new Date(a.whenIso).toLocaleString()} · ${a.durationMin} min${a.notes ? `\n\n${a.notes}` : ""}`;
+    case "add_contact":
+      return `Add @${a.handle} to your contacts`;
+    case "save_contact_to_phone":
+      return `Save ${a.displayName} to your phone Contacts\n@${a.handle}${a.phone ? `\n${a.phone}` : ""}${a.email ? `\n${a.email}` : ""}`;
+    default: return "";
+  }
 }
 
 function uiFor(ev: AgentEvent): UiMsg {
