@@ -330,8 +330,42 @@ type Message = { role: "user" | "assistant"; content: unknown };
 
 const MAX_TURNS = 8;
 
-export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
-  const messages: Message[] = [{ role: "user", content: userInput }];
+// Keep the conversation window bounded. 12 prior turns (~6 exchanges)
+// is enough for the follow-up-context patterns users actually rely on
+// ('draft that message', 'send it to alice@x') without ballooning
+// tokens per turn.
+const MAX_PRIOR_TURNS = 12;
+
+// Anthropic requires alternating user/assistant messages, starting
+// with user and ending with a user message before the assistant
+// replies. Clean the history to that shape defensively — bad
+// sequences would 400 the API call outright.
+function normalizeHistory(prior: Array<{ role: "user" | "assistant"; content: string }>): Message[] {
+  const trimmed = prior.slice(-MAX_PRIOR_TURNS);
+  const out: Message[] = [];
+  let expect: "user" | "assistant" = "user";
+  for (const m of trimmed) {
+    if (!m.content || !m.content.trim()) continue;
+    // Drop consecutive same-role turns (rare, but happens if a
+    // reply lands with no user in between).
+    if (m.role !== expect) continue;
+    out.push({ role: m.role, content: m.content });
+    expect = expect === "user" ? "assistant" : "user";
+  }
+  // We're about to append the caller's current input as a user
+  // message, so the history must end with an assistant turn.
+  if (out.length && out[out.length - 1].role === "user") out.pop();
+  return out;
+}
+
+export async function* runLlm(
+  userInput: string,
+  history: Array<{ role: "user" | "assistant"; content: string }> = [],
+): AsyncGenerator<AgentEvent> {
+  const messages: Message[] = [
+    ...normalizeHistory(history),
+    { role: "user", content: userInput },
+  ];
   // Compose the per-turn system prompt with a fresh context snapshot
   // so the LLM knows how many chats exist, which one is active, and
   // stops asking obvious "which chat?" questions when the answer is

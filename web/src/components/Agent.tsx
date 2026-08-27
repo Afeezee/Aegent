@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Avatar, Button, Icon, toast } from "./ui.js";
-import { runAgent, type AgentEvent } from "../agent/loop.js";
+import { runAgent, type AgentEvent, type ConvTurn } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
 import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
 import { appendAgentTurn, clearAgentTurns, listAgentTurns } from "../lib/store.js";
@@ -118,12 +118,21 @@ export function AgentSheet({
   async function ask(text: string) {
     if (!text.trim() || busy) return;
     setInput("");
+    // Snapshot the transcript BEFORE we append this turn — that
+    // snapshot is what Claude gets as prior conversation. Filter to
+    // clean user↔assistant exchanges; internal thoughts / errors /
+    // confirm-card placeholders don't help the LLM.
+    const history: ConvTurn[] = msgs
+      .filter((m): m is Extract<UiMsg, { kind: "you" | "reply" }> =>
+        (m.kind === "you" || m.kind === "reply") && !!m.text?.trim())
+      .map((m) => ({ role: m.kind === "you" ? "user" : "assistant", content: m.text }));
+
     const youMsg: UiMsg = { id: crypto.randomUUID(), kind: "you", text };
     setMsgs((xs) => [...xs, youMsg]);
     persistTurn(youMsg);
     setBusy(true);
     try {
-      for await (const ev of runAgent(text)) {
+      for await (const ev of runAgent(text, { history })) {
         const m = uiFor(ev);
         setMsgs((xs) => [...xs, m]);
         persistTurn(m);

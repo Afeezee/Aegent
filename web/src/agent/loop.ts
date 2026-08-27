@@ -42,10 +42,23 @@ function isLlmAvailable(): Promise<boolean> {
   return llmProbe;
 }
 
-export async function* runAgent(input: string): AsyncGenerator<AgentEvent> {
+// A prior turn in this session's agent conversation. Only clean
+// user↔assistant exchanges are sent back to Claude — internal
+// thoughts, errors, and confirm-card placeholders don't belong in
+// the LLM's memory of the dialog.
+export type ConvTurn =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string };
+
+export async function* runAgent(
+  input: string,
+  opts: { history?: ConvTurn[] } = {},
+): AsyncGenerator<AgentEvent> {
   if (await isLlmAvailable()) {
-    yield* runLlm(input);
+    yield* runLlm(input, opts.history ?? []);
   } else {
+    // Offline planner is stateless regex routing — history has
+    // nothing to add and would just cost tokens if we pretended.
     yield* runOffline(input);
   }
 }
