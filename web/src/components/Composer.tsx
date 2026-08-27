@@ -5,7 +5,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import { Button, Icon, toast } from "./ui.js";
+import { Button, Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 import { pickFile, uploadMedia } from "../lib/media.js";
 import { sendMedia, sendText } from "../lib/session.js";
 import { emitTyping } from "../lib/socket.js";
@@ -78,9 +78,6 @@ export function Composer({
   const MAX_ATTACH_MB = 19;
 
   async function attach(file: File) {
-    // Guard for the two crash modes: file too big for the server (413),
-    // and file too big for the browser to hold in one Uint8Array without
-    // OOMing the WebView.
     if (file.size > MAX_ATTACH_MB * 1024 * 1024) {
       toast(
         `${file.name} is ${formatMB(file.size)} — max ${MAX_ATTACH_MB} MB. Try a smaller file or a link.`,
@@ -89,23 +86,42 @@ export function Composer({
       return;
     }
     setSending(true);
-    const label = file.name.length > 30 ? file.name.slice(0, 27) + "…" : file.name;
-    toast(`Encrypting ${label}…`, "info");
+    // Show one sticky toast that updates in place through the three
+    // phases: encrypt → upload (with real progress %) → done. No
+    // more three separate toasts spamming the corner.
+    const label = displayName(file);
+    const toastId = toast(`Encrypting ${label}…`, "info", { sticky: true });
     try {
       const picked = await pickFile(file);
-      toast(`Uploading ${label}…`, "info");
-      const ref = await uploadMedia(picked);
+      toastUpdate(toastId, { text: `Uploading ${label} · 0%`, progress: 0 });
+      const ref = await uploadMedia(picked, (frac) => {
+        const pct = Math.round(frac * 100);
+        toastUpdate(toastId, { text: `Uploading ${label} · ${pct}%`, progress: frac });
+      });
+      toastUpdate(toastId, { text: `Sending ${label}…`, progress: 1 });
       const res = await sendMedia(peerId, isGroup, ref, text.trim() || undefined, replyTo ?? undefined);
-      if (!res.ok) toast(`Send failed: ${res.error}`, "error");
-      else { setText(""); onClearReply(); toast(`${label} sent`, "ok"); onSent(); }
+      if (!res.ok) {
+        toastUpdate(toastId, { text: `Send failed: ${res.error}`, kind: "error", sticky: false, progress: undefined });
+      } else {
+        setText(""); onClearReply(); onSent();
+        toastUpdate(toastId, { text: `${label} sent`, kind: "ok", sticky: false, progress: undefined });
+      }
     } catch (e) {
-      // Common causes: OOM on very large files, network dropout mid-upload,
-      // WebView blob API quirks on Android. Surface the actual reason.
-      toast(`Attach failed: ${(e as Error).message || "unknown error"}`, "error");
+      toastUpdate(toastId, {
+        text: `Attach failed: ${(e as Error).message || "unknown error"}`,
+        kind: "error", sticky: false, progress: undefined,
+      });
     }
     finally { setSending(false); }
+    // Belt-and-braces: if we somehow left the sticky toast up, drop it.
+    setTimeout(() => toastDismiss(toastId), 6000);
   }
 
+  function displayName(file: File): string {
+    const raw = file.name || "file";
+    const short = raw.length > 30 ? raw.slice(0, 27) + "…" : raw;
+    return short;
+  }
   function formatMB(bytes: number): string {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }

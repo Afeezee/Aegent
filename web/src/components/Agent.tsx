@@ -9,6 +9,7 @@ import { Avatar, Button, Icon, toast } from "./ui.js";
 import { runAgent, type AgentEvent } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
 import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
+import { appendAgentTurn, clearAgentTurns, listAgentTurns } from "../lib/store.js";
 
 type UiMsg =
   | { id: string; kind: "you"; text: string }
@@ -32,7 +33,11 @@ export function AgentSheet({
   const reduce = useReducedMotion();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [msgs, setMsgs] = useState<UiMsg[]>([initialGreeting()]);
+  // Start empty; the persisted-history effect below fills this in on
+  // first open, appending the greeting only if the transcript is
+  // genuinely empty.
+  const [msgs, setMsgs] = useState<UiMsg[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const speechSupported = isSpeechSupported();
   const [listening, setListening] = useState(false);
@@ -43,10 +48,61 @@ export function AgentSheet({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [msgs]);
 
+  // Load persisted transcript once, on first open. Rows come back
+  // oldest-first from listAgentTurns. Confirm cards aren't persisted
+  // (replaying them would be misleading) — the placeholder-row kind
+  // renders as a subtle "[confirmation card shown]" line so the
+  // history reads correctly.
+  useEffect(() => {
+    if (!open || historyLoaded) return;
+    (async () => {
+      try {
+        const rows = await listAgentTurns();
+        const rehydrated: UiMsg[] = rows.map((r) => {
+          if (r.kind === "confirm_placeholder") {
+            return { id: r.id, kind: "thought", text: r.text };
+          }
+          return { id: r.id, kind: r.kind as "you" | "thought" | "reply" | "error", text: r.text };
+        });
+        setMsgs(rehydrated.length ? rehydrated : [initialGreeting()]);
+      } catch {
+        setMsgs([initialGreeting()]);
+      } finally {
+        setHistoryLoaded(true);
+      }
+    })();
+  }, [open, historyLoaded]);
+
+  // Persist any non-transient message that lands in the transcript.
+  // Confirm cards go in as a placeholder line so history reads right.
+  async function persistTurn(m: UiMsg): Promise<void> {
+    try {
+      if (m.kind === "confirm") {
+        await appendAgentTurn({
+          kind: "confirm_placeholder",
+          text: `[confirmation shown: ${m.explain}]`,
+        });
+      } else {
+        await appendAgentTurn({ kind: m.kind, text: m.text });
+      }
+    } catch { /* transient DB error — never fail the UI */ }
+  }
+
+  async function clearHistory() {
+    // `confirm` is shadowed by the local `confirm(id, action)` handler
+    // below — use the window global explicitly.
+    if (!window.confirm("Clear the entire agent chat history? This can't be undone.")) return;
+    await clearAgentTurns().catch(() => { /* ignore */ });
+    setMsgs([initialGreeting()]);
+    toast("Agent history cleared", "ok");
+  }
+
   // Subscribe to external pushes (e.g. scheduled backups coming due).
   useEffect(() => {
     const cb = (u: { kind: "reply"; text: string } | { kind: "confirm"; action: PendingAction; explain: string }) => {
-      setMsgs((xs) => [...xs, { ...u, id: crypto.randomUUID() } as UiMsg]);
+      const m = { ...u, id: crypto.randomUUID() } as UiMsg;
+      setMsgs((xs) => [...xs, m]);
+      persistTurn(m);
     };
     pushListeners.add(cb);
     return () => { pushListeners.delete(cb); };
@@ -62,14 +118,20 @@ export function AgentSheet({
   async function ask(text: string) {
     if (!text.trim() || busy) return;
     setInput("");
-    setMsgs((xs) => [...xs, { id: crypto.randomUUID(), kind: "you", text }]);
+    const youMsg: UiMsg = { id: crypto.randomUUID(), kind: "you", text };
+    setMsgs((xs) => [...xs, youMsg]);
+    persistTurn(youMsg);
     setBusy(true);
     try {
       for await (const ev of runAgent(text)) {
-        setMsgs((xs) => [...xs, uiFor(ev)]);
+        const m = uiFor(ev);
+        setMsgs((xs) => [...xs, m]);
+        persistTurn(m);
       }
     } catch (e) {
-      setMsgs((xs) => [...xs, { id: crypto.randomUUID(), kind: "error", text: (e as Error).message }]);
+      const err: UiMsg = { id: crypto.randomUUID(), kind: "error", text: (e as Error).message };
+      setMsgs((xs) => [...xs, err]);
+      persistTurn(err);
     } finally { setBusy(false); }
   }
 
@@ -142,6 +204,9 @@ export function AgentSheet({
                 <div style={{ fontWeight: 700 }}>Agent</div>
                 <div className="small">on-device · confirms before acting</div>
               </div>
+              <Button variant="icon" onClick={clearHistory} title="Clear conversation history" aria-label="Clear history">
+                <Icon.trash />
+              </Button>
               <Button variant="icon" onClick={onClose} aria-label="Close"><Icon.x /></Button>
             </header>
 

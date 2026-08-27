@@ -97,12 +97,25 @@ export type ScheduledBackup = {
   note?: string;
 };
 
+// One turn of the on-device agent conversation. Kept per-user in the
+// same encrypted-at-rest Dexie so refreshing / closing the app doesn't
+// lose the history. Confirm cards aren't persisted — replaying them
+// would be misleading; we only persist the you/thought/reply/error
+// slices plus a hint that a card was shown.
+export type AgentTurnRow = {
+  id: string;
+  createdAt: number;
+  kind: "you" | "thought" | "reply" | "error" | "confirm_placeholder";
+  text: string;
+};
+
 class AegentDB extends Dexie {
   contacts!: Table<ContactRow, string>;
   groups!: Table<GroupRow, string>;
   messages!: Table<StoredMessage, string>;
   reminders!: Table<ReminderRow, string>;
   scheduledBackups!: Table<ScheduledBackup, string>;
+  agentTurns!: Table<AgentTurnRow, string>;
   meta!: Table<{ k: string; v: string }, string>;
 
   constructor(userId: string) {
@@ -119,6 +132,11 @@ class AegentDB extends Dexie {
     this.version(2).stores({
       contacts: "id, email, phone, handle, displayName, lastSeenAt",
       scheduledBackups: "id, whenIso, peerId",
+    });
+    // v3: agent conversation history — per-user Dexie means each
+    // account keeps its own transcript, no cross-account leakage.
+    this.version(3).stores({
+      agentTurns: "id, createdAt",
     });
   }
 }
@@ -416,6 +434,25 @@ export async function listReminders(): Promise<ReminderRow[]> {
 }
 export async function deleteReminder(id: string) {
   await requireDb().reminders.delete(id);
+}
+
+// ---- agent conversation history ----
+
+export async function appendAgentTurn(row: Omit<AgentTurnRow, "id" | "createdAt">): Promise<AgentTurnRow> {
+  const stored: AgentTurnRow = { ...row, id: crypto.randomUUID(), createdAt: Date.now() };
+  await requireDb().agentTurns.put(stored);
+  return stored;
+}
+export async function listAgentTurns(limit = 400): Promise<AgentTurnRow[]> {
+  const rows = await requireDb().agentTurns
+    .orderBy("createdAt")
+    .reverse()
+    .limit(limit)
+    .toArray();
+  return rows.reverse(); // oldest → newest for display
+}
+export async function clearAgentTurns(): Promise<void> {
+  await requireDb().agentTurns.clear();
 }
 
 // ---- scheduled backups ----

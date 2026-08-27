@@ -207,17 +207,51 @@ export function Modal({
 
 // ---- toast ----
 
-export type Toast = { id: string; text: string; kind?: "info" | "ok" | "warn" | "error" };
+export type Toast = {
+  id: string;
+  text: string;
+  kind?: "info" | "ok" | "warn" | "error";
+  progress?: number; // 0..1 — when present, render a slim progress bar under the text
+  sticky?: boolean;  // if true, never auto-dismiss (caller manages via toastDismiss)
+};
 const toastListeners = new Set<(t: Toast[]) => void>();
 let toasts: Toast[] = [];
-export function toast(text: string, kind: Toast["kind"] = "info") {
-  const t: Toast = { id: crypto.randomUUID(), text, kind };
+const AUTO_DISMISS_MS = 3500;
+const scheduled = new Map<string, number>();
+
+function notify() { toastListeners.forEach((f) => f(toasts)); }
+function scheduleDismiss(id: string) {
+  const prev = scheduled.get(id);
+  if (prev) window.clearTimeout(prev);
+  const h = window.setTimeout(() => {
+    toasts = toasts.filter((x) => x.id !== id);
+    scheduled.delete(id);
+    notify();
+  }, AUTO_DISMISS_MS);
+  scheduled.set(id, h);
+}
+
+// Show a transient status. Returns an id the caller can update or
+// dismiss. For long-running work (uploads, transcription) pass
+// `sticky: true` so it stays put and use toastUpdate/toastDismiss.
+export function toast(text: string, kind: Toast["kind"] = "info", opts: { sticky?: boolean; progress?: number } = {}): string {
+  const t: Toast = { id: crypto.randomUUID(), text, kind, progress: opts.progress, sticky: opts.sticky };
   toasts = [...toasts, t];
-  toastListeners.forEach((f) => f(toasts));
-  window.setTimeout(() => {
-    toasts = toasts.filter((x) => x.id !== t.id);
-    toastListeners.forEach((f) => f(toasts));
-  }, 3500);
+  notify();
+  if (!opts.sticky) scheduleDismiss(t.id);
+  return t.id;
+}
+export function toastUpdate(id: string, patch: Partial<Omit<Toast, "id">>): void {
+  toasts = toasts.map((t) => t.id === id ? { ...t, ...patch } : t);
+  notify();
+  // If the caller changed sticky → false, re-schedule dismissal.
+  if (patch.sticky === false) scheduleDismiss(id);
+}
+export function toastDismiss(id: string): void {
+  toasts = toasts.filter((t) => t.id !== id);
+  const h = scheduled.get(id); if (h) window.clearTimeout(h);
+  scheduled.delete(id);
+  notify();
 }
 
 export function ToastHost() {
@@ -240,7 +274,22 @@ export function ToastHost() {
             }}
             initial={{ x: 40, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 40, opacity: 0 }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
-          >{t.text}</motion.div>
+          >
+            <div>{t.text}</div>
+            {typeof t.progress === "number" && (
+              <div style={{
+                marginTop: 8, height: 4, borderRadius: 999,
+                background: "rgba(255,255,255,0.1)", overflow: "hidden",
+              }}>
+                <div style={{
+                  width: `${Math.max(0, Math.min(1, t.progress)) * 100}%`,
+                  height: "100%",
+                  background: "linear-gradient(90deg, var(--violet), var(--aqua))",
+                  transition: "width .18s ease-out",
+                }} />
+              </div>
+            )}
+          </motion.div>
         ))}
       </AnimatePresence>
     </div>

@@ -27,7 +27,7 @@ import {
   save_contact_to_phone, schedule_backup, schedule_message,
   search_by_date_range, search_by_media_type, search_by_sender,
   search_exact, search_links_and_patterns, search_messages,
-  set_reminder, summarize_thread, tone_adjust, transcribe_voice, describe_image,
+  set_reminder, summarize_thread, tone_adjust, transcribe_voice, read_media,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -133,13 +133,13 @@ const TOOLS = [
     input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
   },
   {
-    name: "describe_image",
-    description: "Look at an image message the user has in a conversation. Decrypts it locally and hands the bytes to your own vision so you can describe what's in it, read text off a receipt/document, or answer a specific question about it. Use this whenever the user asks about an image — e.g. 'what does that receipt say', 'read this document', 'what's in the photo Ada sent last week'. Requires the image's messageId (get it from search_messages first). Images larger than 4.5 MB are refused; ask the user to send a smaller copy.",
+    name: "read_media",
+    description: "Read the *content* of any attachment message (image, PDF, or text-based file). Decrypts on-device, then hands the bytes/text to you in the right form for analysis: images use your native vision (OCR receipts, describe photos), PDFs get text-extracted, plain-text files (.txt/.md/.csv/.json/.xml/.log/etc.) are inlined. Use this whenever the user asks 'what does that receipt say', 'summarise the doc Ada sent', 'read this PDF', 'what's in the file from last week'. Requires the message id — get it from search_messages / search_by_media_type first. Refuses .docx/.xlsx/.pptx (ask for PDF or plain text) and images >4.5 MB (ask for a smaller copy).",
     input_schema: {
       type: "object",
       properties: {
         messageId: { type: "string" },
-        question: { type: "string", description: "Optional. What the user asked about the image — helps you focus." },
+        question: { type: "string", description: "Optional. What the user actually asked about the file — helps you focus." },
       },
       required: ["messageId"],
     },
@@ -313,17 +313,20 @@ export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
       if (event) yield event;
       yield { kind: "tool_result", name: use.name, value: forClaude };
 
-      // Vision fast-path: describe_image returns { _agent_image: {mime,base64}, ... }.
-      // Repackage as a tool_result with an image + text block so Claude
-      // can actually see the pixels.
-      const asObj = forClaude as { _agent_image?: { mime: string; base64: string }; caption?: string; senderName?: string; when?: number; question?: string; error?: string } | null;
+      // Content fast-path for read_media / describe_image tool results.
+      // The tool tags them with `_agent_image` (vision) or
+      // `_agent_text` (extracted text). Both get repackaged into the
+      // right tool_result content shape so Claude actually receives
+      // pixels or the document body, not a JSON stringification.
+      const asObj = forClaude as {
+        _agent_image?: { mime: string; base64: string };
+        _agent_text?: string;
+        caption?: string; senderName?: string; when?: number;
+        question?: string; filename?: string; mime?: string; pdfPages?: number;
+        error?: string;
+      } | null;
       if (asObj && asObj._agent_image) {
-        const meta = [
-          asObj.senderName ? `From ${asObj.senderName}` : null,
-          asObj.when ? `on ${new Date(asObj.when).toLocaleString()}` : null,
-          asObj.caption ? `Caption: ${asObj.caption}` : null,
-          asObj.question ? `User asked: ${asObj.question}` : null,
-        ].filter(Boolean).join(" · ");
+        const meta = describeMeta(asObj);
         toolResults.push({
           type: "tool_result",
           tool_use_id: use.id,
@@ -337,6 +340,19 @@ export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
               },
             },
             { type: "text", text: `Image contents above.${meta ? " " + meta : ""}` },
+          ],
+        });
+        continue;
+      }
+      if (asObj && typeof asObj._agent_text === "string") {
+        const meta = describeMeta(asObj);
+        // Fence the file body so Claude sees where the document ends
+        // and any surrounding meta begins.
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: use.id,
+          content: [
+            { type: "text", text: `${meta}\n\n--- FILE CONTENT ---\n${asObj._agent_text}\n--- END FILE ---` },
           ],
         });
         continue;
@@ -397,7 +413,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
     if (name === "transcribe_voice")    return dataOnly(await transcribe_voice(args as never));
-    if (name === "describe_image")      return dataOnly(await describe_image(args as never));
+    if (name === "read_media" || name === "describe_image") return dataOnly(await read_media(args as never));
     if (name === "tone_adjust")         return dataOnly(await tone_adjust(args as never));
     if (name === "mark_thread_read")    return dataOnly(await mark_thread_read(args as never));
 
@@ -422,6 +438,21 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
   } catch (e) {
     return { forClaude: { error: (e as Error).message } };
   }
+}
+
+function describeMeta(o: {
+  senderName?: string; when?: number; caption?: string;
+  question?: string; filename?: string; mime?: string; pdfPages?: number;
+}): string {
+  return [
+    o.filename ? `File: ${o.filename}` : null,
+    o.mime ? `Type: ${o.mime}` : null,
+    o.pdfPages ? `Pages: ${o.pdfPages}` : null,
+    o.senderName ? `From: ${o.senderName}` : null,
+    o.when ? `Sent: ${new Date(o.when).toLocaleString()}` : null,
+    o.caption ? `Caption: ${o.caption}` : null,
+    o.question ? `User asked: ${o.question}` : null,
+  ].filter(Boolean).join(" · ");
 }
 
 function dataOnly(r: Awaited<ReturnType<typeof draft_message>>): { forClaude: unknown } {

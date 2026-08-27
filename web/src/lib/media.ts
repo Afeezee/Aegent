@@ -34,10 +34,13 @@ export type PickedMedia = {
   height?: number;
 };
 
-export async function uploadMedia(picked: PickedMedia): Promise<MediaRef> {
+export async function uploadMedia(
+  picked: PickedMedia,
+  onProgress?: (fraction: number) => void,
+): Promise<MediaRef> {
   const key = newContentKey();
   const encrypted = secretBoxSealBytes(key, picked.bytes);
-  const { id, size } = await api.uploadBlob(encrypted, "application/octet-stream");
+  const { id, size } = await api.uploadBlob(encrypted, "application/octet-stream", onProgress);
   return {
     kind: picked.kind,
     blobId: id,
@@ -70,8 +73,10 @@ export async function objectUrlFor(ref: MediaRef): Promise<string> {
 
 export async function pickFile(file: File): Promise<PickedMedia> {
   const buf = new Uint8Array(await file.arrayBuffer());
-  const kind = kindOf(file.type, file.name);
-  const base: PickedMedia = { bytes: buf, mime: file.type || "application/octet-stream", kind, filename: file.name };
+  const mime = file.type || guessMimeFromName(file.name) || "application/octet-stream";
+  const kind = kindOf(mime, file.name);
+  const filename = sanitizeFilename(file.name, mime);
+  const base: PickedMedia = { bytes: buf, mime, kind, filename };
   if (kind === "image") {
     try {
       const { width, height } = await imageDimensions(file);
@@ -79,6 +84,73 @@ export async function pickFile(file: File): Promise<PickedMedia> {
     } catch { /* ignore */ }
   }
   return base;
+}
+
+// Some Android WebView flavours hand back a File object whose `name`
+// is the calling process (`chrome.exe`, `webview_shell.exe`) instead
+// of the real filename — an old Chromium bug that surfaces when the
+// file provider strips the path. Sanitize: if the name matches a
+// known-junk pattern, or has an executable extension we would never
+// actually want to send from a picker, replace with a MIME-derived
+// fallback ("document.pdf", "photo.jpg", …).
+function sanitizeFilename(name: string, mime: string): string {
+  const junk = /^(chrome|webview|firefox|edge|browser)\.(exe|apk|com)$/i;
+  const executable = /\.(exe|com|bat|cmd|dll|scr|msi)$/i;
+  const stripped = (name || "").trim();
+  const bad = !stripped || junk.test(stripped) || executable.test(stripped);
+  if (bad) return fallbackNameFor(mime);
+  // Also strip any path separators — some pickers slip in "/storage/..."
+  return stripped.split(/[/\\]/).pop() || fallbackNameFor(mime);
+}
+
+function fallbackNameFor(mime: string): string {
+  const base = mime.startsWith("image/") ? "photo"
+    : mime.startsWith("video/") ? "video"
+    : mime.startsWith("audio/") ? "audio"
+    : mime === "application/pdf" ? "document"
+    : "file";
+  const ext = extForMime(mime);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 15);
+  return `${base}-${stamp}${ext}`;
+}
+
+function extForMime(mime: string): string {
+  const map: Record<string, string> = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "image/heic": ".heic", "image/heif": ".heif",
+    "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
+    "audio/mp4": ".m4a", "audio/mpeg": ".mp3", "audio/webm": ".webm", "audio/ogg": ".ogg",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+    "text/plain": ".txt", "text/csv": ".csv", "text/markdown": ".md",
+    "application/json": ".json",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  };
+  return map[mime] ?? "";
+}
+
+// When a File comes through without a MIME (again, some Android
+// pickers), try to guess from the extension of whatever name we DID
+// get. Better than "application/octet-stream" for the LLM downstream.
+function guessMimeFromName(name: string): string | undefined {
+  const m = /\.([a-zA-Z0-9]{1,5})$/.exec(name);
+  if (!m) return undefined;
+  const ext = m[1].toLowerCase();
+  const map: Record<string, string> = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+    webp: "image/webp", heic: "image/heic", heif: "image/heif",
+    mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm",
+    m4a: "audio/mp4", mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav",
+    pdf: "application/pdf",
+    zip: "application/zip",
+    txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  };
+  return map[ext];
 }
 
 function kindOf(mime: string, name: string): MediaRef["kind"] {

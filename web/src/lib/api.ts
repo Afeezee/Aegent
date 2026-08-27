@@ -123,22 +123,42 @@ export const api = {
   }),
   backupMeta: () => req<{ size: number; createdAt: number }>("/api/backup/meta"),
 
-  uploadBlob: async (bytes: Uint8Array, mime: string): Promise<{ id: string; size: number }> => {
-    const headers = new Headers();
-    headers.set("content-type", "application/octet-stream");
-    headers.set("x-mime", mime);
+  // XHR-based so we can report real upload progress to the caller.
+  // `fetch` has no upload-progress API in the WebView environment we
+  // ship in. onProgress is called with a 0..1 fraction (or -1 during
+  // the pre-flight body-preparation step, which is instantaneous).
+  uploadBlob: (bytes: Uint8Array, mime: string, onProgress?: (fraction: number) => void):
+    Promise<{ id: string; size: number }> => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", apiUrl("/api/blobs"), true);
+    xhr.setRequestHeader("content-type", "application/octet-stream");
+    xhr.setRequestHeader("x-mime", mime);
     const t = loadToken();
-    if (t) headers.set("authorization", `Bearer ${t}`);
-    // Blob constructor's typing narrows to ArrayBuffer; a plain Uint8Array
-    // is fine at runtime but TS 5+ objects to the SharedArrayBuffer overlap.
-    const r = await fetch(apiUrl("/api/blobs"), {
-      method: "POST",
-      body: new Blob([bytes as BlobPart], { type: "application/octet-stream" }),
-      headers,
-    });
-    if (!r.ok) throw new Error(`upload ${r.status}`);
-    return r.json();
-  },
+    if (t) xhr.setRequestHeader("authorization", `Bearer ${t}`);
+    // Progress events on the upload stream — total is bytes queued
+    // (roughly equal to bytes.byteLength once the platform has
+    // consumed the body). `lengthComputable` is true for our
+    // origin.
+    xhr.upload.onprogress = (e) => {
+      if (!onProgress) return;
+      if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total);
+    };
+    xhr.upload.onloadstart = () => onProgress?.(0);
+    xhr.upload.onload = () => onProgress?.(1);
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.ontimeout = () => reject(new Error("timeout"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { reject(new Error(`parse ${(e as Error).message}`)); }
+      } else {
+        reject(new Error(`upload ${xhr.status}`));
+      }
+    };
+    xhr.timeout = 120_000; // 2 min hard cap for the whole upload
+    xhr.send(new Blob([bytes as BlobPart], { type: "application/octet-stream" }));
+  }),
   downloadBlob: async (id: string): Promise<Uint8Array> => {
     const t = loadToken();
     const r = await fetch(apiUrl(`/api/blobs/${id}`), {

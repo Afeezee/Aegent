@@ -658,51 +658,160 @@ export async function transcribe_voice(args: { messageId: string }): Promise<Too
   }
 }
 
-// ---- describe_image ----
+// ---- read_media ----
 //
-// Return an image message's decrypted bytes to the LLM as a vision
-// content block. Claude 5 (Sonnet/Opus/Haiku 4.5) has native vision;
-// no separate OCR service needed. Works for receipts, screenshots,
-// documents photographed with a phone — anything the model can look
-// at.
+// Give the LLM the *content* of an attachment message, not just its
+// metadata. Routes on MIME so a single tool covers images, PDFs, and
+// text-based files with the right transport in each case:
 //
-// The llm loop looks for the `_agent_image` marker on this tool's
-// return value and repackages the tool_result as an image + text
-// content block. Data never leaves the LLM proxy path; the image is
-// only sent for that one turn.
+//   - image/*                 → vision content block (Claude 5's native OCR)
+//   - application/pdf         → extract text on-device with pdfjs-dist
+//                                (works for text-based PDFs; scanned/image
+//                                PDFs get a note that we'd need OCR)
+//   - text/* + json/xml/csv/  → decode as UTF-8, cap to ~200 KB of chars
+//     tsv/etc                    (Anthropic's context window handles a
+//                                 whole receipt or short doc; longer docs
+//                                 get truncated with a marker so the model
+//                                 knows there's more)
+//   - anything else           → refuse cleanly ("we don't parse .docx yet;
+//                                send as PDF or plain text")
+//
+// The LLM loop unpacks the `_agent_image` / `_agent_text` markers and
+// builds the right Anthropic content blocks. Nothing about this path
+// leaves the device except the specific bytes handed to the LLM for
+// this one turn.
 
-export async function describe_image(args: { messageId: string; question?: string }): Promise<ToolResult> {
+const MAX_INLINE_IMAGE_MB = 4.5;   // Anthropic vision cap
+const MAX_INLINE_TEXT_CHARS = 200_000;
+
+export async function read_media(args: { messageId: string; question?: string }): Promise<ToolResult> {
   const rows = await everyMessage();
   const msg = rows.find((m) => m.id === args.messageId);
   if (!msg) return { ok: false, error: "message_not_found" };
-  if (!msg.media || msg.media.kind !== "image") return { ok: false, error: "not_an_image" };
-  // Anthropic's Messages API accepts base64 images up to ~5 MB.
-  // We keep our own attach cap at 19 MB; guard here.
-  const MAX_INLINE_MB = 4.5;
-  if (msg.media.byteSize > MAX_INLINE_MB * 1024 * 1024) {
-    return { ok: false, error: `image too large for inline vision (${(msg.media.byteSize/1024/1024).toFixed(1)} MB > ${MAX_INLINE_MB} MB)` };
-  }
+  if (!msg.media) return { ok: false, error: "message_has_no_media" };
+  const media = msg.media;
+  const senderName = msg.direction === "out" ? "you" : ((await getContact(msg.senderId))?.displayName ?? "someone");
+  const meta = {
+    senderName,
+    when: msg.createdAt,
+    caption: msg.caption ?? undefined,
+    question: args.question,
+    filename: media.filename,
+    mime: media.mime,
+  };
+
   try {
-    const enc = await api.downloadBlob(msg.media.blobId);
-    const pt = secretBoxOpenBytes(b64.decode(msg.media.contentKey), enc);
-    return {
-      ok: true,
-      kind: "data",
-      value: {
-        _agent_image: {
-          mime: msg.media.mime || "image/jpeg",
-          base64: b64.encode(pt),
-        },
-        caption: msg.caption ?? undefined,
-        senderName: (await getContact(msg.senderId))?.displayName ?? "someone",
-        when: msg.createdAt,
-        question: args.question,
-      },
-    };
+    const enc = await api.downloadBlob(media.blobId);
+    const pt = secretBoxOpenBytes(b64.decode(media.contentKey), enc);
+
+    // Images → hand pixels to Claude vision.
+    if (media.kind === "image" || media.mime.startsWith("image/")) {
+      if (media.byteSize > MAX_INLINE_IMAGE_MB * 1024 * 1024) {
+        return { ok: false, error: `image too large for inline vision (${(media.byteSize/1024/1024).toFixed(1)} MB > ${MAX_INLINE_IMAGE_MB} MB)` };
+      }
+      return { ok: true, kind: "data", value: {
+        _agent_image: { mime: media.mime || "image/jpeg", base64: b64.encode(pt) },
+        ...meta,
+      }};
+    }
+
+    // PDFs → extract text on-device.
+    if (media.mime === "application/pdf") {
+      const text = await extractPdfText(pt);
+      if (!text || text.trim().length === 0) {
+        return { ok: true, kind: "data", value: {
+          _agent_text: "[PDF has no extractable text — appears to be a scanned image. On-device OCR isn't wired for PDFs yet; ask the user to send a text PDF or a photo of the page.]",
+          ...meta,
+        }};
+      }
+      const truncated = text.length > MAX_INLINE_TEXT_CHARS;
+      return { ok: true, kind: "data", value: {
+        _agent_text: truncated
+          ? text.slice(0, MAX_INLINE_TEXT_CHARS) + `\n\n[…document truncated. Original length: ${text.length} chars.]`
+          : text,
+        ...meta,
+        pdfPages: (await countPdfPages(pt).catch(() => undefined)),
+      }};
+    }
+
+    // Text-based formats → decode and inline.
+    if (isTextish(media.mime, media.filename)) {
+      // Reject huge text files defensively (a 5 MB CSV shouldn't blow
+      // out the LLM context; ask the user for a slice).
+      if (media.byteSize > 5 * 1024 * 1024) {
+        return { ok: false, error: `${media.filename ?? "text file"} is ${(media.byteSize/1024/1024).toFixed(1)} MB — send a smaller slice.` };
+      }
+      const decoded = new TextDecoder("utf-8", { fatal: false }).decode(pt);
+      const truncated = decoded.length > MAX_INLINE_TEXT_CHARS;
+      return { ok: true, kind: "data", value: {
+        _agent_text: truncated
+          ? decoded.slice(0, MAX_INLINE_TEXT_CHARS) + `\n\n[…file truncated. Original length: ${decoded.length} chars.]`
+          : decoded,
+        ...meta,
+      }};
+    }
+
+    // Everything else — be honest about what we don't parse yet.
+    return { ok: false, error: `Can't analyze ${media.mime} yet. Aegent reads images, PDFs, and plain-text files (txt/md/json/csv/xml). For .docx/.xlsx/.pptx, ask the sender to export to PDF or paste the content.` };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
 }
+
+// ---- helpers ----
+
+function isTextish(mime: string, filename?: string): boolean {
+  if (mime.startsWith("text/")) return true;
+  const textishMimes = new Set([
+    "application/json", "application/xml", "application/x-yaml", "application/yaml",
+    "application/x-log", "application/x-sh", "application/javascript",
+    "application/csv", "text/csv",
+  ]);
+  if (textishMimes.has(mime)) return true;
+  // Extension fallback for anything the picker mis-labelled.
+  const ext = filename?.split(".").pop()?.toLowerCase() ?? "";
+  return ["txt", "md", "log", "csv", "tsv", "json", "yaml", "yml", "xml", "srt", "ini", "toml"].includes(ext);
+}
+
+async function extractPdfText(bytes: Uint8Array): Promise<string> {
+  // Lazy-import — 500 KB of pdfjs never lands in the bundle for users
+  // who don't ask the agent to read a PDF.
+  const pdfjs = await import("pdfjs-dist");
+  // pdfjs v6 needs a worker — we tell it to use the fake worker path
+  // so it runs on the main thread. Voice-note-sized docs (a receipt,
+  // a memo) parse in <500 ms; heavier docs will hitch briefly. For
+  // large docs the truncation in read_media caps output anyway.
+  (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = "";
+  const doc = await pdfjs.getDocument({ data: bytes } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
+  const parts: string[] = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const line = content.items
+      .map((it) => (it as { str?: string }).str ?? "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (line) parts.push(`--- Page ${i} ---\n${line}`);
+  }
+  await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.();
+  return parts.join("\n\n");
+}
+
+async function countPdfPages(bytes: Uint8Array): Promise<number | undefined> {
+  try {
+    const pdfjs = await import("pdfjs-dist");
+    (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = "";
+    const doc = await pdfjs.getDocument({ data: bytes } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
+    const n = doc.numPages;
+    await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.();
+    return n;
+  } catch { return undefined; }
+}
+
+// Backwards-compatible alias — an older LLM prompt cached the old
+// tool name. Delegates to the general path.
+export const describe_image = read_media;
 
 // ---- general-assistant tools ----
 
