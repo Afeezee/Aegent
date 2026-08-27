@@ -35,9 +35,18 @@ async function loadPipeline(onProgress?: ProgressCb) {
     const { pipeline, env } = await import("@huggingface/transformers");
     env.allowLocalModels = false;
     env.useBrowserCache = true;
+    // dtype: previously set to "q8" for a smaller (~40 MB) model, but
+    // the ONNX runtime shipped with @huggingface/transformers 4.x
+    // rejects some q8-quantised whisper checkpoints with
+    // "Missing required scale ... embed_tokens.weight_merged_0_scale".
+    // Fall back to fp32 (~150 MB one-time download, then browser
+    // cache). If a specific device pulls down bandwidth is tight,
+    // switch encoder to q4 and decoder to fp32 which is the mixed
+    // combo transformers.js recommends for Whisper — but we'd need to
+    // verify against the same runtime version first.
     return await pipeline("automatic-speech-recognition", DEFAULT_MODEL, {
       progress_callback: onProgress,
-      dtype: "q8",
+      dtype: "fp32",
     });
   } catch (e) {
     throw new TranscribeError("model_load", e);

@@ -24,12 +24,21 @@ import {
   upsertContact, upsertGroup, type OpenedMessage, type Thread,
 } from "../lib/store.js";
 import { backup_thread } from "../agent/tools.js";
+import { setActiveThread } from "../agent/llm.js";
 import { toast } from "../components/ui.js";
 import { siteUrl } from "../lib/api.js";
 import { shareInvite } from "../lib/contacts-integration.js";
 
 export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [thread, setThread] = useState<Thread | null>(null);
+  // Whenever the visible thread changes, tell the agent so its
+  // per-turn "current context" section names it — that's what lets
+  // the LLM treat "reply to him" as unambiguous when a chat is open.
+  useEffect(() => {
+    setActiveThread(thread
+      ? { peerId: thread.peerId, label: thread.title, isGroup: thread.isGroup }
+      : null);
+  }, [thread]);
   const [refresh, setRefresh] = useState(0);
   const [compose, setCompose] = useState(false);
   const [search, setSearch] = useState(false);

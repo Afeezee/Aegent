@@ -227,7 +227,13 @@ const TOOLS = [
   },
 ] as const;
 
-const SYSTEM_PROMPT = `You are Aegent's on-device assistant — warm, brief, and precise.
+// The base prompt is stable across turns; the per-turn "current
+// context" section (whose chats exist, which is active, how many
+// unread) is computed at ask() time and appended below. This gives
+// Claude enough situational awareness to skip the "which chat?"
+// clarification when there's only one, and to default to the active
+// thread when the user says "him" / "her" / "them" without naming.
+const BASE_PROMPT = `You are Aegent's on-device assistant — warm, brief, and precise.
 
 Context you can trust:
 The user's messages are end-to-end encrypted. Retrieval happens locally on their device via the tools below; you only see what a tool returns.
@@ -239,6 +245,11 @@ Read-then-write pattern:
 Prefer resolve_target before drafting/forwarding/scheduling to get a stable id from a fuzzy name.
 Prefer search_messages, search_exact, search_by_date_range, search_by_sender, or get_last_message before forward_message/export_to_email/reply_to_message so you have a specific message id.
 For "what did they say next" style follow-ups, use get_context_around with a message id you already have.
+For anything referencing an attachment ('the receipt Ada sent', 'that PDF', 'this photo') — resolve the message first (search_by_sender + search_by_media_type is a good shape) then call read_media(messageId) so you can actually see the contents.
+
+Situational awareness (READ CAREFULLY, this is why you shouldn't ask obvious questions):
+The user's world may be small. If they only have one contact and refer to a chat, that IS the chat — don't ask which one. If a specific thread is 'active' below, treat unqualified pronouns and 'the chat' as referring to that thread. If they say 'send X' with no target and there is only one plausible target, use it and confirm the target in the card, don't stall.
+Only ask a clarifying question when there is genuine ambiguity that can't be resolved from what's below.
 
 Voice:
 Answer like a person, not a document. Short sentences. Plain prose.
@@ -250,6 +261,54 @@ For tone-adjust: call tone_adjust, get the rewritten text, then call draft_messa
 For email export or backup, mention in one short clause that it leaves the E2E boundary.
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. Convert relative times ("tomorrow", "next Monday", "in an hour") into concrete ISO timestamps in the user's local timezone.`;
+
+// Track the last active thread so the agent context can name it in
+// the system prompt. Bumped by Home whenever a Chat comes into view.
+let ACTIVE_THREAD: { peerId: string; label: string; isGroup: boolean } | null = null;
+export function setActiveThread(t: { peerId: string; label: string; isGroup: boolean } | null) {
+  ACTIVE_THREAD = t;
+}
+
+// Build the per-turn "current context" section. Compact — hundreds of
+// tokens, not thousands.
+async function buildContextSuffix(): Promise<string> {
+  try {
+    const [{ listContacts, listGroups }] = await Promise.all([
+      import("../lib/store.js"),
+    ]);
+    const [contacts, groups] = await Promise.all([listContacts(), listGroups()]);
+    const total = contacts.length + groups.length;
+
+    const lines: string[] = [];
+    lines.push(`Current context:`);
+    lines.push(`- Contacts: ${contacts.length}. Groups: ${groups.length}.`);
+    if (total === 0) {
+      lines.push(`- There are no chats yet. If the user asks about messages, tell them there's nothing to search until they start one.`);
+    } else if (total === 1) {
+      // TS union of ContactRow | GroupRow — the `in` narrowing needs
+      // a widened local; assert to Record<string, unknown> just for
+      // the label lookup so the property discriminant works.
+      const only = (contacts[0] ?? groups[0]) as unknown as Record<string, unknown>;
+      const label = ("displayName" in only ? only.displayName : only.name) as string;
+      const kind = "memberIds" in only ? ", group" : "";
+      lines.push(`- The user has ONE chat: "${label}" (peerId: ${only.id}${kind}). Any unqualified reference to "the chat" / "them" / "him" / "her" almost certainly means this one — don't ask.`);
+    } else {
+      // List up to 8 most-recent so the agent can resolve nicknames.
+      const merged = [
+        ...contacts.map((c) => ({ id: c.id, label: c.displayName, kind: "contact", when: c.lastSeenAt })),
+        ...groups.map((g) => ({ id: g.id, label: g.name, kind: "group", when: g.lastSeenAt })),
+      ].sort((a, b) => b.when - a.when).slice(0, 8);
+      lines.push(`- Recent chats (${merged.length} of ${total}, most-recent first):`);
+      for (const m of merged) lines.push(`    · ${m.label} (${m.kind}, id: ${m.id})`);
+    }
+    if (ACTIVE_THREAD) {
+      lines.push(`- Active thread right now: "${ACTIVE_THREAD.label}" (peerId: ${ACTIVE_THREAD.peerId}${ACTIVE_THREAD.isGroup ? ", group" : ""}). Default unqualified references to this one.`);
+    }
+    return "\n\n" + lines.join("\n");
+  } catch {
+    return ""; // context is best-effort; never block the turn
+  }
+}
 
 // ---- Anthropic types ----
 
@@ -273,10 +332,16 @@ const MAX_TURNS = 8;
 
 export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
   const messages: Message[] = [{ role: "user", content: userInput }];
+  // Compose the per-turn system prompt with a fresh context snapshot
+  // so the LLM knows how many chats exist, which one is active, and
+  // stops asking obvious "which chat?" questions when the answer is
+  // "the only one".
+  const contextSuffix = await buildContextSuffix();
+  const systemForThisAsk = BASE_PROMPT + contextSuffix;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let resp: Response;
-    try { resp = await callTurn(messages); }
+    try { resp = await callTurn(messages, systemForThisAsk); }
     catch (e) { yield { kind: "error", text: `LLM: ${(e as Error).message}` }; return; }
 
     messages.push({ role: "assistant", content: resp.content });
@@ -370,7 +435,7 @@ export async function* runLlm(userInput: string): AsyncGenerator<AgentEvent> {
   yield { kind: "reply", text: "(Reached turn limit — try asking again in one step.)" };
 }
 
-async function callTurn(messages: Message[]): Promise<Response> {
+async function callTurn(messages: Message[], system: string): Promise<Response> {
   const r = await fetch(apiUrl("/api/agent/turn"), {
     method: "POST",
     headers: {
@@ -378,7 +443,7 @@ async function callTurn(messages: Message[]): Promise<Response> {
       authorization: `Bearer ${localStorage.getItem("aegent.token") ?? ""}`,
     },
     body: JSON.stringify({
-      system: SYSTEM_PROMPT,
+      system,
       messages,
       tools: TOOLS,
       max_tokens: 1024,

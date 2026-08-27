@@ -734,6 +734,26 @@ export async function read_media(args: { messageId: string; question?: string })
       }};
     }
 
+    // DOCX / XLSX / PPTX → parse to text on-device. Each parser is
+    // lazy-imported so a user who never asks the agent to read an
+    // Office file doesn't pay the ~1 MB bundle cost.
+    const officeText = await tryExtractOffice(pt, media.mime, media.filename);
+    if (officeText !== null) {
+      if (!officeText.text.trim()) {
+        return { ok: true, kind: "data", value: {
+          _agent_text: `[${officeText.kind} appears to be empty or contains only images/embeds — no extractable text.]`,
+          ...meta,
+        }};
+      }
+      const truncated = officeText.text.length > MAX_INLINE_TEXT_CHARS;
+      return { ok: true, kind: "data", value: {
+        _agent_text: truncated
+          ? officeText.text.slice(0, MAX_INLINE_TEXT_CHARS) + `\n\n[…${officeText.kind} truncated. Original length: ${officeText.text.length} chars.]`
+          : officeText.text,
+        ...meta,
+      }};
+    }
+
     // Text-based formats → decode and inline.
     if (isTextish(media.mime, media.filename)) {
       // Reject huge text files defensively (a 5 MB CSV shouldn't blow
@@ -751,8 +771,8 @@ export async function read_media(args: { messageId: string; question?: string })
       }};
     }
 
-    // Everything else — be honest about what we don't parse yet.
-    return { ok: false, error: `Can't analyze ${media.mime} yet. Aegent reads images, PDFs, and plain-text files (txt/md/json/csv/xml). For .docx/.xlsx/.pptx, ask the sender to export to PDF or paste the content.` };
+    // Everything else — be honest about what we don't parse.
+    return { ok: false, error: `Can't analyze ${media.mime}. Aegent reads images, PDFs, DOCX / XLSX / PPTX / CSV, and plain-text files. Archives (zip, rar, 7z) aren't unpacked on device.` };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }
@@ -796,6 +816,86 @@ async function extractPdfText(bytes: Uint8Array): Promise<string> {
   }
   await (doc as unknown as { destroy?: () => Promise<void> }).destroy?.();
   return parts.join("\n\n");
+}
+
+// Route to the right Office parser based on MIME (with filename
+// fallback because Android pickers sometimes hand back a generic
+// application/octet-stream). Returns null if this isn't an Office
+// file we know how to unpack; the caller then continues to the
+// text-ish / refuse branches.
+async function tryExtractOffice(
+  bytes: Uint8Array,
+  mime: string,
+  filename?: string,
+): Promise<{ text: string; kind: "docx" | "xlsx" | "pptx" } | null> {
+  const ext = filename?.split(".").pop()?.toLowerCase() ?? "";
+  const isDocx = mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext === "docx";
+  const isXlsx = mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || ext === "xlsx" || ext === "xls";
+  const isPptx = mime === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || ext === "pptx";
+  if (isDocx) return { kind: "docx", text: await extractDocxText(bytes) };
+  if (isXlsx) return { kind: "xlsx", text: await extractXlsxText(bytes) };
+  if (isPptx) return { kind: "pptx", text: await extractPptxText(bytes) };
+  return null;
+}
+
+async function extractDocxText(bytes: Uint8Array): Promise<string> {
+  const mammoth = await import("mammoth");
+  // Mammoth wants an ArrayBuffer; take a defensive copy so pdfjs (or
+  // anything else running against the same bytes) isn't disrupted.
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const { value } = await mammoth.extractRawText({ arrayBuffer: buf });
+  return value.trim();
+}
+
+async function extractXlsxText(bytes: Uint8Array): Promise<string> {
+  const XLSX = await import("xlsx");
+  const wb = XLSX.read(bytes, { type: "array" });
+  // For each sheet, emit CSV — compact enough for the LLM context and
+  // preserves cell relationships. Headed with the sheet name.
+  const parts: string[] = [];
+  for (const name of wb.SheetNames) {
+    const csv = XLSX.utils.sheet_to_csv(wb.Sheets[name]).trim();
+    if (csv) parts.push(`--- Sheet: ${name} ---\n${csv}`);
+  }
+  return parts.join("\n\n");
+}
+
+async function extractPptxText(bytes: Uint8Array): Promise<string> {
+  // PPTX = zip of XML. We only pull text out of slide<N>.xml files.
+  // Notes and comments could also be added if needed later.
+  const JSZip = (await import("jszip")).default;
+  const zip = await JSZip.loadAsync(bytes);
+  const slideNames = Object.keys(zip.files)
+    .filter((f) => /^ppt\/slides\/slide\d+\.xml$/.test(f))
+    // slide1.xml, slide2.xml, ..., slide10.xml — numeric-ordered.
+    .sort((a, b) => Number(a.match(/slide(\d+)\.xml$/)![1]) - Number(b.match(/slide(\d+)\.xml$/)![1]));
+  const parts: string[] = [];
+  for (let i = 0; i < slideNames.length; i++) {
+    const xml = await zip.file(slideNames[i])!.async("string");
+    const text = pptxTextFromXml(xml);
+    if (text.trim()) parts.push(`--- Slide ${i + 1} ---\n${text.trim()}`);
+  }
+  return parts.join("\n\n");
+}
+
+function pptxTextFromXml(xml: string): string {
+  // OpenXML text lives in <a:t>…</a:t> runs inside <a:p> paragraphs.
+  // Collect the runs paragraph-by-paragraph so line breaks survive.
+  const paragraphs = xml.split(/<a:p[\s>]/i).slice(1);
+  return paragraphs.map((para) => {
+    const runs = [...para.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)];
+    return runs.map((r) => decodeXmlEntities(r[1])).join("").trim();
+  }).filter(Boolean).join("\n");
+}
+
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
 }
 
 async function countPdfPages(bytes: Uint8Array): Promise<number | undefined> {
