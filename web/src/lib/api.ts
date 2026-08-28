@@ -114,7 +114,13 @@ export const api = {
   getGroup: (id: string) => req<GroupApi>(`/api/groups/${id}`),
   joinGroup: (id: string) => req<GroupApi>(`/api/groups/${id}/join`, { method: "POST" }),
 
-  inbox: () => req<Envelope[]>("/api/inbox"),
+  inbox: (opts: { all?: boolean; since?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.all) q.set("all", "true");
+    if (opts.since) q.set("since", String(opts.since));
+    const qs = q.toString();
+    return req<Envelope[]>(`/api/inbox${qs ? `?${qs}` : ""}`);
+  },
   ack: (ids: string[]) => req<{ ok: true }>("/api/ack", {
     method: "POST", body: JSON.stringify({ ids }),
   }),

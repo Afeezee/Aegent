@@ -223,11 +223,27 @@ app.post("/api/groups/:id/join", authed, async (req, res) => {
 
 app.get("/api/inbox", authed, async (req, res) => {
   try {
-    const rows = await db.prepare(
-      `SELECT * FROM messages
-         WHERE recipient_id = ? AND delivered_at IS NULL
-         ORDER BY created_at ASC`,
-    ).all<MessageRow>((req as AuthedReq).userId);
+    const uid = (req as AuthedReq).userId;
+    // ?all=true → full-drain (for new-device restore). Every message
+    // this user has ever received or self-echoed, delivered or not.
+    // Default → only undelivered (incremental sync path).
+    const wantAll = String(req.query.all ?? "") === "true";
+    // Optional ?since=<ms> to fetch only rows newer than a client-side
+    // watermark — cheap incremental refresh for a device that already
+    // has most history.
+    const since = Number(req.query.since ?? 0) || 0;
+
+    const rows = wantAll
+      ? await db.prepare(
+          `SELECT * FROM messages
+             WHERE recipient_id = ? AND created_at >= ?
+             ORDER BY created_at ASC`,
+        ).all<MessageRow>(uid, since)
+      : await db.prepare(
+          `SELECT * FROM messages
+             WHERE recipient_id = ? AND delivered_at IS NULL
+             ORDER BY created_at ASC`,
+        ).all<MessageRow>(uid);
     res.json(rows.map(envelopeOf));
   } catch (e) { handleError(res, e); }
 });

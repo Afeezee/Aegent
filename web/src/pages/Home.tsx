@@ -63,11 +63,23 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         }
       } catch { /* ignore */ }
       try {
-        const envs = await api.inbox();
+        // If we have essentially no local messages yet, this is a
+        // fresh install / new-device restore: do a full drain so the
+        // sender's own history (self-echoes) AND any already-delivered
+        // received messages come back.
+        const existing = await listThreads();
+        const looksEmpty = existing.every((t) => t.unread === 0 && !t.subtitle);
+        const envs = looksEmpty
+          ? await api.inbox({ all: true })
+          : await api.inbox();
         for (const e of envs) {
-          try { await ingestEnvelope(e); } catch { /* ignore per-envelope */ }
+          try { await ingestEnvelope(e); } catch (err) {
+            console.warn("[boot] envelope ingest failed", err);
+          }
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        console.warn("[boot] inbox drain failed", err);
+      }
       setRefresh((k) => k + 1);
     })();
   }, []);
@@ -75,14 +87,23 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // Live delivery.
   useEffect(() => {
     return onMessage(async (env) => {
+      let handled = false;
       try {
-        await ingestEnvelope(env);
-        setRefresh((k) => k + 1);
-        // Browser notification for new inbound if not focused.
-        if (document.hidden && Notification?.permission === "granted") {
-          new Notification("Aegent", { body: "New encrypted message" });
-        }
-      } catch { /* ignore */ }
+        const res = await ingestEnvelope(env);
+        handled = !!res;
+      } catch (err) {
+        // Never silent — a swallowed error here means the user
+        // literally can't see incoming messages. Log so USB debugging
+        // catches the specific cause.
+        console.error("[live] ingest failed for envelope", env.id, err);
+      }
+      // Bump refresh EVEN on ingest failure. Any partial state
+      // change (e.g. ack landed but decrypt didn't) still deserves
+      // a re-read so the UI stays consistent with the store.
+      setRefresh((k) => k + 1);
+      if (handled && document.hidden && Notification?.permission === "granted") {
+        new Notification("Aegent", { body: "New encrypted message" });
+      }
     });
   }, []);
   // Presence updates.

@@ -33,7 +33,18 @@ import { saveContactToPhone } from "../lib/contacts-integration.js";
 export type PendingAction =
   | { kind: "send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string; replyTo?: { id: string; preview: string; author: string } }
   | { kind: "reminder"; text: string; whenIso: string }
-  | { kind: "email"; recipientEmail: string; subject: string; body: string; leavesE2E: true }
+  | {
+      kind: "email";
+      recipientEmail: string;
+      subject: string;
+      body: string;
+      leavesE2E: true;
+      // Optional pre-decrypted attachments that ride along on
+      // confirm. Files are held in memory only for the duration of
+      // the confirm card — on cancel or successful send, they're
+      // dropped and any decrypted bytes go with them.
+      attachments?: Array<{ name: string; mime: string; bytes: Uint8Array }>;
+    }
   | { kind: "delete"; targetPeerId: string; isGroup: boolean; targetMsgId: string; preview: string }
   | { kind: "schedule_send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string; whenIso: string }
   | { kind: "calendar_event"; title: string; whenIso: string; durationMin: number; notes?: string }
@@ -506,17 +517,44 @@ export async function export_to_email(args: {
   const chosen = rows.filter((m) => args.messageIds.includes(m.id));
   if (chosen.length === 0) return { ok: false, error: "no_matching_messages" };
   chosen.sort((a, b) => a.createdAt - b.createdAt);
+
+  // Decrypt referenced media inline so they can ride along as real
+  // attachments. Skip anything that fails to fetch/decrypt — the
+  // body still lists the message with its type/caption.
+  const attachments: Array<{ name: string; mime: string; bytes: Uint8Array }> = [];
+  for (const m of chosen) {
+    if (!m.media) continue;
+    try {
+      const enc = await api.downloadBlob(m.media.blobId);
+      const pt = secretBoxOpenBytes(b64.decode(m.media.contentKey), enc);
+      attachments.push({
+        name: uniqueName(attachments, m.media.filename ?? `${m.media.kind}-${m.id.slice(0, 6)}${extForMime(m.media.mime)}`),
+        mime: m.media.mime || "application/octet-stream",
+        bytes: pt,
+      });
+    } catch (e) {
+      console.warn("[export_to_email] attach fetch failed", m.id, e);
+    }
+  }
+
   const lines = await Promise.all(chosen.map(async (m) => {
     const from = m.direction === "out"
       ? "You"
       : (await getContact(m.senderId))?.displayName ?? "someone";
-    const text = m.editedBody ?? m.body ?? m.caption ?? (m.media ? `[${m.media.kind}]` : "");
-    return `• ${new Date(m.createdAt).toLocaleString()} — ${from}: ${text}`;
+    const text = m.editedBody ?? m.body ?? m.caption ?? "";
+    const mediaTag = m.media
+      ? ` [${m.media.kind}${m.media.filename ? `: ${m.media.filename}` : ""}]`
+      : "";
+    return `• ${new Date(m.createdAt).toLocaleString()} — ${from}: ${text}${mediaTag}`;
   }));
+  const attachSummary = attachments.length
+    ? `\nAttachments (${attachments.length}): ${attachments.map((a) => a.name).join(", ")}`
+    : "";
   const body = [
     args.note ?? "Sharing the following messages from Aegent:",
     "",
     ...lines,
+    attachSummary,
     "",
     "— Sent via Aegent. Note: email is not encrypted the way Aegent messages are.",
   ].join("\n");
@@ -527,9 +565,56 @@ export async function export_to_email(args: {
       recipientEmail: args.recipientEmail,
       subject: `From Aegent (${chosen.length} message${chosen.length === 1 ? "" : "s"})`,
       body, leavesE2E: true,
+      attachments: attachments.length ? attachments : undefined,
     },
-    explain: `This will leave Aegent's E2E boundary — email isn't encrypted the same way. Review before sending.`,
+    explain: attachments.length
+      ? `Prepared ${chosen.length} messages + ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}. Email leaves Aegent's E2E boundary — review before sending.`
+      : `This will leave Aegent's E2E boundary — email isn't encrypted the same way. Review before sending.`,
   };
+}
+
+// Suffix-collision helper so two files with the same name don't
+// overwrite each other in the outgoing share bundle.
+function uniqueName(existing: Array<{ name: string }>, want: string): string {
+  const taken = new Set(existing.map((x) => x.name.toLowerCase()));
+  if (!taken.has(want.toLowerCase())) return want;
+  const dot = want.lastIndexOf(".");
+  const stem = dot > 0 ? want.slice(0, dot) : want;
+  const ext = dot > 0 ? want.slice(dot) : "";
+  for (let i = 2; i < 1000; i++) {
+    const c = `${stem}-${i}${ext}`;
+    if (!taken.has(c.toLowerCase())) return c;
+  }
+  return `${stem}-${Date.now()}${ext}`;
+}
+
+function downloadFiles(files: File[]): void {
+  // Trigger a Save dialog for each file. Small stagger so browsers
+  // don't collapse them into "you are downloading multiple files"
+  // permission prompts on the same tick.
+  files.forEach((f, i) => {
+    setTimeout(() => {
+      const url = URL.createObjectURL(f);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = f.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }, i * 120);
+  });
+}
+
+function extForMime(mime: string): string {
+  const map: Record<string, string> = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "video/mp4": ".mp4", "video/webm": ".webm",
+    "audio/webm": ".webm", "audio/mp4": ".m4a", "audio/mpeg": ".mp3", "audio/ogg": ".ogg",
+    "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv",
+    "application/json": ".json", "application/zip": ".zip",
+  };
+  return map[mime] ?? "";
 }
 
 // ---- backup: whole thread → email (existing) ----
@@ -578,10 +663,31 @@ export async function backup_thread(args: {
     `Range: ${new Date(rows[0].createdAt).toLocaleString()} — ${new Date(rows[rows.length - 1].createdAt).toLocaleString()}`,
     "",
   ].join("\n");
+  // Decrypt every media file in the thread and pack them as
+  // attachments, so a backup email actually carries the photos /
+  // voice notes / documents — not just a manifest of them.
+  const attachments: Array<{ name: string; mime: string; bytes: Uint8Array }> = [];
+  for (const m of rows) {
+    if (!m.media) continue;
+    try {
+      const enc = await api.downloadBlob(m.media.blobId);
+      const pt = secretBoxOpenBytes(b64.decode(m.media.contentKey), enc);
+      attachments.push({
+        name: uniqueName(attachments, m.media.filename ?? `${m.media.kind}-${m.id.slice(0, 6)}${extForMime(m.media.mime)}`),
+        mime: m.media.mime || "application/octet-stream",
+        bytes: pt,
+      });
+    } catch (e) {
+      console.warn("[backup_thread] media fetch failed", m.id, e);
+    }
+  }
+
   const footer = [
     "",
     "— Sent via Aegent. Note: email is not end-to-end encrypted the way Aegent messages are.",
-    "  Media is referenced by type — the encrypted files stay on your device.",
+    attachments.length
+      ? `  ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} included.`
+      : "  Media is referenced by type — the encrypted files stay on your device.",
   ].join("\n");
   const body = header + lines.join("\n") + footer;
 
@@ -592,8 +698,11 @@ export async function backup_thread(args: {
       recipientEmail: args.recipientEmail,
       subject: `Aegent backup: ${label} (${rows.length} messages)`,
       body, leavesE2E: true,
+      attachments: attachments.length ? attachments : undefined,
     },
-    explain: `I've compiled ${rows.length} messages from ${label}. Email isn't E2E encrypted — review before sending.`,
+    explain: attachments.length
+      ? `I've compiled ${rows.length} messages + ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} from ${label}. Email isn't E2E encrypted — review before sending.`
+      : `I've compiled ${rows.length} messages from ${label}. Email isn't E2E encrypted — review before sending.`,
   };
 }
 
@@ -945,9 +1054,50 @@ export async function executePending(action: PendingAction) {
     return { ok: true } as const;
   }
   if (action.kind === "email") {
+    // Three tiers, best-first:
+    //  1. Web Share Level 2 with `files` — native share sheet on
+    //     Android / iOS lets the user pick Gmail / their mail app
+    //     with the files attached properly. Zero fallback needed
+    //     when this works.
+    //  2. Web Share without files — no attachments but the compose
+    //     body is prefilled cleanly (used when files aren't
+    //     shareable, e.g. desktop Chrome).
+    //  3. mailto: URL — always available; attachments (if any)
+    //     get downloaded to disk so the user drags them into the
+    //     compose window themselves.
+    const files: File[] = (action.attachments ?? []).map((a) => new File(
+      [a.bytes as BlobPart], a.name, { type: a.mime },
+    ));
+    const shareData: ShareData = {
+      title: action.subject,
+      text: `To: ${action.recipientEmail}\n\n${action.body}`,
+      ...(files.length ? { files } : {}),
+    };
+    const nav = navigator as unknown as {
+      canShare?: (data: ShareData) => boolean;
+      share?: (data: ShareData) => Promise<void>;
+    };
+    try {
+      if (files.length && nav.canShare?.({ files })) {
+        await nav.share!(shareData);
+        return { ok: true } as const;
+      }
+      if (nav.share && (!files.length || nav.canShare?.(shareData))) {
+        await nav.share(shareData);
+        // If files couldn't ride along on the share, drop them to disk
+        // so the user still has them to attach manually.
+        if (files.length && !nav.canShare?.({ files })) downloadFiles(files);
+        return { ok: true } as const;
+      }
+    } catch (e) {
+      // User cancelled the share sheet — not an error.
+      if ((e as Error).name !== "AbortError") console.warn("[email] share failed:", e);
+    }
+    // mailto fallback + drop the files locally so they're attachable.
+    if (files.length) downloadFiles(files);
     const url = `mailto:${encodeURIComponent(action.recipientEmail)}`
       + `?subject=${encodeURIComponent(action.subject)}`
-      + `&body=${encodeURIComponent(action.body)}`;
+      + `&body=${encodeURIComponent(action.body + (files.length ? `\n\n(${files.length} attachment${files.length === 1 ? "" : "s"} downloaded — drag into the email.)` : ""))}`;
     window.open(url);
     return { ok: true } as const;
   }

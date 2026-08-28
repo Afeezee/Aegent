@@ -20,6 +20,14 @@ export const PROTOCOL_VERSION = 1;
 
 export type MediaKind = "image" | "video" | "audio" | "voice" | "file";
 
+// `_thread` (optional): the sender-side thread id for self-replicated
+// copies. Every send now encrypts a self-copy alongside the recipient
+// copies so the server stores the sender's own message history too.
+// When ingesting a self-copy, the recipient_id is self, so we can't
+// tell "which chat" this belonged to from server-side routing alone —
+// _thread carries that (peer id for 1:1, group id for groups). Only
+// meaningful on self-copies; ignored by third-party recipients.
+
 export type Payload =
   | {
       v: 1;
@@ -27,6 +35,7 @@ export type Payload =
       msgId: string;
       body: string;
       replyTo?: { id: string; preview: string; author: string };
+      _thread?: string;
     }
   | {
       v: 1;
@@ -49,10 +58,11 @@ export type Payload =
         contentKey: string;
       };
       replyTo?: { id: string; preview: string; author: string };
+      _thread?: string;
     }
-  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string }
-  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string }
-  | { v: 1; t: "delete";   msgId: string; targetId: string };
+  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string }
+  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string }
+  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string };
 
 export function packPayload(p: Payload): string {
   return JSON.stringify(p);

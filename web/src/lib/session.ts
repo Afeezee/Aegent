@@ -229,22 +229,47 @@ export async function sendToPeer(
   payload: Payload,
 ): Promise<{ ok: true; envelopeId: string } | { ok: false; error: string }> {
   if (!CURRENT) return { ok: false, error: "no_session" };
-  const packed = packPayload(payload);
+  const selfId = CURRENT.user.id;
+
+  // Stamp the thread id on the payload so any self-copy that arrives
+  // back through the socket knows which chat to file itself under.
+  // Non-self recipients derive the thread from env.senderId/groupId
+  // and ignore this field.
+  const withThread: Payload = { ...payload, _thread: targetPeerId } as Payload;
+  const packed = packPayload(withThread);
+
+  // Compose the recipient list:
+  //  - 1:1     → [targetPeerId, self]
+  //  - group   → every member (including self)
+  // The self-copy is what gives us server-side replication: every
+  // message you send is now on the relay as ciphertext for you too,
+  // so a new device restores by draining the inbox — no separate
+  // backup dance for chat content.
   let recipients: string[] = [];
   if (isGroup) {
     const g = await getGroup(targetPeerId);
     if (!g) return { ok: false, error: "unknown_group" };
-    recipients = g.memberIds.filter((id) => id !== CURRENT!.user.id);
+    recipients = Array.from(new Set([...g.memberIds, selfId]));
   } else {
-    recipients = [targetPeerId];
+    recipients = Array.from(new Set([targetPeerId, selfId]));
   }
   if (recipients.length === 0) return { ok: false, error: "no_recipients" };
 
+  // Cache self's public key so we don't need a store lookup for the
+  // self-copy — it's the same key already resident in CURRENT.
+  const selfPubKey = CURRENT.publicKey;
+
   let firstEnvelopeId: string | undefined;
   for (const rid of recipients) {
-    const peer = await getContact(rid);
-    if (!peer) continue;
-    const cipher = encryptForPeer(packed, b64.decode(peer.publicKey), CURRENT.privateKey);
+    let peerPubKey: Uint8Array | null = null;
+    if (rid === selfId) {
+      peerPubKey = selfPubKey;
+    } else {
+      const peer = await getContact(rid);
+      if (!peer) continue;
+      peerPubKey = b64.decode(peer.publicKey);
+    }
+    const cipher = encryptForPeer(packed, peerPubKey, CURRENT.privateKey);
     const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined);
     if (!res.ok) return { ok: false, error: res.error };
     firstEnvelopeId = firstEnvelopeId ?? res.envelope.id;
@@ -330,18 +355,46 @@ export async function ingestEnvelope(env: {
   ciphertext: string; createdAt: number;
 }): Promise<{ threadId: string; msgId: string } | null> {
   if (!CURRENT) return null;
-  const sender = await ensureContact(env.senderId);
-  if (!sender) return null;
-  const packed = decryptFromPeer(env.ciphertext, b64.decode(sender.publicKey), CURRENT.privateKey);
+  const selfId = CURRENT.user.id;
+  const isSelfEcho = env.senderId === selfId;
+
+  // For a self-echo we decrypt with (self-pub, self-priv). For a
+  // normal inbound we look up the sender's public key. `ensureContact`
+  // for `self` would try to fetch our own contact record — skip.
+  let peerPubKey: Uint8Array;
+  if (isSelfEcho) {
+    peerPubKey = CURRENT.publicKey;
+  } else {
+    const sender = await ensureContact(env.senderId);
+    if (!sender) return null;
+    peerPubKey = b64.decode(sender.publicKey);
+  }
+
+  let packed: string;
+  try {
+    packed = decryptFromPeer(env.ciphertext, peerPubKey, CURRENT.privateKey);
+  } catch (e) {
+    console.warn("[ingest] decrypt failed", env.id, (e as Error).message);
+    // Ack anyway so a broken message doesn't clog the inbox forever.
+    await api.ack([env.id]).catch(() => { /* ignore */ });
+    return null;
+  }
   const payload = unpackPayload(packed);
-  const threadId = env.groupId ?? sender.id;
+
+  // Thread id: for a self-echo the recipient_id is self, so we
+  // can't infer the target from server routing. The sender stamped
+  // `_thread` for exactly this case.
+  const threadId = isSelfEcho
+    ? (payload._thread ?? env.groupId ?? env.recipientId)
+    : (env.groupId ?? env.senderId);
+  const direction: "in" | "out" = isSelfEcho ? "out" : "in";
 
   if (payload.t === "text") {
     await saveTextMessage({
       id: payload.msgId,
       peerId: threadId,
       senderId: env.senderId,
-      direction: "in",
+      direction,
       createdAt: env.createdAt,
       body: payload.body,
       replyTo: payload.replyTo ?? null,
@@ -351,7 +404,7 @@ export async function ingestEnvelope(env: {
       id: payload.msgId,
       peerId: threadId,
       senderId: env.senderId,
-      direction: "in",
+      direction,
       createdAt: env.createdAt,
       caption: payload.caption,
       media: payload.media,
@@ -364,9 +417,10 @@ export async function ingestEnvelope(env: {
   } else if (payload.t === "delete") {
     await applyDelete(payload.targetId);
   }
-  // Server-side delivered ack + local delivered marker.
-  await api.ack([env.id]);
-  await markDelivered(env.id);
+  // Ack once the ingest actually landed (both for normal inbound
+  // and self-echoes so the server-side delivered_at flips).
+  await api.ack([env.id]).catch(() => { /* best-effort */ });
+  await markDelivered(env.id).catch(() => { /* ignore */ });
   return { threadId, msgId: (payload as { msgId?: string }).msgId ?? env.id };
 }
 
