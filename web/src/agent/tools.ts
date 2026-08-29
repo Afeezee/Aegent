@@ -606,6 +606,108 @@ function downloadFiles(files: File[]): void {
   });
 }
 
+// Build an RFC-5322 `.eml` file with attachments so desktop mail
+// clients (Outlook, Apple Mail, Thunderbird, Windows Mail) open a
+// pre-filled draft with the files already attached. Double-clicking
+// the downloaded .eml on any desktop OS opens the default mail app
+// and creates a new message from it — the true "Web Share L2 with
+// files, for PC" fallback.
+function buildEml(opts: {
+  from?: string;
+  to: string;
+  subject: string;
+  body: string;
+  attachments: Array<{ name: string; mime: string; bytes: Uint8Array }>;
+}): Blob {
+  // Random boundary that will not appear inside the body or any
+  // base64 payload (base64 has no `=` runs mid-line, and our marker
+  // is prefixed with `=_` which base64 never emits).
+  const boundary = `=_aegent_${crypto.randomUUID().replace(/-/g, "")}`;
+  const CRLF = "\r\n";
+  const headers = [
+    opts.from ? `From: ${opts.from}` : null,
+    `To: ${opts.to}`,
+    `Subject: ${quotedPrintableHeader(opts.subject)}`,
+    "MIME-Version: 1.0",
+    "X-Unsent: 1", // Outlook honours this — opens as a draft, not "sent"
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+  ].filter(Boolean).join(CRLF);
+
+  const parts: string[] = [];
+  // Text body part.
+  parts.push([
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    opts.body,
+  ].join(CRLF));
+
+  // Each attachment as its own base64-encoded part.
+  for (const a of opts.attachments) {
+    parts.push([
+      `--${boundary}`,
+      `Content-Type: ${a.mime || "application/octet-stream"}; name="${mimeSafeName(a.name)}"`,
+      `Content-Disposition: attachment; filename="${mimeSafeName(a.name)}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      base64Wrap(u8ToBase64(a.bytes)),
+    ].join(CRLF));
+  }
+  parts.push(`--${boundary}--${CRLF}`);
+
+  const eml = headers + CRLF + CRLF + parts.join(CRLF) + CRLF;
+  return new Blob([eml], { type: "message/rfc822" });
+}
+
+function u8ToBase64(bytes: Uint8Array): string {
+  // btoa can't handle Uint8Array directly; chunk to avoid stack
+  // overflow on multi-MB attachments (spread operator arg cap).
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  return btoa(bin);
+}
+
+// RFC 2045: base64 body lines must be ≤76 chars.
+function base64Wrap(s: string): string {
+  return s.replace(/(.{76})/g, "$1\r\n");
+}
+
+function sanitizeStem(s: string): string {
+  return s.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "message";
+}
+
+function mimeSafeName(n: string): string {
+  // Strip anything a header can't carry unquoted; keep letters,
+  // digits, common punctuation, spaces. Quoted string in Content-
+  // Disposition handles the rest.
+  return n.replace(/["\r\n]/g, "_");
+}
+
+// Encode non-ASCII subjects as RFC 2047 base64 word so Outlook /
+// Apple Mail render Unicode correctly.
+function quotedPrintableHeader(s: string): string {
+  // ASCII fast path — most subjects.
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7F]*$/.test(s)) return s;
+  const utf8 = new TextEncoder().encode(s);
+  return `=?UTF-8?B?${u8ToBase64(utf8)}?=`;
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 function extForMime(mime: string): string {
   const map: Record<string, string> = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
@@ -1054,46 +1156,83 @@ export async function executePending(action: PendingAction) {
     return { ok: true } as const;
   }
   if (action.kind === "email") {
-    // Three tiers, best-first:
-    //  1. Web Share Level 2 with `files` — native share sheet on
-    //     Android / iOS lets the user pick Gmail / their mail app
-    //     with the files attached properly. Zero fallback needed
-    //     when this works.
-    //  2. Web Share without files — no attachments but the compose
-    //     body is prefilled cleanly (used when files aren't
-    //     shareable, e.g. desktop Chrome).
-    //  3. mailto: URL — always available; attachments (if any)
-    //     get downloaded to disk so the user drags them into the
-    //     compose window themselves.
+    // Four tiers, best-first — every platform gets attachments:
+    //
+    //  1. Web Share Level 2 with `files` — mobile Android/iOS + a
+    //     handful of desktop Chromium builds. Native share sheet
+    //     hands the file straight to Gmail/Outlook/etc.
+    //  2. `.eml` download (PC/Mac fallback) — a proper RFC-5322
+    //     multipart message with the attachments embedded. Double-
+    //     clicking the download opens the default mail client
+    //     (Outlook, Apple Mail, Thunderbird, Windows Mail) with the
+    //     draft pre-filled AND the files attached. This is the
+    //     "Web Share L2 with files, for PC" equivalent.
+    //  3. Web Share without files — desktops with `.share` but no
+    //     file support, and the user cancelled/refused the .eml.
+    //  4. `mailto:` + individual file downloads — last resort.
     const files: File[] = (action.attachments ?? []).map((a) => new File(
       [a.bytes as BlobPart], a.name, { type: a.mime },
     ));
-    const shareData: ShareData = {
-      title: action.subject,
-      text: `To: ${action.recipientEmail}\n\n${action.body}`,
-      ...(files.length ? { files } : {}),
-    };
     const nav = navigator as unknown as {
       canShare?: (data: ShareData) => boolean;
       share?: (data: ShareData) => Promise<void>;
     };
-    try {
-      if (files.length && nav.canShare?.({ files })) {
-        await nav.share!(shareData);
+    const canShareFiles = files.length > 0
+      && !!nav.canShare && nav.canShare({ files });
+    const from = currentSession()?.user.email;
+
+    // Tier 1: native share sheet with files (mobile).
+    if (canShareFiles) {
+      try {
+        await nav.share!({
+          title: action.subject,
+          text: `To: ${action.recipientEmail}\n\n${action.body}`,
+          files,
+        });
         return { ok: true } as const;
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") console.warn("[email] share files failed:", e);
+        // Fall through to .eml — attachments matter more than the sheet.
       }
-      if (nav.share && (!files.length || nav.canShare?.(shareData))) {
-        await nav.share(shareData);
-        // If files couldn't ride along on the share, drop them to disk
-        // so the user still has them to attach manually.
-        if (files.length && !nav.canShare?.({ files })) downloadFiles(files);
-        return { ok: true } as const;
-      }
-    } catch (e) {
-      // User cancelled the share sheet — not an error.
-      if ((e as Error).name !== "AbortError") console.warn("[email] share failed:", e);
     }
-    // mailto fallback + drop the files locally so they're attachable.
+
+    // Tier 2: .eml with attachments (desktop, and any mobile that
+    // couldn't share files above). If there are no files we skip
+    // straight to Web Share / mailto so we don't force a download
+    // for a plain-text email.
+    if (files.length) {
+      try {
+        const eml = buildEml({
+          from,
+          to: action.recipientEmail,
+          subject: action.subject,
+          body: action.body,
+          attachments: action.attachments!,
+        });
+        const emlName = `aegent-${sanitizeStem(action.subject)}.eml`;
+        downloadBlob(eml, emlName);
+        return { ok: true } as const;
+      } catch (e) {
+        console.warn("[email] .eml build failed:", e);
+        // Fall through — worst case the user gets mailto + separate
+        // downloads instead.
+      }
+    }
+
+    // Tier 3: Web Share without files (desktop compose UI).
+    if (nav.share) {
+      try {
+        await nav.share({
+          title: action.subject,
+          text: `To: ${action.recipientEmail}\n\n${action.body}`,
+        });
+        return { ok: true } as const;
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") console.warn("[email] share failed:", e);
+      }
+    }
+
+    // Tier 4: mailto: + drop attachments to Downloads.
     if (files.length) downloadFiles(files);
     const url = `mailto:${encodeURIComponent(action.recipientEmail)}`
       + `?subject=${encodeURIComponent(action.subject)}`

@@ -16,11 +16,16 @@ type EnvelopeCb = (env: Envelope) => void;
 type TypingCb = (info: { from: string; groupId?: string }) => void;
 type ReadCb = (info: { id: string; at: number; by: string }) => void;
 type PresenceCb = (info: { userId: string; online: boolean; at: number }) => void;
+type ConnectedCb = () => void;
 
 const onMessageCbs = new Set<EnvelopeCb>();
 const onTypingCbs = new Set<TypingCb>();
 const onReadCbs = new Set<ReadCb>();
 const onPresenceCbs = new Set<PresenceCb>();
+// Fires on every successful (re)connect. Subscribers use this to
+// re-drain the inbox — any messages the server queued while the
+// socket was down get pulled the instant we're back.
+const onConnectedCbs = new Set<ConnectedCb>();
 
 function fanout<T>(cbs: Set<(v: T) => void>, v: T) {
   for (const cb of cbs) {
@@ -35,7 +40,12 @@ function wireListeners(s: Socket) {
   s.on("presence", (info: Parameters<PresenceCb>[0]) => fanout(onPresenceCbs, info));
   s.on("connect_error", (e) => console.warn("[socket] connect_error:", e.message));
   s.on("disconnect", (reason) => console.log("[socket] disconnected:", reason));
-  s.on("connect", () => console.log("[socket] connected"));
+  s.on("connect", () => {
+    console.log("[socket] connected");
+    for (const cb of onConnectedCbs) {
+      try { cb(); } catch (e) { console.warn("[socket] connect listener threw:", e); }
+    }
+  });
 }
 
 export function connectSocket(token: string): Socket {
@@ -72,6 +82,9 @@ export function onRead(cb: ReadCb): () => void {
 }
 export function onPresence(cb: PresenceCb): () => void {
   onPresenceCbs.add(cb); return () => { onPresenceCbs.delete(cb); };
+}
+export function onConnected(cb: ConnectedCb): () => void {
+  onConnectedCbs.add(cb); return () => { onConnectedCbs.delete(cb); };
 }
 
 export function sendCipher(

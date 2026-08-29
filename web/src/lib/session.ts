@@ -44,6 +44,11 @@ export function currentSession(): Session | null { return CURRENT; }
 const KEY_PRIV = "aegent.priv";
 const KEY_STORE = "aegent.storekey";
 const KEY_BACKUP = "aegent.backupkey";
+// Watermark: the highest server createdAt we've successfully drained
+// for this user. Namespaced by userId so switching accounts on the
+// same device stays clean. Absence → drain everything from the start
+// (fresh install / new device path).
+function KEY_WATERMARK(userId: string) { return `aegent.inbox.watermark.${userId}`; }
 
 let CACHED_BACKUP_KEY: Uint8Array | null = null;
 export function backupKey(): Uint8Array | null { return CACHED_BACKUP_KEY; }
@@ -78,6 +83,70 @@ function clearPersistedKeys() {
     localStorage.removeItem(KEY_STORE);
     localStorage.removeItem(KEY_BACKUP);
     CACHED_BACKUP_KEY = null;
+  } catch { /* ignore */ }
+}
+
+// ---- inbox drain ----
+//
+// Always full-drain by createdAt watermark. `?all=true` returns every
+// envelope addressed to us — delivered or not, self-echo included —
+// since the watermark. On a fresh install the watermark is 0 and we
+// get the entire history. On a repeat login/socket-reconnect we get
+// only what's newer than our high-water mark, so it stays cheap.
+//
+// This is what "nothing is lost, whether logged in or out" hinges on:
+// the client never trusts local Dexie as the source of truth — the
+// server's message log is. Every session boot re-drains from the
+// point we last successfully caught up.
+let PULL_IN_FLIGHT: Promise<{ pulled: number }> | null = null;
+export async function pullInbox(): Promise<{ pulled: number }> {
+  if (!CURRENT) return { pulled: 0 };
+  // Coalesce: if a pull is already running, join it. Prevents the
+  // boot + focus + socket-reconnect trio from triggering three
+  // parallel drains on the same instant.
+  if (PULL_IN_FLIGHT) return PULL_IN_FLIGHT;
+  const userId = CURRENT.user.id;
+  const key = KEY_WATERMARK(userId);
+  const watermark = Number(localStorage.getItem(key) ?? 0) || 0;
+  PULL_IN_FLIGHT = (async () => {
+    try {
+      const envs = await api.inbox({ all: true, since: watermark });
+      let highest = watermark;
+      let pulled = 0;
+      for (const e of envs) {
+        try {
+          const res = await ingestEnvelope(e);
+          if (res) pulled++;
+        } catch (err) {
+          console.warn("[pullInbox] ingest failed", e.id, err);
+        }
+        // Bump watermark even if ingest failed — the envelope is on the
+        // server permanently, and a broken decrypt won't be fixed by
+        // re-fetching. This prevents one bad row from stalling the
+        // whole drain on every boot.
+        if (e.createdAt > highest) highest = e.createdAt;
+      }
+      // Persist as (highest + 1) so a `>= since` query on the next
+      // drain doesn't re-return the last row.
+      if (highest > watermark) {
+        try { localStorage.setItem(key, String(highest + 1)); } catch { /* ignore */ }
+      }
+      return { pulled };
+    } finally {
+      PULL_IN_FLIGHT = null;
+    }
+  })();
+  return PULL_IN_FLIGHT;
+}
+
+// Called from the live-socket handler after every real-time delivery
+// so a subsequent pullInbox() doesn't re-fetch what we already have.
+export function bumpInboxWatermark(createdAt: number): void {
+  if (!CURRENT) return;
+  const key = KEY_WATERMARK(CURRENT.user.id);
+  try {
+    const cur = Number(localStorage.getItem(key) ?? 0) || 0;
+    if (createdAt + 1 > cur) localStorage.setItem(key, String(createdAt + 1));
   } catch { /* ignore */ }
 }
 
@@ -152,6 +221,11 @@ export async function login(input: { email: string; password: string }): Promise
   // and rehydrate. Runs in the background — login returns
   // immediately either way.
   attemptCloudRestore(bk, me.id, storeKey).catch(() => { /* silent */ });
+  // Full inbox drain (all messages since watermark, delivered or not).
+  // On a fresh device with no watermark this pulls the entire history
+  // from the server — the app's "nothing is lost, even signed out"
+  // guarantee comes from this line.
+  pullInbox().catch((err) => console.warn("[login] pullInbox failed", err));
   return CURRENT;
 }
 
@@ -197,6 +271,10 @@ export async function tryRestoreSession(): Promise<Session | null> {
       privateKey: keys.privateKey,
       publicKey: b64.decode(me.publicKey),
     };
+    // Restore path: pull anything the server has that this device
+    // doesn't. Watermark-scoped so it's cheap on repeat launches and
+    // full on a fresh reinstall.
+    pullInbox().catch((err) => console.warn("[restore] pullInbox failed", err));
     return CURRENT;
   } catch {
     // Token no longer valid, or /me refused — full reset so the user

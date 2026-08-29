@@ -15,9 +15,10 @@ import { ContactsSheet } from "../components/Contacts.js";
 import { Brand } from "./Onboarding.js";
 import { api } from "../lib/api.js";
 import {
-  currentSession, ensureContact, ensureGroup, ingestEnvelope,
+  bumpInboxWatermark,
+  currentSession, ensureContact, ensureGroup, ingestEnvelope, pullInbox,
 } from "../lib/session.js";
-import { onMessage, onPresence, onRead } from "../lib/socket.js";
+import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
 import {
   getContact, listGroups, listThreads, markRead, setContactPresence,
   takeDueScheduledBackups,
@@ -50,6 +51,14 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const me = currentSession()?.user;
 
   // Initial sync: pull known groups + drain inbox.
+  //
+  // The drain always uses the watermark-scoped pullInbox — no
+  // "looksEmpty" guard. That way an existing device with cached
+  // threads still re-catches any undelivered/queued messages the
+  // server has for us. Zero-loss even if the local Dexie is stale
+  // (browser cache clear, app reinstall over old data, WebView
+  // migration, etc.). Nothing is trusted from Dexie's presence
+  // alone — every boot pulls from the server.
   useEffect(() => {
     (async () => {
       try {
@@ -62,26 +71,36 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           for (const uid of g.memberIds) await ensureContact(uid);
         }
       } catch { /* ignore */ }
-      try {
-        // If we have essentially no local messages yet, this is a
-        // fresh install / new-device restore: do a full drain so the
-        // sender's own history (self-echoes) AND any already-delivered
-        // received messages come back.
-        const existing = await listThreads();
-        const looksEmpty = existing.every((t) => t.unread === 0 && !t.subtitle);
-        const envs = looksEmpty
-          ? await api.inbox({ all: true })
-          : await api.inbox();
-        for (const e of envs) {
-          try { await ingestEnvelope(e); } catch (err) {
-            console.warn("[boot] envelope ingest failed", err);
-          }
-        }
-      } catch (err) {
-        console.warn("[boot] inbox drain failed", err);
-      }
+      try { await pullInbox(); }
+      catch (err) { console.warn("[boot] pullInbox failed", err); }
       setRefresh((k) => k + 1);
     })();
+  }, []);
+
+  // Re-drain on window focus / app returning to foreground. Covers
+  // the Android "back from another app" and the desktop tab-switch
+  // case where a message may have landed while the socket was idle.
+  useEffect(() => {
+    const onFocus = () => {
+      pullInbox().then((r) => { if (r.pulled > 0) setRefresh((k) => k + 1); })
+        .catch((err) => console.warn("[focus] pullInbox failed", err));
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) onFocus();
+    });
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Re-drain on every successful socket (re)connect. If we were
+  // offline while the sender pushed, the server queued for us —
+  // this catches those envelopes the instant we come back up,
+  // instead of waiting for the next focus/boot.
+  useEffect(() => {
+    return onConnected(() => {
+      pullInbox().then((r) => { if (r.pulled > 0) setRefresh((k) => k + 1); })
+        .catch((err) => console.warn("[reconnect] pullInbox failed", err));
+    });
   }, []);
 
   // Live delivery.
@@ -97,6 +116,9 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         // catches the specific cause.
         console.error("[live] ingest failed for envelope", env.id, err);
       }
+      // Advance the drain watermark so the next pullInbox doesn't
+      // waste bandwidth re-fetching this envelope.
+      bumpInboxWatermark(env.createdAt);
       // Bump refresh EVEN on ingest failure. Any partial state
       // change (e.g. ack landed but decrypt didn't) still deserves
       // a re-read so the UI stays consistent with the store.
