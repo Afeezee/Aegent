@@ -1,0 +1,39 @@
+# Aegent on Render — single Dockerfile image, serves SPA + ciphertext relay.
+# Postgres lives on Neon (external), referenced via DATABASE_URL below.
+#
+# One-shot deploy: push this file to GitHub, then on Render → New →
+# Blueprint, point at the repo. Render reads this file and provisions
+# the service with the free plan + /healthz check + env-var slots.
+
+services:
+  - type: web
+    name: aegent
+    runtime: docker
+    plan: free
+    region: oregon          # change to frankfurt / singapore if your users are closer
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    # Keep auto-deploy on so `git push origin main` ships the next build.
+    autoDeploy: true
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Render injects its own PORT; the server already reads it via
+      # process.env.PORT ?? 8787. Nothing to set here.
+
+      # Neon Postgres connection string. Set in the Render dashboard
+      # (sync: false means Render won't try to pull it from this file).
+      # Format: postgresql://user:pass@ep-xxx.us-east-2.aws.neon.tech/dbname?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+
+      # JWT signing secret. Rotate when moving providers so any token
+      # issued by the Railway deploy is invalidated.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Claude API key for the agent proxy. Set in the dashboard.
+      - key: ANTHROPIC_API_KEY
+        sync: false
