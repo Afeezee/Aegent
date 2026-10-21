@@ -180,21 +180,34 @@ export function Composer({
       let transcript: string | undefined;
       const wantsTranscript = localStorage.getItem("aegent.transcribeVoice") !== "0";
       if (wantsTranscript) {
-        toast("Transcribing…", "info");
+        // One sticky toast, updated in place — same pattern as the
+        // attachment-upload progress above. Previously we called
+        // toast() on every progress tick, which spawned a dozen
+        // duplicate "Loading transcription model…" toasts as each
+        // model file's download hit the sample point.
+        const transcribeToastId = toast("Transcribing…", "info", { sticky: true });
         try {
           const { transcribeAudio } = await loadTranscribeModule();
           const { text } = await transcribeAudio(bytes, {
             onProgress: (p) => {
-              if (p.status === "progress" && typeof p.progress === "number") {
-                if (Math.round(p.progress) % 25 === 0 && p.progress > 0) {
-                  toast(`Loading transcription model… ${Math.round(p.progress)}%`, "info");
-                }
+              if (p.status === "progress" && typeof p.progress === "number" && p.progress > 0) {
+                const pct = Math.min(100, Math.round(p.progress));
+                toastUpdate(transcribeToastId, {
+                  text: `Loading transcription model · ${pct}%`,
+                  progress: pct / 100,
+                });
+              } else if (p.status && p.status !== "progress") {
+                toastUpdate(transcribeToastId, { text: `Transcribing · ${p.status}` });
               }
             },
           });
           if (text) transcript = text;
+          toastDismiss(transcribeToastId);
         } catch (e) {
-          toast(`Transcription skipped: ${(e as Error).message}`, "warn");
+          toastUpdate(transcribeToastId, {
+            text: `Transcription skipped: ${(e as Error).message}`,
+            kind: "warn", sticky: false, progress: undefined,
+          });
         }
       }
 

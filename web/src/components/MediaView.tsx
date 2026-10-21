@@ -8,7 +8,7 @@ import type { MediaRef } from "../lib/store.js";
 import { updateMessageMedia } from "../lib/store.js";
 import { api } from "../lib/api.js";
 import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
-import { Icon, toast } from "./ui.js";
+import { Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 
 // NOTE: prop is deliberately named `media`, NOT `ref` — React
 // intercepts a prop literally named `ref` as a forwarded-ref and
@@ -223,7 +223,9 @@ function VoiceCell({
   async function runTranscribe() {
     if (!messageId) return;
     setBusy(true);
-    toast("Preparing on-device transcription…", "info");
+    // Sticky toast updated in place — avoids spawning a new line on
+    // every progress tick as the model downloads its sub-files.
+    const tId = toast("Preparing on-device transcription…", "info", { sticky: true });
     try {
       // Pull the raw ciphertext bytes; decrypt locally with the ref's
       // content key (never leaves the app). Then hand the plaintext
@@ -245,18 +247,25 @@ function VoiceCell({
       }
       const { text } = await transcribeAudio(pt, {
         onProgress: (p) => {
-          if (p.status === "progress" && typeof p.progress === "number") {
-            // First-time download can take a while — show a coarse hint.
-            if (p.progress < 1) toast(`Loading model… ${Math.round(p.progress * 100)}%`, "info");
+          if (p.status === "progress" && typeof p.progress === "number" && p.progress > 0) {
+            const pct = Math.min(100, Math.round(p.progress));
+            toastUpdate(tId, {
+              text: `Loading model · ${pct}%`,
+              progress: pct / 100,
+            });
           }
         },
       });
-      if (!text) { toast("Couldn't hear anything to transcribe", "warn"); return; }
+      if (!text) {
+        toastUpdate(tId, { text: "Couldn't hear anything to transcribe", kind: "warn", sticky: false, progress: undefined });
+        return;
+      }
       const opened = await updateMessageMedia(messageId, { transcript: text });
       setTranscript(opened?.media?.transcript ?? text);
-      toast("Transcribed on-device", "ok");
+      toastUpdate(tId, { text: "Transcribed on-device", kind: "ok", sticky: false, progress: undefined });
+      setTimeout(() => toastDismiss(tId), 2000);
     } catch (e) {
-      toast(`Transcribe failed: ${(e as Error).message}`, "error");
+      toastUpdate(tId, { text: `Transcribe failed: ${(e as Error).message}`, kind: "error", sticky: false, progress: undefined });
     } finally { setBusy(false); }
   }
 
