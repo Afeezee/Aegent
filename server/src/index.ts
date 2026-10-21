@@ -26,7 +26,8 @@ import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import {
   AuthError, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
-  loginUser, registerUser, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
+  listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
+  rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
 } from "./auth.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
@@ -72,16 +73,48 @@ const registerBody = z.object({
   publicKey: z.string().min(1),
   wrappedPriv: z.string().min(1),
   kdfSalt: z.string().min(1),
+  deviceLabel: z.string().max(120).optional(),
 });
 app.post("/api/register", async (req, res) => {
   try { res.json(await registerUser(registerBody.parse(req.body))); }
   catch (e) { handleError(res, e); }
 });
 
-const loginBody = z.object({ email: z.string().email(), password: z.string() });
+const loginBody = z.object({
+  email: z.string().email(), password: z.string(),
+  deviceLabel: z.string().max(120).optional(),
+});
 app.post("/api/login", async (req, res) => {
   try { res.json(await loginUser(loginBody.parse(req.body))); }
   catch (e) { handleError(res, e); }
+});
+
+app.post("/api/refresh", async (req, res) => {
+  try {
+    const body = z.object({ refreshToken: z.string().min(1) }).parse(req.body);
+    const r = await rotateRefreshToken(body.refreshToken);
+    res.json({ token: r.accessToken, refreshToken: r.refreshToken });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/sessions", authed, async (req, res) => {
+  try { res.json(await listActiveSessions((req as AuthedReq).userId)); }
+  catch (e) { handleError(res, e); }
+});
+
+app.post("/api/sessions/revoke-others", authed, async (req, res) => {
+  try {
+    const body = z.object({ keepRefresh: z.string().min(1) }).parse(req.body);
+    const n = await revokeOtherSessions((req as AuthedReq).userId, body.keepRefresh);
+    res.json({ revoked: n });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/sessions/:id/revoke", authed, async (req, res) => {
+  try {
+    await revokeSession((req as AuthedReq).userId, req.params.id);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
 });
 
 // ---- current user + privacy ----

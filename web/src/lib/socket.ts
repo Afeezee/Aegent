@@ -8,7 +8,7 @@
 // time) silently dropped subscriptions if the socket wasn't yet up.
 
 import { io, type Socket } from "socket.io-client";
-import type { Envelope } from "./api.js";
+import { loadToken, type Envelope } from "./api.js";
 
 let sock: Socket | null = null;
 
@@ -54,7 +54,11 @@ export function connectSocket(token: string): Socket {
     ? "http://localhost:8787"
     : ((import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? location.origin);
   sock = io(url, {
-    auth: { token },
+    // Function form: socket.io re-evaluates on every reconnection
+    // attempt, so a refreshed access token (post-rotation) rides
+    // along on the next connect without us having to tear down and
+    // rebuild the socket.
+    auth: (cb) => cb({ token: loadToken() ?? token }),
     transports: ["websocket", "polling"],
     reconnection: true,
     reconnectionAttempts: Infinity,

@@ -12,6 +12,7 @@ import { api } from "./lib/api.js";
 import { currentSession, tryRestoreSession } from "./lib/session.js";
 import { initCrypto } from "./lib/crypto.js";
 import { upsertContact } from "./lib/store.js";
+import { installDeepLinkHandlers } from "./lib/deeplinks.js";
 
 export default function App() {
   const [ready, setReady] = useState(false);
@@ -27,6 +28,9 @@ export default function App() {
       // the auth screen.
       const restored = await tryRestoreSession();
       if (restored) setSignedIn(true);
+      // Install deep-link handlers once per boot so cold-start URLs
+      // and later intents both route through onChatDeepLink.
+      installDeepLinkHandlers();
       setReady(true);
     })();
   }, []);

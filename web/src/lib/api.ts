@@ -53,17 +53,62 @@ export function siteUrl(path: string): string {
 }
 
 let TOKEN: string | null = null;
+let REFRESH: string | null = null;
 export function setToken(t: string | null) {
   TOKEN = t;
   if (t) localStorage.setItem("aegent.token", t);
   else localStorage.removeItem("aegent.token");
 }
+export function setRefreshToken(t: string | null) {
+  REFRESH = t;
+  if (t) localStorage.setItem("aegent.refresh", t);
+  else localStorage.removeItem("aegent.refresh");
+}
 export function loadToken(): string | null {
   if (!TOKEN) TOKEN = localStorage.getItem("aegent.token");
   return TOKEN;
 }
+export function loadRefreshToken(): string | null {
+  if (!REFRESH) REFRESH = localStorage.getItem("aegent.refresh");
+  return REFRESH;
+}
 
-async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+// Single-flight refresh. If several requests see a 401 at once, they
+// all await the same /api/refresh call rather than firing N of them
+// (which would also trip reuse detection if the second call ran
+// before the first rotated the token out).
+let refreshInFlight: Promise<boolean> | null = null;
+async function attemptRefresh(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+  const rt = loadRefreshToken();
+  if (!rt) return false;
+  refreshInFlight = (async () => {
+    try {
+      const r = await fetch(apiUrl("/api/refresh"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refreshToken: rt }),
+      });
+      if (!r.ok) {
+        // 400/401 on refresh = session genuinely dead (expired, reused,
+        // revoked). Clear tokens so the next boot shows the auth
+        // screen cleanly. Only a *flaky connection* keeps us signed
+        // in — not a server reject.
+        if (r.status === 400 || r.status === 401) {
+          setToken(null); setRefreshToken(null);
+        }
+        return false;
+      }
+      const body = await r.json() as { token: string; refreshToken: string };
+      setToken(body.token); setRefreshToken(body.refreshToken);
+      return true;
+    } catch { return false; }
+    finally { refreshInFlight = null; }
+  })();
+  return refreshInFlight;
+}
+
+async function req<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
   const headers = new Headers(init.headers);
   if (!(init.body instanceof Uint8Array) && !(init.body instanceof Blob)) {
     headers.set("content-type", "application/json");
@@ -71,6 +116,12 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const t = loadToken();
   if (t) headers.set("authorization", `Bearer ${t}`);
   const r = await fetch(apiUrl(path), { ...init, headers });
+  if (r.status === 401 && !retried && path !== "/api/refresh") {
+    // Try to refresh and retry once. If the refresh succeeds, the
+    // retry picks up the new access token automatically.
+    const ok = await attemptRefresh();
+    if (ok) return req<T>(path, init, true);
+  }
   if (!r.ok) {
     let msg = `${r.status}`;
     try {
@@ -86,9 +137,10 @@ export const api = {
   register: (body: {
     email: string; phone?: string; displayName: string; password: string;
     publicKey: string; wrappedPriv: string; kdfSalt: string;
-  }) => req<{ user: PublicUser; token: string; handle: string }>("/api/register", {
-    method: "POST", body: JSON.stringify(body),
-  }),
+    deviceLabel?: string;
+  }) => req<{ user: PublicUser; token: string; refreshToken: string; handle: string }>(
+    "/api/register", { method: "POST", body: JSON.stringify(body) },
+  ),
   setPhone: (phone: string | null) => req<{ ok: true }>("/api/me/phone", {
     method: "PUT", body: JSON.stringify({ phone }),
   }),
@@ -96,10 +148,21 @@ export const api = {
   lookupPhones: (phones: string[]) => req<PublicUser[]>("/api/users/lookup-phones", {
     method: "POST", body: JSON.stringify({ phones }),
   }),
-  login: (body: { email: string; password: string }) =>
-    req<{ user: PublicUser; token: string; wrappedPriv: string; kdfSalt: string }>(
-      "/api/login", { method: "POST", body: JSON.stringify(body) },
-    ),
+  login: (body: { email: string; password: string; deviceLabel?: string }) =>
+    req<{
+      user: PublicUser; token: string; refreshToken: string;
+      wrappedPriv: string; kdfSalt: string;
+    }>("/api/login", { method: "POST", body: JSON.stringify(body) }),
+  listSessions: () => req<Array<{
+    id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
+  }>>("/api/sessions"),
+  revokeOtherSessions: (keepRefresh: string) => req<{ revoked: number }>(
+    "/api/sessions/revoke-others",
+    { method: "POST", body: JSON.stringify({ keepRefresh }) },
+  ),
+  revokeSession: (id: string) => req<{ ok: true }>(
+    `/api/sessions/${encodeURIComponent(id)}/revoke`, { method: "POST" },
+  ),
   me: () => req<MeApi>("/api/me"),
   updateSettings: (patch: { readReceipts?: boolean; presence?: boolean }) =>
     req<{ ok: true }>("/api/me/settings", { method: "PATCH", body: JSON.stringify(patch) }),

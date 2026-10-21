@@ -273,6 +273,25 @@ const SCHEMA = `
     byte_size    INTEGER NOT NULL,
     created_at   ${BIG} NOT NULL
   );
+
+  -- Refresh tokens: long-lived credential, rotated on each use. We
+  -- store only the SHA-256 hash so a DB leak doesn't let anyone sign
+  -- in as another user; the plaintext token lives only on the device
+  -- that received it. The replaced_by column lets us detect reuse: if
+  -- a token that's already been rotated out is presented again, we
+  -- revoke the entire chain for that device as a stolen-token signal.
+  CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id),
+    token_hash    TEXT NOT NULL UNIQUE,
+    device_label  TEXT,
+    created_at    ${BIG} NOT NULL,
+    last_used_at  ${BIG},
+    replaced_by   TEXT REFERENCES refresh_tokens(id),
+    revoked_at    ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_refresh_user
+    ON refresh_tokens(user_id, revoked_at);
 `;
 
 export async function initSchema(): Promise<void> {

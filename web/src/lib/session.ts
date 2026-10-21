@@ -10,7 +10,10 @@ import {
   generateIdentity,
   initCrypto, newKdfSalt, secretBoxOpen, secretBoxSeal,
 } from "./crypto.js";
-import { api, apiUrl, loadToken, setToken, type MeApi, type PublicUser } from "./api.js";
+import {
+  api, apiUrl, loadToken, setRefreshToken, setToken,
+  type MeApi, type PublicUser,
+} from "./api.js";
 import {
   applyDelete, applyEdit, applyReaction, closeStore, getContact, getGroup,
   markDelivered, markRead, openStore, saveMediaMessage, saveTextMessage,
@@ -172,7 +175,7 @@ export async function register(input: {
   ]);
   const wrappedPriv = secretBoxSeal(wrapKey, id.privateKey);
 
-  const { user, token } = await api.register({
+  const { user, token, refreshToken } = await api.register({
     email: input.email,
     phone: input.phone,
     displayName: input.displayName,
@@ -180,8 +183,10 @@ export async function register(input: {
     publicKey: b64.encode(id.publicKey),
     wrappedPriv,
     kdfSalt: b64.encode(salt),
+    deviceLabel: describeDevice(),
   });
   setToken(token);
+  setRefreshToken(refreshToken);
   connectSocket(token);
   openStore(user.id, storeKey);
 
@@ -206,7 +211,9 @@ export function tickAutoBackup(): void {
 
 export async function login(input: { email: string; password: string }): Promise<Session> {
   await initCrypto();
-  const { token, wrappedPriv, kdfSalt } = await api.login(input);
+  const { token, refreshToken, wrappedPriv, kdfSalt } = await api.login({
+    ...input, deviceLabel: describeDevice(),
+  });
   const salt = b64.decode(kdfSalt);
   const [wrapKey, storeKey] = await Promise.all([
     deriveKey(input.password, salt, "priv-wrap"),
@@ -214,6 +221,7 @@ export async function login(input: { email: string; password: string }): Promise
   ]);
   const privateKey = secretBoxOpen(wrapKey, wrappedPriv);
   setToken(token);
+  setRefreshToken(refreshToken);
   connectSocket(token);
   const me = await api.me();
   openStore(me.id, storeKey);
@@ -266,12 +274,17 @@ async function attemptCloudRestore(bk: Uint8Array, userId: string, storeKey: Uin
 export async function tryRestoreSession(): Promise<Session | null> {
   await initCrypto();
   const token = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.token");
+  const refresh = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.refresh");
   const keys = loadPersistedKeys();
-  if (!token || !keys) return null;
-  setToken(token);
+  // Need the crypto keys at minimum; either the access token OR a
+  // refresh token can establish the session (the refresh will be
+  // auto-exchanged on the first authed request if the access is dead).
+  if (!keys || (!token && !refresh)) return null;
+  if (token) setToken(token);
+  if (refresh) setRefreshToken(refresh);
   try {
-    const me = await api.me(); // implicitly validates the token
-    connectSocket(token);
+    const me = await api.me(); // implicitly validates (and auto-refreshes if needed)
+    connectSocket(loadToken() ?? "");
     openStore(me.id, keys.storeKey);
     CURRENT = {
       user: me,
@@ -295,8 +308,30 @@ export function logout() {
   disconnectSocket();
   closeStore();
   setToken(null);
+  setRefreshToken(null);
   clearPersistedKeys();
   CURRENT = null;
+}
+
+// Short human-readable device label stored with the refresh token so
+// Settings > Devices can show "Android (Chrome Mobile)" instead of a
+// random id. Non-identifying — just UA family + platform family.
+function describeDevice(): string {
+  try {
+    const ua = navigator.userAgent;
+    const isAndroid = /Android/i.test(ua);
+    const isIOS = /iPhone|iPad|iPod/i.test(ua);
+    const isMac = /Macintosh/i.test(ua);
+    const isWin = /Windows/i.test(ua);
+    const isLinux = /Linux/i.test(ua) && !isAndroid;
+    const platform = isAndroid ? "Android" : isIOS ? "iOS"
+      : isMac ? "macOS" : isWin ? "Windows" : isLinux ? "Linux" : "Unknown";
+    const browser = /Firefox\//.test(ua) ? "Firefox"
+      : /Edg\//.test(ua) ? "Edge"
+      : /Chrome\//.test(ua) ? "Chrome"
+      : /Safari\//.test(ua) ? "Safari" : "Browser";
+    return `${platform} · ${browser}`;
+  } catch { return "Unknown device"; }
 }
 
 export async function refreshMe() {

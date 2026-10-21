@@ -407,12 +407,38 @@ export async function markRead(id: string, at = Date.now()) {
 // ---- thread reads ----
 
 export async function threadWith(peerId: string, limit = 500): Promise<OpenedMessage[]> {
+  // Return the NEWEST `limit` messages (oldest-first in the result).
+  // The old impl returned the oldest N via .limit() on an ascending
+  // index — that silently lost history for threads above the cap.
   const rows = await requireDb().messages
     .where("[peerId+createdAt]")
     .between([peerId, 0], [peerId, Date.now() + 1])
+    .reverse()
     .limit(limit)
     .toArray();
-  return rows.map(openMessage);
+  return rows.reverse().map(openMessage);
+}
+
+// Pagination for the chat view: load `limit` messages strictly older
+// than `beforeCreatedAt`. Used when the user scrolls near the top of
+// the stream. Returns oldest-first so the caller can prepend.
+export async function threadBefore(
+  peerId: string, beforeCreatedAt: number, limit = 200,
+): Promise<OpenedMessage[]> {
+  const rows = await requireDb().messages
+    .where("[peerId+createdAt]")
+    .between([peerId, 0], [peerId, beforeCreatedAt], true, false)
+    .reverse()
+    .limit(limit)
+    .toArray();
+  return rows.reverse().map(openMessage);
+}
+
+export async function threadMessageCount(peerId: string): Promise<number> {
+  return requireDb().messages
+    .where("[peerId+createdAt]")
+    .between([peerId, 0], [peerId, Date.now() + 1])
+    .count();
 }
 
 export async function everyMessage(): Promise<OpenedMessage[]> {

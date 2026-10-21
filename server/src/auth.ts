@@ -8,16 +8,17 @@
 
 import { argon2id, argon2Verify } from "hash-wasm";
 import jwt from "jsonwebtoken";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { db, type UserRow } from "./db.js";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-only-do-not-use-in-production";
-// Long-lived access token so a signed-in user stays signed in for a
-// season at a time, surviving reboots, dev reloads and brief server
-// outages. 90 days is the upper end of what feels reasonable without
-// rotating refresh tokens; a full access/refresh split with reuse
-// detection is a separate PR.
-const TOKEN_TTL = "90d";
+// Short-lived access token; the refresh token lives much longer and
+// rotates on every use. The client auto-refreshes before the UI ever
+// sees a 401, so this short TTL is invisible under normal use.
+const TOKEN_TTL = "7d";
+// Refresh TTL: 180 days. Rotated on every use; a device that goes
+// idle longer than this has to sign in again.
+const REFRESH_TTL_MS = 180 * 86400_000;
 
 const ARGON_OPTS = { iterations: 3, memorySize: 65536, parallelism: 1 };
 
@@ -46,7 +47,8 @@ export async function registerUser(input: {
   publicKey: string;
   wrappedPriv: string;
   kdfSalt: string;
-}): Promise<{ user: PublicUser; token: string; handle: string }> {
+  deviceLabel?: string;
+}): Promise<{ user: PublicUser; token: string; refreshToken: string; handle: string }> {
   const email = input.email.toLowerCase().trim();
   const phone = input.phone ? normalizePhone(input.phone) : null;
 
@@ -74,11 +76,16 @@ export async function registerUser(input: {
 
   const user = await getUserById(id);
   if (!user) throw new AuthError("insert_failed", "Registration failed unexpectedly.");
-  return { user: toPublic(user), token: sign(id), handle };
+  const refreshToken = await issueRefreshToken(id, input.deviceLabel);
+  return { user: toPublic(user), token: sign(id), refreshToken, handle };
 }
 
-export async function loginUser(input: { email: string; password: string }):
-  Promise<{ user: PublicUser; token: string; wrappedPriv: string; kdfSalt: string }> {
+export async function loginUser(input: {
+  email: string; password: string; deviceLabel?: string;
+}): Promise<{
+  user: PublicUser; token: string; refreshToken: string;
+  wrappedPriv: string; kdfSalt: string;
+}> {
   const email = input.email.toLowerCase().trim();
   const row = await db.prepare("SELECT * FROM users WHERE email = ?").get<UserRow>(email);
 
@@ -90,12 +97,174 @@ export async function loginUser(input: { email: string; password: string }):
   const ok = await verifyPassword(row.password_hash, input.password);
   if (!ok) return fail();
 
+  const refreshToken = await issueRefreshToken(row.id, input.deviceLabel);
   return {
     user: toPublic(row),
     token: sign(row.id),
+    refreshToken,
     wrappedPriv: row.wrapped_priv,
     kdfSalt: row.kdf_salt,
   };
+}
+
+// ---- refresh tokens ----
+
+type RefreshRow = {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  device_label: string | null;
+  created_at: number;
+  last_used_at: number | null;
+  replaced_by: string | null;
+  revoked_at: number | null;
+};
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+async function issueRefreshToken(userId: string, deviceLabel?: string): Promise<string> {
+  // 32 bytes of entropy, base64url-encoded. The plaintext is handed
+  // to the device and never written to disk server-side.
+  const raw = randomBytes(32).toString("base64url");
+  const id = randomUUID();
+  const now = Date.now();
+  await db.prepare(
+    `INSERT INTO refresh_tokens
+       (id, user_id, token_hash, device_label, created_at, last_used_at, replaced_by, revoked_at)
+     VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+  ).run(id, userId, hashToken(raw), deviceLabel ?? null, now);
+  // The token the client receives: <id>.<raw>. Combining the id lets
+  // us look the row up without scanning the whole table.
+  return `${id}.${raw}`;
+}
+
+export async function rotateRefreshToken(presented: string): Promise<{
+  userId: string; accessToken: string; refreshToken: string;
+}> {
+  const dot = presented.indexOf(".");
+  if (dot < 0) throw new AuthError("bad_refresh", "Bad refresh token.");
+  const id = presented.slice(0, dot);
+  const raw = presented.slice(dot + 1);
+  const row = await db.prepare(
+    "SELECT * FROM refresh_tokens WHERE id = ?",
+  ).get<RefreshRow>(id);
+  if (!row || row.token_hash !== hashToken(raw)) {
+    throw new AuthError("bad_refresh", "Bad refresh token.");
+  }
+  if (row.revoked_at) throw new AuthError("revoked", "Session revoked.");
+  // Expiry.
+  if (Date.now() - row.created_at > REFRESH_TTL_MS) {
+    await db.prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?")
+      .run(Date.now(), row.id);
+    throw new AuthError("expired", "Session expired, sign in again.");
+  }
+  // Reuse detection: if this row has already been replaced, someone
+  // just presented a stolen rotated-out copy. Revoke the whole chain
+  // for this device/user.
+  if (row.replaced_by) {
+    await revokeChainFrom(row.id);
+    throw new AuthError("reuse", "Session invalidated — please sign in.");
+  }
+  // Rotate: new row + mark old as replaced + rewrite the chain head.
+  const now = Date.now();
+  const newRaw = randomBytes(32).toString("base64url");
+  const newId = randomUUID();
+  await db.tx(async () => {
+    await db.prepare(
+      `INSERT INTO refresh_tokens
+         (id, user_id, token_hash, device_label, created_at, last_used_at, replaced_by, revoked_at)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+    ).run(newId, row.user_id, hashToken(newRaw), row.device_label, now);
+    await db.prepare(
+      "UPDATE refresh_tokens SET last_used_at = ?, replaced_by = ? WHERE id = ?",
+    ).run(now, newId, row.id);
+  });
+  return {
+    userId: row.user_id,
+    accessToken: sign(row.user_id),
+    refreshToken: `${newId}.${newRaw}`,
+  };
+}
+
+async function revokeChainFrom(startId: string): Promise<void> {
+  const now = Date.now();
+  // Walk forward through replaced_by links and mark each revoked.
+  // Chains are rotated per request; depth is small in practice.
+  let cur: string | null = startId;
+  for (let i = 0; i < 100 && cur; i++) {
+    const r: { id: string; replaced_by: string | null } | undefined = await db.prepare(
+      "SELECT id, replaced_by FROM refresh_tokens WHERE id = ?",
+    ).get<{ id: string; replaced_by: string | null }>(cur);
+    if (!r) break;
+    await db.prepare(
+      "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, r.id);
+    cur = r.replaced_by;
+  }
+}
+
+export async function listActiveSessions(userId: string): Promise<Array<{
+  id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
+}>> {
+  // The newest unrevoked row of each chain is a "live" session. The
+  // easiest proxy for that: rows that are not revoked and have NO
+  // other row pointing at them via replaced_by. We select all
+  // unrevoked rows, then filter out ones that appear as a
+  // replaced_by elsewhere.
+  const rows = await db.prepare(
+    `SELECT id, device_label, created_at, last_used_at, replaced_by
+       FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL`,
+  ).all<{
+    id: string; device_label: string | null;
+    created_at: number; last_used_at: number | null; replaced_by: string | null;
+  }>(userId);
+  const replaced = new Set(rows.filter((r) => r.replaced_by).map((r) => r.replaced_by as string));
+  return rows
+    .filter((r) => !replaced.has(r.id))
+    .map((r) => ({
+      id: r.id,
+      deviceLabel: r.device_label,
+      createdAt: r.created_at,
+      lastUsedAt: r.last_used_at,
+    }))
+    .sort((a, b) => (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt));
+}
+
+export async function revokeOtherSessions(userId: string, keepRefresh: string): Promise<number> {
+  const dot = keepRefresh.indexOf(".");
+  const keepId = dot > 0 ? keepRefresh.slice(0, dot) : "";
+  // Walk the whole chain forward from keepId so we don't accidentally
+  // revoke the predecessors of the token the user is still holding.
+  const keep = new Set<string>();
+  let cur: string | null = keepId;
+  for (let i = 0; i < 100 && cur; i++) {
+    keep.add(cur);
+    const r: { replaced_by: string | null } | undefined = await db.prepare(
+      "SELECT replaced_by FROM refresh_tokens WHERE id = ?",
+    ).get<{ replaced_by: string | null }>(cur);
+    cur = r?.replaced_by ?? null;
+  }
+  const all = await db.prepare(
+    "SELECT id FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL",
+  ).all<{ id: string }>(userId);
+  const now = Date.now();
+  let revoked = 0;
+  for (const r of all) {
+    if (keep.has(r.id)) continue;
+    await db.prepare(
+      "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?",
+    ).run(now, r.id);
+    revoked++;
+  }
+  return revoked;
+}
+
+export async function revokeSession(userId: string, sessionId: string): Promise<void> {
+  await db.prepare(
+    "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+  ).run(Date.now(), sessionId, userId);
 }
 
 export function verifyToken(token: string): string {

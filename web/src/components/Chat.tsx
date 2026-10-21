@@ -8,7 +8,7 @@ import { Composer, type ReplyTarget } from "./Composer.js";
 import { MessageBubble } from "./MessageBubble.js";
 import type { OpenedMessage, Thread } from "../lib/store.js";
 import {
-  getContact, getGroup, markThreadRead, threadWith,
+  getContact, getGroup, markThreadRead, threadBefore, threadMessageCount, threadWith,
   type ContactRow, type GroupRow,
 } from "../lib/store.js";
 import { onTyping } from "../lib/socket.js";
@@ -18,7 +18,7 @@ import {
 
 export function Chat({
   thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
-  highlightMsgId,
+  highlightMsgId, fromAgent, onBackToAgent,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
@@ -30,8 +30,13 @@ export function Chat({
   onSent: () => void;
   // When set, Chat scrolls the matching bubble into view (centre of
   // the stream) and pulses it for ~1.5s. Used by the agent's
-  // tappable result cards and (future) deep links.
+  // tappable result cards and deep links.
   highlightMsgId?: string | null;
+  // True when the user got here via the agent sheet (or any future
+  // "navigate on behalf of the user" path). Shows a "Back to agent"
+  // pill below the top bar.
+  fromAgent?: boolean;
+  onBackToAgent?: () => void;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -39,8 +44,18 @@ export function Chat({
   const [typing, setTyping] = useState<Set<string>>(new Set());
   const [reply, setReply] = useState<ReplyTarget | null>(null);
   const [editing, setEditing] = useState<{ id: string; body: string } | null>(null);
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const me = myId();
+
+  // Page size for the window of messages currently in the DOM.
+  // Lazy-load more when the user scrolls near the top. 300 keeps
+  // the render tree cheap even on a modest Android device while
+  // still being enough that most sessions never hit the loader.
+  const INITIAL_WINDOW = 300;
+  const PAGE_SIZE = 200;
 
   // Load thread on peer change / on refresh. Every step is swaddled
   // in try/catch so a single bad DB row or missing contact can't
@@ -49,9 +64,13 @@ export function Chat({
     let alive = true;
     (async () => {
       try {
-        const rows = await threadWith(thread.peerId, 800);
+        const [rows, total] = await Promise.all([
+          threadWith(thread.peerId, INITIAL_WINDOW),
+          threadMessageCount(thread.peerId),
+        ]);
         if (!alive) return;
         setMsgs(rows);
+        setHasMoreOlder(total > rows.length);
         // Default: snap to bottom. If a highlight is pending, defer
         // the scroll to the highlight effect below so we don't
         // bottom-scroll and then re-scroll in a visible jump.
@@ -193,9 +212,62 @@ export function Chat({
         <span className="tag ok">end-to-end</span>
       </div>
 
-      <div ref={streamRef} style={{
-        flex: 1, overflowY: "auto", padding: "20px 22px", display: "flex", flexDirection: "column", gap: 10,
-      }}>
+      {fromAgent && onBackToAgent && (
+        <button
+          type="button"
+          onClick={onBackToAgent}
+          aria-label="Back to agent"
+          style={{
+            position: "absolute", zIndex: 50,
+            top: "calc(var(--safe-top) + 70px)", left: "50%", transform: "translateX(-50%)",
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "8px 14px", minHeight: 36, borderRadius: 999,
+            background: "var(--glass-bg-hi)", border: "1px solid var(--glass-border-hi)",
+            color: "var(--text)", fontSize: 13, cursor: "pointer",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
+          }}
+        >
+          <span style={{ display: "inline-block", transform: "rotate(180deg)" }}><Icon.chevron /></span> Back to agent
+        </button>
+      )}
+
+      <div
+        ref={streamRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          // Lazy-load older when within 120px of the top.
+          if (el.scrollTop < 120 && hasMoreOlder && !loadingOlder && msgs.length > 0) {
+            setLoadingOlder(true);
+            const prevHeight = el.scrollHeight;
+            const prevTop = el.scrollTop;
+            const oldestAt = msgs[0].createdAt;
+            threadBefore(thread.peerId, oldestAt, PAGE_SIZE).then((older) => {
+              if (older.length === 0) { setHasMoreOlder(false); setLoadingOlder(false); return; }
+              setMsgs((cur) => [...older, ...cur]);
+              // Preserve scroll position: wait a frame for layout, then
+              // offset by the newly-prepended content height so the
+              // user's eye stays on the same message.
+              requestAnimationFrame(() => {
+                if (!streamRef.current) return;
+                const delta = streamRef.current.scrollHeight - prevHeight;
+                streamRef.current.scrollTop = prevTop + delta;
+                setLoadingOlder(false);
+              });
+            }).catch(() => setLoadingOlder(false));
+          }
+          // Jump-to-latest FAB: show when the user is >400px from the bottom.
+          const distFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+          setShowJumpLatest(distFromBottom > 400);
+        }}
+        style={{
+          flex: 1, overflowY: "auto", padding: "20px 22px", display: "flex", flexDirection: "column", gap: 10,
+        }}
+      >
+        {loadingOlder && (
+          <div className="small" style={{ textAlign: "center", padding: 8, color: "var(--text-mute)" }}>
+            Loading older messages…
+          </div>
+        )}
         {msgs.length === 0 ? (
           <EmptyChat title={thread.title} isGroup={thread.isGroup} />
         ) : (
@@ -252,6 +324,29 @@ export function Chat({
           )}
         </AnimatePresence>
       </div>
+
+      <AnimatePresence>
+        {showJumpLatest && (
+          <motion.button
+            type="button"
+            initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
+            transition={{ duration: 0.18 }}
+            onClick={() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" })}
+            aria-label="Jump to latest message"
+            style={{
+              position: "absolute",
+              right: 18, bottom: "calc(96px + var(--safe-bottom))",
+              zIndex: 40, width: 44, height: 44, minWidth: 44, minHeight: 44,
+              borderRadius: 999, border: "1px solid var(--glass-border-hi)",
+              background: "var(--glass-bg-hi)", color: "var(--text)",
+              cursor: "pointer", display: "grid", placeItems: "center",
+              boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
+            }}
+          >
+            <span style={{ display: "inline-block", transform: "rotate(90deg)" }}><Icon.chevron /></span>
+          </motion.button>
+        )}
+      </AnimatePresence>
 
       <Composer
         peerId={thread.peerId}

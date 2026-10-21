@@ -19,6 +19,7 @@ import {
   currentSession, ensureContact, ensureGroup, ingestEnvelope, pullInbox,
 } from "../lib/session.js";
 import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
+import { onChatDeepLink } from "../lib/deeplinks.js";
 import {
   getContact, listGroups, listThreads, markRead, setContactPresence,
   takeDueScheduledBackups,
@@ -53,11 +54,16 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // the previous match. Cleared ~2.5s after it's set so re-entering the
   // same chat later doesn't re-pulse an old match.
   const [highlight, setHighlight] = useState<{ peerId: string; msgId: string } | null>(null);
+  // True when the current thread was opened by the agent — enables the
+  // "Back to agent" pill in Chat. Clears when the user navigates away
+  // (thread change) or taps the pill.
+  const [cameFromAgent, setCameFromAgent] = useState(false);
   useEffect(() => {
     if (!highlight) return;
     const t = window.setTimeout(() => setHighlight(null), 2500);
     return () => window.clearTimeout(t);
   }, [highlight]);
+  useEffect(() => { setCameFromAgent(false); }, [thread?.peerId]);
 
   const me = currentSession()?.user;
 
@@ -207,11 +213,25 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   };
 
   // "Jump to message" from the agent sheet. Open the chat, record
-  // the highlight target so Chat scrolls to it on load.
-  const openMessage = async (peerId: string, isGroup: boolean, msgId: string) => {
+  // the highlight target so Chat scrolls to it on load. `fromAgent`
+  // marks that the user got here via the agent — the chat then
+  // renders a "Back to agent" pill.
+  const openMessage = async (peerId: string, isGroup: boolean, msgId: string, fromAgent = true) => {
     await openThread(peerId, isGroup);
     setHighlight({ peerId, msgId });
+    setCameFromAgent(fromAgent);
   };
+
+  // Deep link listener: an aegent://chat/.../message/... intent or a
+  // #/chat/... web URL opens the chat (and highlights the message
+  // when one is given). Cold-start and runtime both covered.
+  useEffect(() => {
+    return onChatDeepLink(async ({ peerId, isGroup, msgId }) => {
+      if (msgId) await openMessage(peerId, isGroup, msgId, false);
+      else await openThread(peerId, isGroup);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const bp = useBreakpoint();
   const showSidebar = bp !== "sm" || !thread;
@@ -279,6 +299,8 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                     onBack={bp === "sm" ? () => setThread(null) : undefined}
                     onSent={() => setRefresh((k) => k + 1)}
                     highlightMsgId={highlight?.peerId === thread.peerId ? highlight.msgId : null}
+                    fromAgent={cameFromAgent}
+                    onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
                   />
                 </ErrorBoundary>
               </motion.div>
