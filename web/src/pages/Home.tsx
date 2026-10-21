@@ -20,6 +20,7 @@ import {
 } from "../lib/session.js";
 import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
 import { onChatDeepLink } from "../lib/deeplinks.js";
+import { WelcomeTour, consumeTourPending } from "../components/WelcomeTour.js";
 import {
   getContact, listGroups, listThreads, markRead, setContactPresence,
   takeDueScheduledBackups,
@@ -53,6 +54,11 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // target so an open-another-chat-later doesn't accidentally re-pulse
   // the previous match. Cleared ~2.5s after it's set so re-entering the
   // same chat later doesn't re-pulse an old match.
+  // Welcome tour: fires once per account after signup. consumeTourPending
+  // atomically reads and clears the "aegent.pending-tour" flag set by
+  // Auth.tsx on successful register(). Returning users (login) never
+  // trigger this.
+  const [tourOpen, setTourOpen] = useState<boolean>(() => consumeTourPending());
   const [highlight, setHighlight] = useState<{ peerId: string; msgId: string } | null>(null);
   // True when the current thread was opened by the agent — enables the
   // "Back to agent" pill in Chat. Clears when the user navigates away
@@ -363,6 +369,8 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       <ForwardSheet open={!!forwardMsg} onClose={() => setForwardMsg(null)} message={forwardMsg} />
       <ContactsSheet open={contactsOpen} onClose={() => setContactsOpen(false)}
         onOpenThread={(pid) => openThread(pid, false)} />
+
+      {tourOpen && <WelcomeTour onDone={() => setTourOpen(false)} />}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Button, FadeIn, Glass } from "../components/ui.js";
 import { Brand } from "./Onboarding.js";
 import { login, register } from "../lib/session.js";
+import { markTourPending } from "../components/WelcomeTour.js";
 
 const switchBtn: React.CSSProperties = {
   background: "none", border: "none", padding: 0,
@@ -31,6 +32,9 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
           email, displayName, password,
           phone: phone.trim() || undefined,
         });
+        // Fresh account → queue the welcome tour. Home.tsx picks it
+        // up on first mount after signup. Login path skips this.
+        markTourPending();
       } else {
         // Login handles cloud-restore automatically: if this account
         // has a backup on the relay, the client re-derives the

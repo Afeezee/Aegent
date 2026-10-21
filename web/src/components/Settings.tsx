@@ -8,6 +8,7 @@ import { api, loadRefreshToken } from "../lib/api.js";
 import { b64 } from "../lib/crypto.js";
 import { backupKey, currentSession, logout, refreshMe } from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
+import { markTourPending } from "./WelcomeTour.js";
 
 export function Settings({
   open, onClose, onSignedOut,
@@ -158,7 +159,10 @@ export function Settings({
         </div>
       </section>
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Button variant="ghost" size="small" onClick={replayTour}>
+          Replay welcome tour
+        </Button>
         <Button variant="danger" onClick={() => { logout(); onSignedOut(); }}>
           <Icon.logout /> Sign out
         </Button>
@@ -295,6 +299,18 @@ async function downloadRecoveryKit(): Promise<void> {
   } catch (e) {
     toast(`Couldn't build kit: ${(e as Error).message}`, "error");
   }
+}
+
+// Lets the user re-watch the welcome tour. We clear the one-shot
+// "aegent.toured" flag and set "aegent.pending-tour" so the Home
+// shell picks it up on next mount — same code path as a fresh signup.
+function replayTour(): void {
+  try { localStorage.removeItem("aegent.toured"); } catch { /* ignore */ }
+  markTourPending();
+  // Full-reload is the simplest way to re-trigger consumeTourPending()
+  // inside Home's initial useState. Avoids wiring an app-wide bus for
+  // one button.
+  location.reload();
 }
 
 function VoiceTranscribeToggle() {
