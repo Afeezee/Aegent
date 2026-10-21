@@ -18,25 +18,20 @@ import {
 
 export function Chat({
   thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
-  highlightMsgId, fromAgent, onBackToAgent,
+  highlightMsgId, fromAgent, onBackToAgent, onInvokeAgent,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
   onOpenGroupInfo?: () => void;
   onBack?: () => void;
   refreshKey: number;
-  // Bubbled from the Composer to the shell so a fresh outbound send
-  // triggers the thread re-read that renders it.
   onSent: () => void;
-  // When set, Chat scrolls the matching bubble into view (centre of
-  // the stream) and pulses it for ~1.5s. Used by the agent's
-  // tappable result cards and deep links.
   highlightMsgId?: string | null;
-  // True when the user got here via the agent sheet (or any future
-  // "navigate on behalf of the user" path). Shows a "Back to agent"
-  // pill below the top bar.
   fromAgent?: boolean;
   onBackToAgent?: () => void;
+  // Pass-through for the /agent slash command in Composer — opens
+  // the agent sheet in Home with the query pre-populated.
+  onInvokeAgent?: (query: string) => void;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -209,6 +204,24 @@ export function Chat({
           </div>
           <div className="small">{subtitle}</div>
         </div>
+        {onInvokeAgent && (
+          <button
+            type="button"
+            onClick={() => onInvokeAgent(`About my chat with ${thread.title}: `)}
+            aria-label={`Ask Aegent about this chat with ${thread.title}`}
+            title="Ask Aegent about this chat"
+            style={{
+              all: "unset", cursor: "pointer",
+              width: 36, height: 36, minWidth: 36, borderRadius: 10,
+              background: "linear-gradient(135deg, var(--violet), var(--aqua))",
+              color: "#10132a",
+              display: "grid", placeItems: "center",
+              boxShadow: "0 4px 12px rgba(138,125,255,0.3)",
+            }}
+          >
+            <Icon.agent />
+          </button>
+        )}
         <span className="tag ok">end-to-end</span>
       </div>
 
@@ -357,6 +370,7 @@ export function Chat({
         onCancelEdit={() => setEditing(null)}
         onEditCommit={commitEdit}
         onSent={onSent}
+        onInvokeAgent={onInvokeAgent}
       />
     </div>
   );

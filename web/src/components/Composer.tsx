@@ -14,6 +14,7 @@ export type ReplyTarget = { id: string; preview: string; author: string };
 
 export function Composer({
   peerId, isGroup, replyTo, onClearReply, editing, onCancelEdit, onEditCommit, onSent,
+  onInvokeAgent,
 }: {
   peerId: string;
   isGroup: boolean;
@@ -27,13 +28,21 @@ export function Composer({
   // Without this, outbound sends only appeared after the next
   // inbound socket event bumped the shell's refreshKey.
   onSent: () => void;
+  // Invoked when the user types `/agent <query>` and hits send. The
+  // host (Chat → Home) opens the agent sheet with the query already
+  // populated and the active chat in context. Keeps users in the
+  // chat flow instead of making them hunt for the Æ icon.
+  onInvokeAgent?: (query: string) => void;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState<{ start: number; stop: () => Promise<Blob> } | null>(null);
   const [recordElapsed, setRecordElapsed] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const [attachOpen, setAttachOpen] = useState(false);
 
   useEffect(() => {
     if (editing) setText(editing.body);
@@ -57,6 +66,15 @@ export function Composer({
   async function submitText() {
     const body = text.trim();
     if (!body || sending) return;
+    // /agent <query> — intercept and route to the agent sheet with
+    // the active chat in context. Nothing is sent to the peer.
+    // Variants accepted: `/agent …`, `/ai …`, `/ask …`.
+    const agentMatch = /^\/(?:agent|ai|ask)\s+(.+)$/i.exec(body);
+    if (agentMatch && onInvokeAgent) {
+      onInvokeAgent(agentMatch[1].trim());
+      setText("");
+      return;
+    }
     setSending(true);
     try {
       if (editing) {
@@ -153,17 +171,18 @@ export function Composer({
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
 
-      // Best-effort on-device transcription — only runs if the user has
-      // opted in via Settings (avoids the ~40 MB Whisper download on
-      // first send for people who didn't ask for it). Never blocks the
-      // send: on error we still upload the audio, just without the
-      // transcript sidecar.
+      // Best-effort on-device transcription — now default-on. The
+      // first voice note triggers a ~40 MB Whisper model download
+      // that stays cached forever after. Users who don't want it can
+      // flip the toggle in Settings → Voice notes to "Disable".
+      // Never blocks the send: on error we still upload the audio,
+      // just without the transcript sidecar.
       let transcript: string | undefined;
-      const wantsTranscript = localStorage.getItem("aegent.transcribeVoice") === "1";
+      const wantsTranscript = localStorage.getItem("aegent.transcribeVoice") !== "0";
       if (wantsTranscript) {
         toast("Transcribing…", "info");
         try {
-          const { transcribeAudio } = await import("../lib/transcribe.js");
+          const { transcribeAudio } = await loadTranscribeModule();
           const { text } = await transcribeAudio(bytes, {
             onProgress: (p) => {
               if (p.status === "progress" && typeof p.progress === "number") {
@@ -235,10 +254,46 @@ export function Composer({
           <Button variant="primary" onClick={() => stopAndSendVoice(false)}><Icon.send /> Send</Button>
         </motion.div>
       ) : (
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, position: "relative" }}>
+          {/* Three dedicated inputs so the OS picker opens filtered. */}
+          <input ref={imageRef} type="file" accept="image/*" style={{ display: "none" }}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) { attach(f); e.target.value = ""; } }} />
+          <input ref={audioRef} type="file" accept="audio/*" style={{ display: "none" }}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) { attach(f); e.target.value = ""; } }} />
           <input ref={fileRef} type="file" accept="*/*" style={{ display: "none" }}
             onChange={(e) => { const f = e.target.files?.[0]; if (f) { attach(f); e.target.value = ""; } }} />
-          <Button variant="icon" onClick={() => fileRef.current?.click()} title="Attach"><Icon.paperclip /></Button>
+
+          <AnimatePresence>
+            {attachOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                transition={{ duration: 0.16 }}
+                className="glass"
+                style={{
+                  position: "absolute", bottom: "100%", left: 0, marginBottom: 10,
+                  padding: 6, borderRadius: 14, display: "flex", gap: 4, zIndex: 20,
+                }}
+                onMouseLeave={() => setAttachOpen(false)}
+              >
+                <AttachOption label="Photo" title="Send a photo or image"
+                  onClick={() => { setAttachOpen(false); imageRef.current?.click(); }}>
+                  <Icon.photo />
+                </AttachOption>
+                <AttachOption label="Audio" title="Send an audio file"
+                  onClick={() => { setAttachOpen(false); audioRef.current?.click(); }}>
+                  <Icon.play />
+                </AttachOption>
+                <AttachOption label="File" title="Send any file"
+                  onClick={() => { setAttachOpen(false); fileRef.current?.click(); }}>
+                  <Icon.paperclip />
+                </AttachOption>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <Button variant="icon" onClick={() => setAttachOpen((v) => !v)}
+            title="Attach image, audio, or file" aria-label="Attach"><Icon.plus /></Button>
           <textarea
             ref={textRef}
             rows={1}
@@ -254,6 +309,48 @@ export function Composer({
         </div>
       )}
     </div>
+  );
+}
+
+// Dynamic-import loader with a one-shot retry. If the first attempt
+// fails with "Failed to fetch dynamically imported module" (which
+// happens after a deploy if the device has a stale index.html
+// pointing at a chunk hash that no longer exists), we refresh the
+// SPA assets by appending a cache-bust and reloading on persistent
+// failure. The caller gets a clear error either way.
+async function loadTranscribeModule(): Promise<typeof import("../lib/transcribe.js")> {
+  try {
+    return await import("../lib/transcribe.js");
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    if (/Failed to fetch dynamically imported module|ChunkLoadError/i.test(msg)) {
+      // The app on this device is out of date vs. the server. Offer
+      // a reload — fixes it 100% of the time at the cost of a bounce.
+      if (confirm("Aegent was updated on the server. Reload now to pick up the new version?")) {
+        location.reload();
+      }
+      throw new Error("Transcription unavailable — app needs reload");
+    }
+    throw e;
+  }
+}
+
+function AttachOption({
+  children, label, title, onClick,
+}: { children: React.ReactNode; label: string; title: string; onClick: () => void }) {
+  return (
+    <button
+      type="button" onClick={onClick} title={title} aria-label={label}
+      style={{
+        all: "unset", cursor: "pointer",
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+        padding: "8px 10px", minWidth: 56, minHeight: 56, borderRadius: 10,
+        color: "var(--text)",
+      }}
+    >
+      {children}
+      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{label}</span>
+    </button>
   );
 }
 

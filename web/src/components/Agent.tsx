@@ -44,14 +44,17 @@ export function pushAgentEvent(u: PushKind) {
 
 export function AgentSheet({
   open, onClose, onDidAct, onOpenMessage,
+  initialQuery, onConsumeInitialQuery,
 }: {
   open: boolean;
   onClose: () => void;
   onDidAct: () => void;
-  // Tap on a result card: close the sheet, open the chat, scroll to
-  // and highlight the target message. If omitted, cards still render
-  // but are non-interactive.
   onOpenMessage?: (peerId: string, isGroup: boolean, msgId: string) => void;
+  // When set and the sheet is open, auto-ask this query on mount
+  // (used by the "/agent …" slash in the chat composer). Cleared
+  // via onConsumeInitialQuery once we've handed it to ask().
+  initialQuery?: string | null;
+  onConsumeInitialQuery?: () => void;
 }) {
   const reduce = useReducedMotion();
   const [input, setInput] = useState("");
@@ -145,6 +148,17 @@ export function AgentSheet({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Auto-fire a query handed over by the host (chat composer's
+  // `/agent …` path). Runs once per non-empty initialQuery, after
+  // history has been rehydrated so the LLM gets a full transcript.
+  useEffect(() => {
+    if (!open || !initialQuery || !historyLoaded || busy) return;
+    const q = initialQuery;
+    onConsumeInitialQuery?.();
+    void ask(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialQuery, historyLoaded]);
 
   async function ask(text: string) {
     if (!text.trim() || busy) return;

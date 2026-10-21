@@ -59,6 +59,10 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // Auth.tsx on successful register(). Returning users (login) never
   // trigger this.
   const [tourOpen, setTourOpen] = useState<boolean>(() => consumeTourPending());
+  // When Composer intercepts "/agent …" we open the agent sheet with
+  // this query pre-populated and auto-fired. One-shot, cleared by
+  // AgentSheet after it consumes the query.
+  const [pendingAgentQuery, setPendingAgentQuery] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<{ peerId: string; msgId: string } | null>(null);
   // True when the current thread was opened by the agent — enables the
   // "Back to agent" pill in Chat. Clears when the user navigates away
@@ -265,9 +269,34 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
             <Brand />
             <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
               <Button variant="icon" title="Contacts" onClick={() => setContactsOpen(true)}><Icon.contacts /></Button>
-              <Button variant="icon" title="Agent (Ctrl+J)" onClick={() => setAgentOpen(true)}><Icon.agent /></Button>
               <Button variant="icon" title="Settings" onClick={() => setSettings(true)}><Icon.settings /></Button>
             </div>
+          </div>
+          <div style={{ padding: "6px 16px 0" }}>
+            <button
+              type="button"
+              onClick={() => setAgentOpen(true)}
+              aria-label="Open Aegent — ask or search anything"
+              style={{
+                all: "unset", cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 10,
+                width: "100%", minHeight: 44, padding: "10px 14px", borderRadius: 14,
+                background: "linear-gradient(135deg, rgba(138,125,255,0.22), rgba(110,231,255,0.18))",
+                border: "1px solid var(--glass-border-hi)",
+                boxShadow: "0 6px 18px rgba(138,125,255,0.22)",
+                color: "var(--text)", fontSize: 14,
+              }}
+            >
+              <span style={{
+                width: 24, height: 24, borderRadius: 8,
+                background: "linear-gradient(135deg, var(--violet), var(--aqua))",
+                display: "grid", placeItems: "center", color: "#10132a",
+              }}>
+                <Icon.agent />
+              </span>
+              <span style={{ flex: 1, color: "var(--text-dim)" }}>Ask or search Aegent…</span>
+              <span style={{ fontSize: 11, color: "var(--text-mute)" }}>/agent</span>
+            </button>
           </div>
           <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 10 }}>
             <Avatar name={me?.displayName ?? "?"} size="sm" />
@@ -307,6 +336,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                     highlightMsgId={highlight?.peerId === thread.peerId ? highlight.msgId : null}
                     fromAgent={cameFromAgent}
                     onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
+                    onInvokeAgent={(q) => { setPendingAgentQuery(q); setAgentOpen(true); }}
                   />
                 </ErrorBoundary>
               </motion.div>
@@ -362,9 +392,11 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       <Settings open={settings} onClose={() => setSettings(false)} onSignedOut={onSignedOut} />
       <AgentSheet
         open={agentOpen}
-        onClose={() => setAgentOpen(false)}
+        onClose={() => { setAgentOpen(false); setPendingAgentQuery(null); }}
         onDidAct={() => setRefresh((k) => k + 1)}
         onOpenMessage={openMessage}
+        initialQuery={pendingAgentQuery}
+        onConsumeInitialQuery={() => setPendingAgentQuery(null)}
       />
       <ForwardSheet open={!!forwardMsg} onClose={() => setForwardMsg(null)} message={forwardMsg} />
       <ContactsSheet open={contactsOpen} onClose={() => setContactsOpen(false)}

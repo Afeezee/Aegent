@@ -142,6 +142,19 @@ export async function pullInbox(): Promise<{ pulled: number }> {
   return PULL_IN_FLIGHT;
 }
 
+// Force-drain: discards the local watermark and pulls EVERY envelope
+// the server has for this user. Used by Settings → "Re-sync all
+// history" so a device that joined mid-conversation (or lost its
+// local Dexie) can catch up. Idempotent — ingestEnvelope dedupes by
+// msgId, so running it twice is harmless.
+export async function fullResyncInbox(): Promise<{ pulled: number }> {
+  if (!CURRENT) return { pulled: 0 };
+  const userId = CURRENT.user.id;
+  const key = KEY_WATERMARK(userId);
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+  return pullInbox();
+}
+
 // Called from the live-socket handler after every real-time delivery
 // so a subsequent pullInbox() doesn't re-fetch what we already have.
 export function bumpInboxWatermark(createdAt: number): void {

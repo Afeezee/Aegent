@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api, loadRefreshToken } from "../lib/api.js";
 import { b64 } from "../lib/crypto.js";
-import { backupKey, currentSession, logout, refreshMe } from "../lib/session.js";
+import { backupKey, currentSession, fullResyncInbox, logout, refreshMe } from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
 
@@ -114,6 +114,16 @@ export function Settings({
       <section style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>VOICE NOTES</div>
         <VoiceTranscribeToggle />
+      </section>
+
+      <section style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>APPEARANCE</div>
+        <ThemePicker />
+      </section>
+
+      <section style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>SYNC</div>
+        <ResyncPanel />
       </section>
 
       <section style={{ marginBottom: 20 }}>
@@ -313,25 +323,115 @@ function replayTour(): void {
   location.reload();
 }
 
+// Default-on: a stored "0" means the user explicitly turned it off.
+// Anything else (unset, "1") = on.
 function VoiceTranscribeToggle() {
-  const [on, setOn] = useState<boolean>(() => localStorage.getItem("aegent.transcribeVoice") === "1");
+  const [on, setOn] = useState<boolean>(() => localStorage.getItem("aegent.transcribeVoice") !== "0");
   function set(v: boolean) {
     setOn(v);
     try {
-      if (v) localStorage.setItem("aegent.transcribeVoice", "1");
-      else localStorage.removeItem("aegent.transcribeVoice");
+      if (v) localStorage.removeItem("aegent.transcribeVoice");
+      else localStorage.setItem("aegent.transcribeVoice", "0");
     } catch { /* ignore */ }
-    if (v) toast("Voice notes will transcribe on this device", "ok");
+    toast(v ? "Voice notes will transcribe on this device" : "Transcription disabled", "ok");
   }
   return (
-    <>
-      <Toggle
-        label="Transcribe voice notes on this device"
-        hint="Runs Whisper locally in this WebView — your audio never leaves the phone. First use downloads a ~40 MB model to your browser cache."
-        checked={on}
-        onChange={set}
-      />
-    </>
+    <Toggle
+      label="Transcribe voice notes on this device"
+      hint="On by default. Runs Whisper locally in this WebView — your audio never leaves the phone. First use downloads a ~40 MB model to your browser cache."
+      checked={on}
+      onChange={set}
+    />
+  );
+}
+
+// Theme choice persists to localStorage.aegent.theme; main.tsx reads
+// it before React mounts so the first paint is in the right mode.
+// "system" clears the attribute and lets prefers-color-scheme decide.
+function ThemePicker() {
+  const [choice, setChoice] = useState<"system" | "dark" | "light">(() => {
+    const t = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.theme");
+    return t === "dark" || t === "light" ? t : "system";
+  });
+  function set(v: "system" | "dark" | "light") {
+    setChoice(v);
+    try {
+      if (v === "system") {
+        localStorage.removeItem("aegent.theme");
+        document.documentElement.removeAttribute("data-theme");
+      } else {
+        localStorage.setItem("aegent.theme", v);
+        document.documentElement.setAttribute("data-theme", v);
+      }
+    } catch { /* ignore */ }
+  }
+  const opts: Array<{ v: "system" | "dark" | "light"; label: string; hint: string }> = [
+    { v: "system", label: "System", hint: "Matches your device setting" },
+    { v: "dark", label: "Dark", hint: "Default — easier at night" },
+    { v: "light", label: "Light", hint: "Daylight-friendly" },
+  ];
+  return (
+    <div className="glass" style={{ padding: 8, borderRadius: 12, display: "flex", gap: 6 }}>
+      {opts.map((o) => {
+        const active = o.v === choice;
+        return (
+          <button
+            key={o.v}
+            type="button"
+            onClick={() => set(o.v)}
+            aria-label={`Use ${o.label} theme`}
+            aria-pressed={active}
+            title={o.hint}
+            style={{
+              all: "unset", cursor: "pointer", flex: 1,
+              padding: "10px 12px", minHeight: 44, borderRadius: 10,
+              textAlign: "center", fontSize: 13, fontWeight: 600,
+              color: active ? "#10132a" : "var(--text)",
+              background: active ? "linear-gradient(135deg, var(--violet), var(--aqua))" : "transparent",
+              border: active ? "1px solid transparent" : "1px solid var(--line)",
+              boxShadow: active ? "0 4px 14px rgba(138,125,255,0.3)" : "none",
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Manual "re-sync all history" — forces a full-drain of the inbox
+// regardless of the stored watermark. The failure mode this fixes:
+// a device that joined mid-conversation (or lost its local Dexie)
+// won't automatically see messages that pre-date the first message
+// it saw. Idempotent — Dexie dedupes by msgId.
+function ResyncPanel() {
+  const [busy, setBusy] = useState(false);
+  const [lastRun, setLastRun] = useState<string | null>(null);
+  async function run() {
+    setBusy(true);
+    try {
+      const r = await fullResyncInbox();
+      setLastRun(`Pulled ${r.pulled} ${r.pulled === 1 ? "message" : "messages"} just now.`);
+      toast(`Synced ${r.pulled} message${r.pulled === 1 ? "" : "s"}`, "ok");
+      // Trigger a soft refresh so threads re-read from Dexie.
+      setTimeout(() => window.dispatchEvent(new Event("focus")), 150);
+    } catch (e) {
+      toast(`Sync failed: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+  return (
+    <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
+      <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8 }}>
+        Messages replicate automatically. If you installed Aegent on a new
+        device and some older messages aren't showing, pull everything the
+        server has for you — safe to run any time.
+      </div>
+      <Button size="small" onClick={run} disabled={busy}>
+        {busy ? "Syncing…" : "Re-sync all history"}
+      </Button>
+      {lastRun && <div className="small" style={{ marginTop: 6 }}>{lastRun}</div>}
+    </div>
   );
 }
 

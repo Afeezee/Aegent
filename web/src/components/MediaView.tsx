@@ -30,11 +30,7 @@ export function MediaView({
   if (!url) return <MediaSkeleton kind={media.kind} />;
 
   if (media.kind === "image") {
-    return (
-      <img src={url} alt={caption ?? ""} style={{
-        maxWidth: "100%", maxHeight: 360, borderRadius: 12, display: "block",
-      }} />
-    );
+    return <ImageWithLightbox url={url} alt={caption ?? ""} />;
   }
   if (media.kind === "video") {
     return <video src={url} controls style={{ maxWidth: "100%", borderRadius: 12 }} />;
@@ -44,6 +40,139 @@ export function MediaView({
   );
   if (media.kind === "audio") return <audio src={url} controls style={{ width: "100%" }} />;
   return <FileCard url={url} filename={media.filename ?? "file"} size={media.byteSize} />;
+}
+
+// Tap/click to open the fullscreen lightbox. Lightbox supports:
+//   - pinch-zoom + two-finger pan on mobile (native browser gestures
+//     via touch-action: none on the overlay)
+//   - double-tap / double-click to toggle 1x ↔ 2.5x
+//   - mouse wheel to zoom on desktop
+//   - Escape or outside-tap to close
+// All state is local — no portals, no modal library.
+function ImageWithLightbox({ url, alt }: { url: string; alt: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button" onClick={() => setOpen(true)}
+        aria-label="Open image"
+        style={{
+          all: "unset", cursor: "zoom-in", display: "block", borderRadius: 12,
+          overflow: "hidden",
+        }}
+      >
+        <img src={url} alt={alt} style={{
+          maxWidth: "100%", maxHeight: 360, display: "block",
+        }} />
+      </button>
+      {open && <Lightbox url={url} alt={alt} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function Lightbox({ url, alt, onClose }: { url: string; alt: string; onClose: () => void }) {
+  const [scale, setScale] = useState(1);
+  const [tx, setTx] = useState(0);
+  const [ty, setTy] = useState(0);
+  const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
+  const pinch = useRef<{ dist: number; scale: number } | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  function toggle() {
+    if (scale === 1) { setScale(2.5); }
+    else { setScale(1); setTx(0); setTy(0); }
+  }
+
+  function onWheel(e: React.WheelEvent) {
+    e.preventDefault();
+    const next = Math.min(5, Math.max(1, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+    setScale(next);
+    if (next === 1) { setTx(0); setTy(0); }
+  }
+
+  function onPointerDown(e: React.PointerEvent) {
+    if (scale <= 1) return;
+    drag.current = { x: e.clientX, y: e.clientY, tx, ty };
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    if (!drag.current) return;
+    setTx(drag.current.tx + (e.clientX - drag.current.x));
+    setTy(drag.current.ty + (e.clientY - drag.current.y));
+  }
+  function onPointerUp() { drag.current = null; }
+
+  function onTouchStart(e: React.TouchEvent) {
+    if (e.touches.length === 2) {
+      const [a, b] = [e.touches[0], e.touches[1]];
+      pinch.current = { dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), scale };
+    }
+  }
+  function onTouchMove(e: React.TouchEvent) {
+    if (e.touches.length === 2 && pinch.current) {
+      e.preventDefault();
+      const [a, b] = [e.touches[0], e.touches[1]];
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const next = Math.min(5, Math.max(1, pinch.current.scale * (d / pinch.current.dist)));
+      setScale(next);
+      if (next === 1) { setTx(0); setTy(0); }
+    }
+  }
+  function onTouchEnd(e: React.TouchEvent) {
+    if (e.touches.length < 2) pinch.current = null;
+  }
+
+  return (
+    <div
+      role="dialog" aria-modal="true" aria-label={alt || "Image"}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.92)",
+        display: "grid", placeItems: "center",
+        padding: "calc(16px + var(--safe-top)) 16px calc(16px + var(--safe-bottom))",
+        touchAction: "none", userSelect: "none",
+      }}
+    >
+      <button
+        type="button" onClick={onClose} aria-label="Close image"
+        style={{
+          position: "fixed", top: "calc(14px + var(--safe-top))", right: 14, zIndex: 2,
+          width: 44, height: 44, minWidth: 44, minHeight: 44, borderRadius: 999,
+          background: "rgba(255,255,255,0.14)", color: "#fff",
+          border: "1px solid rgba(255,255,255,0.22)",
+          display: "grid", placeItems: "center", cursor: "pointer",
+        }}
+      >
+        <Icon.x />
+      </button>
+      <img
+        src={url} alt={alt}
+        onDoubleClick={toggle}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        style={{
+          maxWidth: "100%", maxHeight: "100%",
+          transform: `translate(${tx}px, ${ty}px) scale(${scale})`,
+          transformOrigin: "center center",
+          transition: drag.current || pinch.current ? "none" : "transform 0.2s ease-out",
+          cursor: scale > 1 ? "grab" : "zoom-in",
+          willChange: "transform",
+        }}
+      />
+    </div>
+  );
 }
 
 function MediaSkeleton({ kind }: { kind: MediaRef["kind"] }) {
@@ -101,7 +230,19 @@ function VoiceCell({
       // audio to the on-device Whisper pipeline.
       const enc = await api.downloadBlob(media.blobId);
       const pt = secretBoxOpenBytes(b64.decode(media.contentKey), enc);
-      const { transcribeAudio } = await import("../lib/transcribe.js");
+      let transcribeAudio: typeof import("../lib/transcribe.js").transcribeAudio;
+      try {
+        ({ transcribeAudio } = await import("../lib/transcribe.js"));
+      } catch (impErr) {
+        const m = (impErr as Error)?.message ?? String(impErr);
+        if (/Failed to fetch dynamically imported module|ChunkLoadError/i.test(m)) {
+          if (confirm("Aegent was updated on the server. Reload now to pick up the new version?")) {
+            location.reload();
+          }
+          throw new Error("Transcription unavailable — app needs reload");
+        }
+        throw impErr;
+      }
       const { text } = await transcribeAudio(pt, {
         onProgress: (p) => {
           if (p.status === "progress" && typeof p.progress === "number") {
