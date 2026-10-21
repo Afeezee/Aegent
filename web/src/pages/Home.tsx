@@ -47,6 +47,17 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [forwardMsg, setForwardMsg] = useState<OpenedMessage | null>(null);
   const [contactsOpen, setContactsOpen] = useState(false);
+  // Agent-driven "jump to message" target. Chat consumes highlight.msgId
+  // when thread.peerId === highlight.peerId. We keep peerId in the
+  // target so an open-another-chat-later doesn't accidentally re-pulse
+  // the previous match. Cleared ~2.5s after it's set so re-entering the
+  // same chat later doesn't re-pulse an old match.
+  const [highlight, setHighlight] = useState<{ peerId: string; msgId: string } | null>(null);
+  useEffect(() => {
+    if (!highlight) return;
+    const t = window.setTimeout(() => setHighlight(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [highlight]);
 
   const me = currentSession()?.user;
 
@@ -195,6 +206,13 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     setThread(found);
   };
 
+  // "Jump to message" from the agent sheet. Open the chat, record
+  // the highlight target so Chat scrolls to it on load.
+  const openMessage = async (peerId: string, isGroup: boolean, msgId: string) => {
+    await openThread(peerId, isGroup);
+    setHighlight({ peerId, msgId });
+  };
+
   const bp = useBreakpoint();
   const showSidebar = bp !== "sm" || !thread;
   const showChat = bp !== "sm" || !!thread;
@@ -260,6 +278,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                     onOpenForward={(m) => setForwardMsg(m)}
                     onBack={bp === "sm" ? () => setThread(null) : undefined}
                     onSent={() => setRefresh((k) => k + 1)}
+                    highlightMsgId={highlight?.peerId === thread.peerId ? highlight.msgId : null}
                   />
                 </ErrorBoundary>
               </motion.div>
@@ -313,7 +332,12 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       <GlobalSearch open={search} onClose={() => setSearch(false)}
         onOpenThread={(pid, isG) => openThread(pid, isG)} />
       <Settings open={settings} onClose={() => setSettings(false)} onSignedOut={onSignedOut} />
-      <AgentSheet open={agentOpen} onClose={() => setAgentOpen(false)} onDidAct={() => setRefresh((k) => k + 1)} />
+      <AgentSheet
+        open={agentOpen}
+        onClose={() => setAgentOpen(false)}
+        onDidAct={() => setRefresh((k) => k + 1)}
+        onOpenMessage={openMessage}
+      />
       <ForwardSheet open={!!forwardMsg} onClose={() => setForwardMsg(null)} message={forwardMsg} />
       <ContactsSheet open={contactsOpen} onClose={() => setContactsOpen(false)}
         onOpenThread={(pid) => openThread(pid, false)} />

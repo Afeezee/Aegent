@@ -12,7 +12,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { db, type UserRow } from "./db.js";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-only-do-not-use-in-production";
-const TOKEN_TTL = "30d";
+// Long-lived access token so a signed-in user stays signed in for a
+// season at a time, surviving reboots, dev reloads and brief server
+// outages. 90 days is the upper end of what feels reasonable without
+// rotating refresh tokens; a full access/refresh split with reuse
+// detection is a separate PR.
+const TOKEN_TTL = "90d";
 
 const ARGON_OPTS = { iterations: 3, memorySize: 65536, parallelism: 1 };
 

@@ -7,8 +7,8 @@
 
 import {
   b64, backupKeyFromPrivate, decryptFromPeer, deriveKey, encryptForPeer,
-  identityFromRecovery,
-  initCrypto, newKdfSalt, newRecoveryPhrase, secretBoxOpen, secretBoxSeal,
+  generateIdentity,
+  initCrypto, newKdfSalt, secretBoxOpen, secretBoxSeal,
 } from "./crypto.js";
 import { api, apiUrl, loadToken, setToken, type MeApi, type PublicUser } from "./api.js";
 import {
@@ -154,10 +154,17 @@ export function bumpInboxWatermark(createdAt: number): void {
 
 export async function register(input: {
   email: string; phone?: string; displayName: string; password: string;
-}): Promise<{ session: Session; recoveryPhrase: string }> {
+}): Promise<{ session: Session }> {
+  // No more recovery phrase at signup. New-device restore flows through
+  // the server-held `wrappedPriv`: password derives the wrap key, which
+  // unwraps the private key, which decrypts the ciphertext inbox
+  // (including self-echoes) at next login. The recovery phrase was a
+  // redundant backup path people were being told to safeguard.
+  //
+  // An optional downloadable "recovery kit" lives in Settings for users
+  // who want an offline fallback; it is never forced on anyone.
   await initCrypto();
-  const { phrase, entropy } = newRecoveryPhrase();
-  const id = identityFromRecovery(entropy);
+  const id = generateIdentity();
   const salt = newKdfSalt();
   const [wrapKey, storeKey] = await Promise.all([
     deriveKey(input.password, salt, "priv-wrap"),
@@ -182,7 +189,7 @@ export async function register(input: {
   CURRENT = { user: me, privateKey: id.privateKey, publicKey: id.publicKey };
   const bk = backupKeyFromPrivate(id.privateKey);
   persistKeys(id.privateKey, storeKey, bk);
-  return { session: CURRENT, recoveryPhrase: phrase };
+  return { session: CURRENT };
 }
 
 // Called after every successful send to keep the cloud backup fresh.

@@ -18,6 +18,7 @@ import {
 
 export function Chat({
   thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
+  highlightMsgId,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
@@ -27,6 +28,10 @@ export function Chat({
   // Bubbled from the Composer to the shell so a fresh outbound send
   // triggers the thread re-read that renders it.
   onSent: () => void;
+  // When set, Chat scrolls the matching bubble into view (centre of
+  // the stream) and pulses it for ~1.5s. Used by the agent's
+  // tappable result cards and (future) deep links.
+  highlightMsgId?: string | null;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -47,7 +52,12 @@ export function Chat({
         const rows = await threadWith(thread.peerId, 800);
         if (!alive) return;
         setMsgs(rows);
-        queueMicrotask(() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight }));
+        // Default: snap to bottom. If a highlight is pending, defer
+        // the scroll to the highlight effect below so we don't
+        // bottom-scroll and then re-scroll in a visible jump.
+        if (!highlightMsgId) {
+          queueMicrotask(() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight }));
+        }
       } catch (e) {
         console.warn("[Chat] threadWith failed:", e);
         if (alive) setMsgs([]); // render empty state rather than blanking
@@ -86,6 +96,25 @@ export function Chat({
       if (marked.length) reportRead(marked);
     })();
   }, [thread.peerId, refreshKey]);
+
+  // Scroll+pulse to the highlighted message once its DOM node exists.
+  // Runs after msgs load so the bubble is actually rendered. If the
+  // id isn't in this thread's current window, we quietly bail — a
+  // future "load-around-message" pass will handle that case.
+  useEffect(() => {
+    if (!highlightMsgId || msgs.length === 0) return;
+    // Give the browser one layout tick so the bubble is painted.
+    const t = window.setTimeout(() => {
+      const el = streamRef.current?.querySelector<HTMLElement>(
+        `[data-msg-id="${CSS.escape(highlightMsgId)}"]`,
+      );
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("msg-pulse");
+      window.setTimeout(() => el.classList.remove("msg-pulse"), 1800);
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [highlightMsgId, msgs.length]);
 
   // Typing indicator (only relevant sender ids).
   useEffect(() => {
@@ -187,8 +216,8 @@ export function Chat({
               && prev.senderId === m.senderId
               && Math.abs(m.createdAt - prev.createdAt) < 6 * 60_000;
             return (
+              <div key={m.id} data-msg-id={m.id}>
               <MessageBubble
-                key={m.id}
                 msg={m}
                 isMine={isMine}
                 isGroup={thread.isGroup}
@@ -202,6 +231,7 @@ export function Chat({
                 onForward={() => onOpenForward(m)}
                 onCopy={() => copy(m)}
               />
+              </div>
             );
           })
         )}

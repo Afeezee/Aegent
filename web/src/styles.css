@@ -374,9 +374,31 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .agent-md th, .agent-md td { border: 1px solid var(--line); padding: 4px 10px; }
 .agent-md th { background: rgba(255,255,255,0.04); font-weight: 700; }
 
+/* ---- highlight pulse (agent "jump to message") ----
+   Short, meaningful motion: a 1.5s fade-out ring around the bubble
+   so the eye catches it without the UI feeling fidgety. Transform/
+   opacity only. Respects reduced-motion via the block below. */
+
+@keyframes msg-pulse-anim {
+  0%   { box-shadow: 0 0 0 0   rgba(138, 125, 255, 0.55); background: rgba(138, 125, 255, 0.14); }
+  60%  { box-shadow: 0 0 0 8px rgba(138, 125, 255, 0);    background: rgba(138, 125, 255, 0.06); }
+  100% { box-shadow: 0 0 0 0   rgba(138, 125, 255, 0);    background: transparent; }
+}
+.msg-pulse {
+  animation: msg-pulse-anim 1.5s ease-out;
+  border-radius: 14px;
+}
+
 /* ---- reduced motion ---- */
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
   .aegent-root::before { animation: none; }
+  /* Highlight still shows (users still need the signal), but with
+     no animation — a subtle tinted ring instead. */
+  .msg-pulse {
+    animation: none;
+    background: rgba(138, 125, 255, 0.12);
+    box-shadow: 0 0 0 1px rgba(138, 125, 255, 0.4);
+  }
 }

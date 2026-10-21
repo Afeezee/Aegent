@@ -11,11 +11,26 @@ import { executePending, type PendingAction } from "../agent/tools.js";
 import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
 import { appendAgentTurn, clearAgentTurns, listAgentTurns } from "../lib/store.js";
 
+// A single match surfaced by a retrieval tool (search_messages,
+// search_exact, get_last_message, etc.). Carries the identifiers
+// needed to open the chat and scroll to the exact message.
+export type ResultItem = {
+  id: string;        // message id
+  peerId: string;    // chat id (contact id for 1:1, group id for group)
+  peerName: string;
+  isGroup: boolean;
+  senderName: string;
+  when: number;      // ms epoch
+  body: string;      // preview text / caption / [media]
+  mediaKind?: string | null;
+};
+
 type UiMsg =
   | { id: string; kind: "you"; text: string }
   | { id: string; kind: "thought"; text: string }
   | { id: string; kind: "reply"; text: string }
   | { id: string; kind: "error"; text: string }
+  | { id: string; kind: "results"; items: ResultItem[] }
   | { id: string; kind: "confirm"; action: PendingAction; explain: string; resolved?: "sent" | "cancelled" };
 
 // External-event bus. Anything in the app can push a UI message into the
@@ -28,8 +43,16 @@ export function pushAgentEvent(u: PushKind) {
 }
 
 export function AgentSheet({
-  open, onClose, onDidAct,
-}: { open: boolean; onClose: () => void; onDidAct: () => void }) {
+  open, onClose, onDidAct, onOpenMessage,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onDidAct: () => void;
+  // Tap on a result card: close the sheet, open the chat, scroll to
+  // and highlight the target message. If omitted, cards still render
+  // but are non-interactive.
+  onOpenMessage?: (peerId: string, isGroup: boolean, msgId: string) => void;
+}) {
   const reduce = useReducedMotion();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -81,6 +104,14 @@ export function AgentSheet({
         await appendAgentTurn({
           kind: "confirm_placeholder",
           text: `[confirmation shown: ${m.explain}]`,
+        });
+      } else if (m.kind === "results") {
+        // Don't rehydrate stale result cards on next open — the ids
+        // may point to messages that have since been deleted, and
+        // the "wasted a search" value of the history is low.
+        await appendAgentTurn({
+          kind: "confirm_placeholder",
+          text: `[${m.items.length} result${m.items.length === 1 ? "" : "s"} shown]`,
         });
       } else {
         await appendAgentTurn({ kind: m.kind, text: m.text });
@@ -227,7 +258,10 @@ export function AgentSheet({
                 if (entry.kind === "thoughts") {
                   return <ThoughtStrip key={`t-${i}`} steps={entry.steps} />;
                 }
-                return renderMsg(entry.msg, confirm, cancel);
+                return renderMsg(entry.msg, confirm, cancel, (peerId, isGroup, msgId) => {
+                  onClose();
+                  onOpenMessage?.(peerId, isGroup, msgId);
+                });
               })}
               <AnimatePresence>
                 {busy && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -296,6 +330,7 @@ function renderMsg(
   m: UiMsg,
   confirm: (id: string, a: PendingAction) => void,
   cancel: (id: string) => void,
+  onOpenMessage?: (peerId: string, isGroup: boolean, msgId: string) => void,
 ) {
   const base: React.CSSProperties = { padding: "10px 12px", borderRadius: 12, fontSize: 14, wordBreak: "break-word" };
   switch (m.kind) {
@@ -324,6 +359,18 @@ function renderMsg(
     );
     case "error": return (
       <div key={m.id} style={{ ...base, color: "var(--danger)", border: "1px solid var(--danger)", whiteSpace: "pre-wrap" }}>{m.text}</div>
+    );
+    case "results": return (
+      <div key={m.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {m.items.slice(0, 8).map((r) => (
+          <ResultCard key={r.id} r={r} onOpen={onOpenMessage} />
+        ))}
+        {m.items.length > 8 && (
+          <div className="small" style={{ color: "var(--text-mute)", paddingLeft: 2 }}>
+            +{m.items.length - 8} more — ask for a narrower search
+          </div>
+        )}
+      </div>
     );
     case "confirm": return (
       <div key={m.id} className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
@@ -372,16 +419,55 @@ function previewOf(a: PendingAction): string {
   }
 }
 
+// Tools whose return value is an array of decorated-message hits we
+// want to render as tappable result cards.
+const RESULT_TOOLS = new Set([
+  "search_messages", "search_exact", "search_by_date_range",
+  "search_by_sender", "search_by_media_type", "search_links_and_patterns",
+  "get_thread", "get_context_around", "summarize_thread",
+]);
+
 function uiFor(ev: AgentEvent): UiMsg {
   const id = crypto.randomUUID();
   switch (ev.kind) {
     case "thought": return { id, kind: "thought", text: ev.text };
     case "tool_call": return { id, kind: "thought", text: `↳ ${ev.name}` };
-    case "tool_result": return { id, kind: "thought", text: `↩ ${ev.name} returned` };
+    case "tool_result": {
+      // If this is a retrieval tool whose value is a decorated list,
+      // render as tappable cards instead of a dim "returned" line.
+      if (RESULT_TOOLS.has(ev.name)) {
+        const items = extractResults(ev.value);
+        if (items.length) return { id, kind: "results", items };
+      }
+      return { id, kind: "thought", text: `↩ ${ev.name} returned` };
+    }
     case "reply": return { id, kind: "reply", text: ev.text };
     case "confirm": return { id, kind: "confirm", action: ev.action, explain: ev.explain };
     case "error": return { id, kind: "error", text: ev.text };
   }
+}
+
+// Decoder for `{ ok: true, kind: "data", value: Array<decorated> }`.
+// Safe against unknown shapes — returns [] when the tool returned
+// anything other than an array of items with the fields we need.
+function extractResults(raw: unknown): ResultItem[] {
+  const w = raw as { ok?: boolean; kind?: string; value?: unknown } | null;
+  if (!w?.ok || w.kind !== "data" || !Array.isArray(w.value)) return [];
+  const out: ResultItem[] = [];
+  for (const r of w.value as Array<Record<string, unknown>>) {
+    if (!r || typeof r.id !== "string" || typeof r.peerId !== "string") continue;
+    out.push({
+      id: r.id,
+      peerId: r.peerId,
+      peerName: String(r.peerName ?? "Unknown"),
+      isGroup: !!r.isGroup,
+      senderName: String(r.senderName ?? "Someone"),
+      when: Number(r.when ?? 0),
+      body: String(r.body ?? ""),
+      mediaKind: (r.mediaKind as string | null | undefined) ?? null,
+    });
+  }
+  return out;
 }
 
 // Consecutive `thought` UiMsgs get folded into one compact strip so the
@@ -447,6 +533,57 @@ function ThoughtStrip({ steps }: { steps: string[] }) {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+// Tappable result card: sender · chat name · exact timestamp · snippet.
+// Follows the touch-target priority rules (≥44px tall, visible focus).
+function ResultCard({
+  r, onOpen,
+}: {
+  r: ResultItem;
+  onOpen?: (peerId: string, isGroup: boolean, msgId: string) => void;
+}) {
+  const when = new Date(r.when);
+  const whenStr = when.toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  const mediaBadge = r.mediaKind ? `[${r.mediaKind}] ` : "";
+  const body = (mediaBadge + (r.body || "")).trim() || "(no text)";
+  const disabled = !onOpen;
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => onOpen?.(r.peerId, r.isGroup, r.id)}
+      aria-label={`Open ${r.senderName}'s message in ${r.peerName}, ${whenStr}`}
+      style={{
+        all: "unset",
+        display: "flex", flexDirection: "column", gap: 2,
+        padding: "10px 12px", minHeight: 44, borderRadius: 12,
+        background: "var(--ink-2)",
+        border: "1px solid var(--line)",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.75 : 1,
+        boxSizing: "border-box",
+      }}
+    >
+      <div style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-dim)" }}>
+        <strong style={{ color: "var(--text)" }}>{r.senderName}</strong>
+        <span>·</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {r.isGroup ? "📣 " : ""}{r.peerName}
+        </span>
+        <span style={{ marginLeft: "auto" }}>{whenStr}</span>
+      </div>
+      <div style={{
+        fontSize: 13, color: "var(--text)",
+        display: "-webkit-box", WebkitBoxOrient: "vertical",
+        WebkitLineClamp: 2, overflow: "hidden", wordBreak: "break-word",
+      }}>
+        {body}
+      </div>
+    </button>
   );
 }
 

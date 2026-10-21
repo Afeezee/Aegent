@@ -1,9 +1,10 @@
-// Register / sign-in. Same glass card, two states, plus a one-time
-// recovery-code reveal after registration.
+// Register / sign-in. Same glass card, two states. Signup goes
+// straight into the app — no "save these words" screen. New devices
+// restore history on next sign-in via the server-held wrappedPriv.
 
 import { motion } from "framer-motion";
 import { useState } from "react";
-import { Button, FadeIn, Glass, Icon, toast } from "../components/ui.js";
+import { Button, FadeIn, Glass } from "../components/ui.js";
 import { Brand } from "./Onboarding.js";
 import { login, register } from "../lib/session.js";
 
@@ -20,37 +21,27 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [recovery, setRecovery] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null); setBusy(true);
     try {
       if (mode === "register") {
-        const { recoveryPhrase } = await register({
+        await register({
           email, displayName, password,
           phone: phone.trim() || undefined,
         });
-        setRecovery(recoveryPhrase);
       } else {
         // Login handles cloud-restore automatically: if this account
         // has a backup on the relay, the client re-derives the
         // backup key from the freshly-unwrapped private key and
         // rehydrates in the background.
         await login({ email, password });
-        onDone();
       }
+      onDone();
     } catch (e) {
       setError((e as Error).message);
     } finally { setBusy(false); }
-  }
-
-  async function copyRecovery() {
-    if (!recovery) return;
-    try {
-      await navigator.clipboard.writeText(recovery);
-      toast("Recovery code copied", "ok");
-    } catch { toast("Copy failed — write it down instead", "warn"); }
   }
 
   return (
@@ -68,30 +59,7 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
             <span className="tag">encrypted</span>
           </div>
 
-          {recovery ? (
-              <motion.div key="recovery"
-                initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              >
-                <h1 style={{ marginBottom: 6 }}>Save your recovery code</h1>
-                <p style={{ color: "var(--text-dim)", marginBottom: 16 }}>
-                  This is the only way to restore your account on a new device. Aegent's servers
-                  don't have it — if you lose your password and this code, your messages are
-                  permanently unreadable.
-                </p>
-                <div className="glass" style={{
-                  padding: 16, borderRadius: 14, textAlign: "center",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-                  fontSize: 17, letterSpacing: 2, lineHeight: 1.6,
-                  background: "rgba(138,125,255,0.08)",
-                }}>{recovery}</div>
-                <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
-                  <Button onClick={copyRecovery}><Icon.copy /> Copy</Button>
-                  <Button variant="primary" onClick={onDone}>I've saved it</Button>
-                </div>
-              </motion.div>
-            ) : (
-              <motion.form key={mode} onSubmit={submit}
+          <motion.form key={mode} onSubmit={submit}
                 initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.2 }}
               >
@@ -135,7 +103,7 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
                       autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="8 characters minimum" />
                     {mode === "register" && (
                       <div className="small" style={{ marginTop: 6 }}>
-                        Also derives your local encryption keys — don't lose it.
+                        Your password protects your account on new devices. Pick one you'll remember.
                       </div>
                     )}
                   </div>
@@ -155,7 +123,6 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
                   </Button>
                 </div>
               </motion.form>
-            )}
         </Glass>
       </FadeIn>
     </div>
