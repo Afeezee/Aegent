@@ -18,6 +18,11 @@ COPY web/package.json ./web/
 RUN npm ci
 
 # Full source, then build + prune to a production-only tree.
+# NODE_OPTIONS caps the heap so Vite's bundle step (transformers.js
+# + Office-doc parsers push the working set past 500 MB otherwise)
+# doesn't OOM on Render free's 512 MB build container. Garbage
+# collects earlier instead of asking the OS for more.
+ENV NODE_OPTIONS="--max-old-space-size=460"
 COPY . .
 RUN npm run build \
  && npm prune --omit=dev --workspaces --include-workspace-root
