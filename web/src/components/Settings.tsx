@@ -6,7 +6,9 @@ import { useEffect, useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api, loadRefreshToken } from "../lib/api.js";
 import { b64 } from "../lib/crypto.js";
-import { backupKey, currentSession, fullResyncInbox, logout, refreshMe } from "../lib/session.js";
+import {
+  backupKey, currentSession, fullResyncInbox, logout, pushLocalHistoryToServer, refreshMe,
+} from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
 
@@ -405,32 +407,85 @@ function ThemePicker() {
 // a device that joined mid-conversation (or lost its local Dexie)
 // won't automatically see messages that pre-date the first message
 // it saw. Idempotent — Dexie dedupes by msgId.
+// Two tools, one panel.
+//
+// PULL (Re-sync all history): grabs every envelope the server has
+// for you. Fixes the case where your device's local Dexie is missing
+// messages the server already holds.
+//
+// PUSH (Share this device's history with the cloud): uploads self-
+// encrypted copies of every message YOU sent from this device to the
+// server, so your other devices can pull them. Fixes the gap for
+// messages sent before the automatic-replication update went live
+// (anything pre-241888c) — those have no server-side self-copy.
+// Nothing leaves plaintext; the copies are encrypted to your own
+// public key with your own private key.
 function ResyncPanel() {
-  const [busy, setBusy] = useState(false);
+  const [pulling, setPulling] = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [pushProgress, setPushProgress] = useState<{ done: number; total: number } | null>(null);
   const [lastRun, setLastRun] = useState<string | null>(null);
-  async function run() {
-    setBusy(true);
+
+  async function pull() {
+    setPulling(true);
     try {
       const r = await fullResyncInbox();
-      setLastRun(`Pulled ${r.pulled} ${r.pulled === 1 ? "message" : "messages"} just now.`);
+      setLastRun(`Pulled ${r.pulled} ${r.pulled === 1 ? "message" : "messages"} from the server.`);
       toast(`Synced ${r.pulled} message${r.pulled === 1 ? "" : "s"}`, "ok");
-      // Trigger a soft refresh so threads re-read from Dexie.
       setTimeout(() => window.dispatchEvent(new Event("focus")), 150);
     } catch (e) {
       toast(`Sync failed: ${(e as Error).message}`, "error");
-    } finally { setBusy(false); }
+    } finally { setPulling(false); }
   }
+
+  async function push() {
+    if (!window.confirm(
+      "Upload encrypted copies of every message you sent from this device to the server, so your other devices can see them? Nothing leaves this device unencrypted.",
+    )) return;
+    setPushing(true); setPushProgress({ done: 0, total: 0 });
+    try {
+      const r = await pushLocalHistoryToServer({
+        onProgress: (done, total) => setPushProgress({ done, total }),
+      });
+      setLastRun(`Pushed ${r.pushed} message${r.pushed === 1 ? "" : "s"} to the cloud${r.skipped ? ` · ${r.skipped} skipped` : ""}.`);
+      toast(`Shared ${r.pushed} message${r.pushed === 1 ? "" : "s"} with your other devices`, "ok");
+    } catch (e) {
+      toast(`Push failed: ${(e as Error).message}`, "error");
+    } finally { setPushing(false); setPushProgress(null); }
+  }
+
+  const busy = pulling || pushing;
   return (
     <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
-      <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8 }}>
-        Messages replicate automatically. If you installed Aegent on a new
-        device and some older messages aren't showing, pull everything the
-        server has for you — safe to run any time.
+      <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 10 }}>
+        New messages replicate automatically. These are the manual
+        recovery tools — safe to run any time, both are idempotent.
       </div>
-      <Button size="small" onClick={run} disabled={busy}>
-        {busy ? "Syncing…" : "Re-sync all history"}
-      </Button>
-      {lastRun && <div className="small" style={{ marginTop: 6 }}>{lastRun}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div>
+          <Button size="small" onClick={pull} disabled={busy}>
+            {pulling ? "Pulling…" : "Re-sync all history (pull)"}
+          </Button>
+          <div className="small" style={{ marginTop: 4, color: "var(--text-mute)" }}>
+            Pulls every message the server has for you.
+          </div>
+        </div>
+        <div>
+          <Button size="small" onClick={push} disabled={busy}>
+            {pushing
+              ? (pushProgress && pushProgress.total > 0
+                  ? `Pushing… ${pushProgress.done}/${pushProgress.total}`
+                  : "Pushing…")
+              : "Share this device's history (push)"}
+          </Button>
+          <div className="small" style={{ marginTop: 4, color: "var(--text-mute)" }}>
+            Uploads encrypted copies of messages you sent from this device
+            so your other devices can see them. Run this on the device that
+            has the most history.
+          </div>
+        </div>
+      </div>
+      {lastRun && <div className="small" style={{ marginTop: 10 }}>{lastRun}</div>}
     </div>
   );
 }

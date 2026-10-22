@@ -142,6 +142,63 @@ export async function pullInbox(): Promise<{ pulled: number }> {
   return PULL_IN_FLIGHT;
 }
 
+// Device-to-device backfill. For every message in this device's
+// local store that THIS user sent, encrypt a self-copy and send it
+// to the server. Other devices (same account, same password → same
+// private key) will then see those messages on their next inbox
+// drain, closing the "sent before self-echo was wired" gap.
+//
+// Nothing leaves the client as plaintext: the self-copy is
+// encrypted to our own public key with our own private key, exactly
+// the way sendToPeer does it. The server stores opaque bytes keyed
+// to our user id, and only our own private key can decrypt them.
+//
+// Idempotent: ingestEnvelope dedupes by msgId, so running this
+// twice (or running it when the server already has the self-echo
+// for some messages) is harmless; those just redundant-insert on
+// the server side but overlay the same Dexie row elsewhere.
+export async function pushLocalHistoryToServer(opts: {
+  onProgress?: (done: number, total: number) => void;
+} = {}): Promise<{ pushed: number; skipped: number }> {
+  if (!CURRENT) return { pushed: 0, skipped: 0 };
+  const selfId = CURRENT.user.id;
+  const selfPub = CURRENT.publicKey;
+  // Lazy import so this feature doesn't pull store/protocol into the
+  // auth bundle on cold boot.
+  const [{ everyMessage }, { packPayload }] = await Promise.all([
+    import("./store.js"),
+    import("./protocol.js"),
+  ]);
+  const rows = await everyMessage();
+  const mine = rows.filter((m) => m.senderId === selfId && !m.deletedAt);
+  let pushed = 0, skipped = 0;
+  for (let i = 0; i < mine.length; i++) {
+    opts.onProgress?.(i, mine.length);
+    const m = mine[i];
+    try {
+      // Rebuild the payload exactly as the original sendText/sendMedia
+      // would have produced. The msgId stays stable so Dexie dedupes
+      // against the existing row on any device that already has it.
+      let payload: Record<string, unknown>;
+      if (m.media) {
+        payload = { v: 1, t: "media", msgId: m.id, caption: m.caption, media: m.media };
+      } else if (m.body || m.editedBody) {
+        payload = { v: 1, t: "text", msgId: m.id, body: m.editedBody ?? m.body };
+      } else { skipped++; continue; }
+      // _thread is what lets a self-echo land under the right chat on
+      // the receiving device — recipient_id is self, so there's no
+      // routing info otherwise.
+      payload._thread = m.peerId;
+      const packed = packPayload(payload as unknown as import("./protocol.js").Payload);
+      const cipher = encryptForPeer(packed, selfPub, CURRENT.privateKey);
+      const res = await sendCipher(selfId, cipher);
+      if (res.ok) pushed++; else skipped++;
+    } catch { skipped++; }
+  }
+  opts.onProgress?.(mine.length, mine.length);
+  return { pushed, skipped };
+}
+
 // Force-drain: discards the local watermark and pulls EVERY envelope
 // the server has for this user. Used by Settings → "Re-sync all
 // history" so a device that joined mid-conversation (or lost its
