@@ -393,6 +393,56 @@ const SCHEMA = `
     entry_id  TEXT NOT NULL REFERENCES diary_entries(id)
   );
   CREATE INDEX IF NOT EXISTS idx_diary_blobs_entry ON diary_blobs(entry_id);
+
+  -- Group moderation.
+  --
+  -- Invite tokens are stored hashed, the same shape refresh tokens use:
+  -- the token in the link is the capability, so a database leak must not
+  -- hand out memberships.
+  CREATE TABLE IF NOT EXISTS group_invites (
+    id          TEXT PRIMARY KEY,
+    group_id    TEXT NOT NULL REFERENCES groups(id),
+    token_hash  TEXT NOT NULL,
+    created_by  TEXT NOT NULL,
+    created_at  ${BIG} NOT NULL,
+    expires_at  ${BIG},
+    max_uses    INTEGER,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    revoked_at  ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_invites_group ON group_invites(group_id);
+
+  CREATE TABLE IF NOT EXISTS group_join_requests (
+    group_id     TEXT NOT NULL REFERENCES groups(id),
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    requested_at ${BIG} NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending',
+    PRIMARY KEY (group_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS group_bans (
+    group_id   TEXT NOT NULL REFERENCES groups(id),
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    banned_by  TEXT NOT NULL,
+    banned_at  ${BIG} NOT NULL,
+    PRIMARY KEY (group_id, user_id)
+  );
+
+  -- Membership events. Server-composed metadata with no message content
+  -- in it, kept apart from the messages table on purpose: writing these
+  -- there with a synthetic sender would pollute search, previews,
+  -- unread counts and every agent tool that reads message history.
+  CREATE TABLE IF NOT EXISTS group_events (
+    id         TEXT PRIMARY KEY,
+    group_id   TEXT NOT NULL REFERENCES groups(id),
+    seq        ${BIG} NOT NULL,
+    kind       TEXT NOT NULL,
+    actor_id   TEXT NOT NULL,
+    subject_id TEXT,
+    data       TEXT,
+    created_at ${BIG} NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_group_events_seq ON group_events(group_id, seq);
 `;
 
 // Columns added after the first release. Both backends get the same
@@ -405,6 +455,17 @@ const SCHEMA = `
 type AddedColumn = { table: string; name: string; ddl: string };
 const ADDED_COLUMNS: AddedColumn[] = [
   { table: "users", name: "phone", ddl: "ALTER TABLE users ADD COLUMN phone TEXT" },
+  { table: "groups", name: "description", ddl: "ALTER TABLE groups ADD COLUMN description TEXT" },
+  { table: "groups", name: "avatar_blob", ddl: "ALTER TABLE groups ADD COLUMN avatar_blob TEXT" },
+  { table: "groups", name: "updated_at", ddl: "ALTER TABLE groups ADD COLUMN updated_at BIGINT" },
+  { table: "groups", name: "join_mode", ddl: "ALTER TABLE groups ADD COLUMN join_mode TEXT NOT NULL DEFAULT 'closed'" },
+  { table: "groups", name: "post_policy", ddl: "ALTER TABLE groups ADD COLUMN post_policy TEXT NOT NULL DEFAULT 'all'" },
+  { table: "groups", name: "history_policy", ddl: "ALTER TABLE groups ADD COLUMN history_policy TEXT NOT NULL DEFAULT 'none'" },
+  { table: "groups", name: "agent_policy", ddl: "ALTER TABLE groups ADD COLUMN agent_policy TEXT NOT NULL DEFAULT 'off'" },
+  { table: "group_members", name: "role", ddl: "ALTER TABLE group_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'" },
+  { table: "group_members", name: "added_by", ddl: "ALTER TABLE group_members ADD COLUMN added_by TEXT" },
+  { table: "group_members", name: "muted_until", ddl: "ALTER TABLE group_members ADD COLUMN muted_until BIGINT" },
+  { table: "group_members", name: "left_at", ddl: "ALTER TABLE group_members ADD COLUMN left_at BIGINT" },
   { table: "users", name: "wrapped_priv_rec", ddl: "ALTER TABLE users ADD COLUMN wrapped_priv_rec TEXT" },
   { table: "users", name: "rec_salt", ddl: "ALTER TABLE users ADD COLUMN rec_salt TEXT" },
 ];
@@ -433,4 +494,14 @@ export async function initSchema(): Promise<void> {
     }
   }
   await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
+
+  // Groups created before roles existed have an owner in spirit — the
+  // person who made them — but every member defaulted to 'member', which
+  // would leave those groups with nobody able to administer them.
+  // Idempotent, so it costs one no-op UPDATE per boot.
+  await db.exec(`
+    UPDATE group_members SET role = 'owner'
+     WHERE role = 'member'
+       AND user_id = (SELECT g.created_by FROM groups g WHERE g.id = group_members.group_id)
+  `);
 }

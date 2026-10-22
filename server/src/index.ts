@@ -35,7 +35,12 @@ import {
   applyNewPassword, completeReset, mintChallenge, putRecoveryWrapper, recoveryStatus,
 } from "./recovery.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
-import { createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
+import {
+  addMember, banMember, canPost, createGroup, eventsSince, groupById, groupsForUser,
+  isMember, listInvites, listRequests, membersOf, membersWithRoles, mintInvite,
+  redeemInvite, removeMember, requireRole, resolveRequest, revokeInvite, setMuted,
+  setRole, settingsOf, unbanMember, updateGroup,
+} from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, readBlobFor, storeBlob } from "./blobs.js";
 import {
   MAX_AUDIENCE, archiveFor, deleteEntry, feedFor, granteesOf, markSeen,
@@ -308,7 +313,10 @@ app.post("/api/groups", authed, async (req, res) => {
   try {
     const body = z.object({
       name: z.string().min(1).max(80),
-      memberIds: z.array(z.string()).min(1),
+      // A group of one is legitimate now that invite links exist: you
+      // create it, then share a link. createGroup always includes the
+      // creator, so an empty list is not an empty group.
+      memberIds: z.array(z.string()),
     }).parse(req.body);
     const g = await createGroup({
       name: body.name,
@@ -332,7 +340,163 @@ app.get("/api/groups/:id", authed, async (req, res) => {
   try {
     const g = await groupById(req.params.id);
     if (!g || !(await isMember(g.id, (req as AuthedReq).userId))) return res.status(404).json({ error: "not_found" });
-    res.json({ ...g, memberIds: await membersOf(g.id) });
+    res.json({
+      ...g,
+      memberIds: await membersOf(g.id),
+      members: await membersWithRoles(g.id),
+      settings: await settingsOf(g.id),
+      myRole: await requireRole(g.id, (req as AuthedReq).userId, "member"),
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- group administration ----
+//
+// Every route here goes through requireRole rather than checking
+// membership by hand. The previous surface had exactly two ad-hoc checks
+// and that is precisely where the holes were.
+
+app.patch("/api/groups/:id", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      name: z.string().min(1).max(80).optional(),
+      description: z.string().max(500).nullable().optional(),
+      joinMode: z.enum(["closed", "invite", "request"]).optional(),
+      postPolicy: z.enum(["all", "admins"]).optional(),
+      historyPolicy: z.enum(["none", "all"]).optional(),
+      agentPolicy: z.enum(["off", "members"]).optional(),
+    }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "admin");
+    await updateGroup(req.params.id, body, uid);
+    res.json({ ok: true, settings: await settingsOf(req.params.id) });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/members", authed, async (req, res) => {
+  try {
+    const body = z.object({ userId: z.string().min(1) }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "admin");
+    await addMember(req.params.id, body.userId, uid);
+    res.json({ ok: true, memberIds: await membersOf(req.params.id) });
+  } catch (e) { handleError(res, e); }
+});
+
+app.delete("/api/groups/:id/members/:uid", authed, async (req, res) => {
+  try {
+    const me = (req as AuthedReq).userId;
+    // Leaving needs no privilege; removing someone else does.
+    if (req.params.uid !== me) await requireRole(req.params.id, me, "admin");
+    await removeMember(req.params.id, req.params.uid, me);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/members/:uid/role", authed, async (req, res) => {
+  try {
+    const body = z.object({ role: z.enum(["admin", "member"]) }).parse(req.body);
+    const me = (req as AuthedReq).userId;
+    await requireRole(req.params.id, me, "owner");
+    await setRole(req.params.id, req.params.uid, body.role, me);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/members/:uid/mute", authed, async (req, res) => {
+  try {
+    const body = z.object({ minutes: z.number().int().min(0).max(60 * 24 * 30) }).parse(req.body);
+    const me = (req as AuthedReq).userId;
+    await requireRole(req.params.id, me, "admin");
+    await setMuted(req.params.id, req.params.uid, body.minutes ? Date.now() + body.minutes * 60_000 : null, me);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/ban/:uid", authed, async (req, res) => {
+  try {
+    const me = (req as AuthedReq).userId;
+    await requireRole(req.params.id, me, "admin");
+    await banMember(req.params.id, req.params.uid, me);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.delete("/api/groups/:id/ban/:uid", authed, async (req, res) => {
+  try {
+    await requireRole(req.params.id, (req as AuthedReq).userId, "admin");
+    await unbanMember(req.params.id, req.params.uid);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/invites", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      expiresInMinutes: z.number().int().min(1).max(60 * 24 * 30).optional(),
+      maxUses: z.number().int().min(1).max(1000).optional(),
+    }).parse(req.body ?? {});
+    const me = (req as AuthedReq).userId;
+    await requireRole(req.params.id, me, "admin");
+    const out = await mintInvite(req.params.id, me, {
+      expiresInMs: body.expiresInMinutes ? body.expiresInMinutes * 60_000 : undefined,
+      maxUses: body.maxUses,
+    });
+    res.json(out);
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/groups/:id/invites", authed, async (req, res) => {
+  try {
+    await requireRole(req.params.id, (req as AuthedReq).userId, "admin");
+    res.json(await listInvites(req.params.id));
+  } catch (e) { handleError(res, e); }
+});
+
+app.delete("/api/groups/:id/invites/:inviteId", authed, async (req, res) => {
+  try {
+    await requireRole(req.params.id, (req as AuthedReq).userId, "admin");
+    await revokeInvite(req.params.id, req.params.inviteId);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// Redeeming is the only group route that cannot require membership —
+// it is how membership begins. The token is the authorisation.
+app.post("/api/groups/join", authed, async (req, res) => {
+  try {
+    const body = z.object({ token: z.string().min(1) }).parse(req.body);
+    const out = await redeemInvite(body.token, (req as AuthedReq).userId);
+    res.json({
+      state: out.state,
+      group: out.state === "joined"
+        ? { ...out.group, memberIds: await membersOf(out.group.id) }
+        : { id: out.group.id, name: out.group.name },
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/groups/:id/requests", authed, async (req, res) => {
+  try {
+    await requireRole(req.params.id, (req as AuthedReq).userId, "admin");
+    res.json(await listRequests(req.params.id));
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/requests/:uid", authed, async (req, res) => {
+  try {
+    const body = z.object({ approve: z.boolean() }).parse(req.body);
+    const me = (req as AuthedReq).userId;
+    await requireRole(req.params.id, me, "admin");
+    await resolveRequest(req.params.id, req.params.uid, body.approve, me);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/groups/:id/events", authed, async (req, res) => {
+  try {
+    await requireRole(req.params.id, (req as AuthedReq).userId, "member");
+    res.json(await eventsSince(req.params.id, Number(req.query.sinceSeq ?? 0) || 0));
   } catch (e) { handleError(res, e); }
 });
 
@@ -715,7 +879,9 @@ io.use((socket, next) => {
 const GROUP_CACHE_TTL_MS = 30_000;
 type SocketData = { userId: string; groupCache?: Map<string, { member: boolean; at: number }> };
 
-async function socketIsMember(
+// May this socket post into this group? Membership, the group's posting
+// policy and any mute, answered once and cached briefly.
+async function socketMayPost(
   socket: { data: unknown }, groupId: string, userId: string,
 ): Promise<boolean> {
   const data = socket.data as SocketData;
@@ -723,9 +889,18 @@ async function socketIsMember(
   const hit = cache.get(groupId);
   const now = Date.now();
   if (hit && now - hit.at < GROUP_CACHE_TTL_MS) return hit.member;
-  const member = await isMember(groupId, userId);
-  cache.set(groupId, { member, at: now });
-  return member;
+  const allowed = await canPost(groupId, userId, now);
+  cache.set(groupId, { member: allowed, at: now });
+  return allowed;
+}
+
+// Typing only needs membership — a muted member is still present, and
+// hiding that they are typing would be a strange thing to enforce.
+async function socketIsMember(
+  socket: { data: unknown }, groupId: string, userId: string,
+): Promise<boolean> {
+  void socket;
+  return isMember(groupId, userId);
 }
 
 io.on("connection", (socket) => {
@@ -749,7 +924,7 @@ io.on("connection", (socket) => {
         // one that was missing: the relay only verified that each named
         // RECIPIENT was a member, so anyone who knew a group id could
         // post into it by addressing real members.
-        if (!(await socketIsMember(socket, body.groupId, userId))) {
+        if (!(await socketMayPost(socket, body.groupId, userId))) {
           return ack?.({ ok: false, error: "not_group_member" });
         }
         if (!(await isMember(body.groupId, body.recipientId))) {
