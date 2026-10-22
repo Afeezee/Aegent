@@ -613,6 +613,48 @@ export async function setMeta(k: string, v: string): Promise<void> {
   await requireDb().meta.put({ k, v });
 }
 
+// ---- timestamp repair ----
+//
+// A relay running on Postgres used to serve BIGINT timestamps as
+// strings (see server/src/db.ts), and those strings were written
+// straight into these rows. `createdAt` is an IndexedDB key, and key
+// ordering places every string after every number, so a row with a
+// string timestamp falls outside the thread view's numeric range query:
+// present in the store, counted by every total, and invisible on
+// screen. This walks the store once per device and coerces them back.
+export async function repairTimestamps(): Promise<number> {
+  const db = requireDb();
+  let fixed = 0;
+
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  for (const m of await db.messages.toArray()) {
+    const patch: Partial<StoredMessage> = {};
+    if (typeof m.createdAt !== "number") patch.createdAt = num(m.createdAt) ?? 0;
+    if (m.deliveredAt !== null && typeof m.deliveredAt !== "number") patch.deliveredAt = num(m.deliveredAt);
+    if (m.readAt !== null && typeof m.readAt !== "number") patch.readAt = num(m.readAt);
+    if (m.deletedAt !== null && typeof m.deletedAt !== "number") patch.deletedAt = num(m.deletedAt);
+    if (Object.keys(patch).length > 0) { await db.messages.update(m.id, patch); fixed++; }
+  }
+  for (const c of await db.contacts.toArray()) {
+    if (typeof c.lastSeenAt !== "number") {
+      await db.contacts.update(c.id, { lastSeenAt: num(c.lastSeenAt) ?? 0 });
+      fixed++;
+    }
+  }
+  for (const g of await db.groups.toArray()) {
+    const patch: Partial<GroupRow> = {};
+    if (typeof g.lastSeenAt !== "number") patch.lastSeenAt = num(g.lastSeenAt) ?? 0;
+    if (typeof g.createdAt !== "number") patch.createdAt = num(g.createdAt) ?? 0;
+    if (Object.keys(patch).length > 0) { await db.groups.update(g.id, patch); fixed++; }
+  }
+  return fixed;
+}
+
 // ---- re-keying ----
 //
 // The local-store key used to be derived from the password, which made

@@ -47,8 +47,8 @@ import {
   applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerClear, ledgerCounts, ledgerMarkOk,
   ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered, markRead,
-  openStore, outboxCount, rekeyMessages, saveMediaMessage, saveTextMessage, setMeta,
-  upsertContact, upsertGroup, type MediaRef,
+  openStore, outboxCount, rekeyMessages, repairTimestamps, saveMediaMessage, saveTextMessage,
+  setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
 import { connectSocket, disconnectSocket, sendCipher } from "./socket.js";
@@ -152,6 +152,7 @@ function clearPersistedKeys() {
 // and, when a legacy key is available and the store hasn't been
 // converted yet, re-seals the existing rows in place.
 const META_STOREKEY_VERSION = "storeKeyVersion";
+const META_TS_REPAIR = "timestampRepair";
 
 async function openLocalStore(
   userId: string, privateKey: Uint8Array, legacyKey?: Uint8Array | null,
@@ -167,8 +168,16 @@ async function openLocalStore(
       }
       await setMeta(META_STOREKEY_VERSION, "2");
     }
+    // One-time repair for rows written while the relay was serving
+    // Postgres BIGINTs as strings — those messages are in the store but
+    // sort outside every numeric key range, so they render nowhere.
+    if (await getMeta(META_TS_REPAIR) !== "1") {
+      const fixed = await repairTimestamps();
+      if (fixed > 0) console.log(`[session] repaired ${fixed} row(s) with non-numeric timestamps`);
+      await setMeta(META_TS_REPAIR, "1");
+    }
   } catch (e) {
-    console.warn("[session] store re-key skipped:", (e as Error).message);
+    console.warn("[session] store migration skipped:", (e as Error).message);
   }
   return storeKey;
 }
@@ -237,7 +246,7 @@ async function drain(reason: string): Promise<{ pulled: number }> {
     if (page.envelopes.length === 0) break;
     pulled += await ingestBatch(page.envelopes);
     if (page.cursor) {
-      cursor = page.cursor;
+      cursor = { since: Number(page.cursor.since) || 0, afterId: page.cursor.afterId };
       writeCursor(userId, cursor);
     }
     try {
@@ -332,9 +341,10 @@ export async function fullResyncInbox(): Promise<{ pulled: number }> {
 export function bumpInboxCursor(env: { id: string; createdAt: number }): void {
   if (!CURRENT) return;
   const userId = CURRENT.user.id;
+  const createdAt = Number(env.createdAt) || 0;
   const cur = readCursor(userId);
-  if (!cur || env.createdAt > cur.since) {
-    writeCursor(userId, { since: env.createdAt, afterId: env.id });
+  if (!cur || createdAt > cur.since) {
+    writeCursor(userId, { since: createdAt, afterId: env.id });
   }
 }
 
@@ -990,11 +1000,16 @@ export async function sendDelete(targetPeerId: string, isGroup: boolean, targetM
 // Decode one envelope into the local store. Returns the resolved thread
 // so the UI can bump it. Every outcome is recorded in the ledger:
 // success means we never process it again, failure means we will.
-export async function ingestEnvelope(env: {
+export async function ingestEnvelope(envIn: {
   id: string; senderId: string; recipientId: string; groupId: string | null;
   ciphertext: string; createdAt: number;
 }, opts: { ack?: boolean } = {}): Promise<{ threadId: string; msgId: string } | null> {
   if (!CURRENT) return null;
+  // `createdAt` becomes an IndexedDB key, and a relay on Postgres used
+  // to send it as a string — which stores fine and then sorts outside
+  // every numeric range query, i.e. the message exists but never
+  // renders. Normalise at the boundary regardless of relay version.
+  const env = { ...envIn, createdAt: Number(envIn.createdAt) || 0 };
   const ack = opts.ack !== false;
   const selfId = CURRENT.user.id;
   const isSelfEcho = env.senderId === selfId;

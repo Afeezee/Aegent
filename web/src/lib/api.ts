@@ -143,8 +143,19 @@ export type InboxPage = {
 // both shapes so a client that outlives a deploy (or an APK pointed at
 // an older relay) still drains instead of failing on `page.envelopes`.
 function normalizeInbox(r: InboxPage | Envelope[]): InboxPage {
-  if (Array.isArray(r)) return { envelopes: r, more: false, cursor: null };
-  return r;
+  const page: InboxPage = Array.isArray(r)
+    ? { envelopes: r, more: false, cursor: null }
+    : r;
+  // A relay on Postgres may hand back BIGINT timestamps as strings.
+  // They end up as IndexedDB keys, where a string sorts outside every
+  // numeric range — so coerce here, once, for every caller.
+  return {
+    ...page,
+    envelopes: page.envelopes.map((e) => ({ ...e, createdAt: Number(e.createdAt) || 0 })),
+    cursor: page.cursor
+      ? { since: Number(page.cursor.since) || 0, afterId: page.cursor.afterId }
+      : null,
+  };
 }
 
 export type InboxStats = {

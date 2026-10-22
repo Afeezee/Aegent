@@ -633,7 +633,11 @@ function envelopeOf(m: MessageRow) {
     recipientId: m.recipient_id,
     groupId: m.group_id,
     ciphertext: m.ciphertext,
-    createdAt: m.created_at,
+    // Explicitly numeric. db.ts already teaches pg to parse int8 as a
+    // number, but this value becomes an IndexedDB key on the client,
+    // where a string would sort outside every numeric range query and
+    // make the message invisible. Too important to leave implicit.
+    createdAt: Number(m.created_at),
   };
 }
 

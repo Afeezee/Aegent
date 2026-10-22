@@ -23,7 +23,24 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import pgPkg from "pg";
-const { Pool } = pgPkg;
+const { Pool, types } = pgPkg;
+
+// node-postgres hands BIGINT (int8, OID 20) back as a STRING, because an
+// arbitrary int8 can exceed what a JS number holds exactly. Every
+// BIGINT in this schema is either a millisecond timestamp or a byte
+// count — both are nowhere near 2^53 — so parsing them as numbers is
+// safe and is what every caller already assumes.
+//
+// Leaving the default in place was a real bug, and a nasty one: it only
+// showed up in production. On SQLite (local dev) created_at came back as
+// a number, on Postgres as a string, so an envelope drained from the
+// relay carried a string timestamp. The client then wrote that string
+// into IndexedDB, where the key ordering puts every string AFTER every
+// number — so the message was stored, counted, and completely invisible
+// to the thread view's numeric range query. Messages that "weren't
+// there" on a new device were in many cases sitting in the store with a
+// timestamp of the wrong type.
+types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
 
 type Row = Record<string, unknown>;
 type Args = readonly unknown[];
