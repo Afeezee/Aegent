@@ -2,7 +2,7 @@
 
 A private messenger where every conversation is genuinely end-to-end encrypted, with an on-device AI agent that can search, retrieve, and act on your own message history — always with your confirmation before anything is sent, forwarded, or shared.
 
-**Live at:** [aegentweb-production-e18e.up.railway.app](https://aegentweb-production-e18e.up.railway.app)
+**Live at:** [aegent.onrender.com](https://aegent.onrender.com)
 **Repo:** [Afeezee/Aegent](https://github.com/Afeezee/Aegent)
 **Android APK:** built from [`build-apk.yml`](.github/workflows/build-apk.yml) on every push to main.
 

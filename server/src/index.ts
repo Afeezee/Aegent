@@ -25,10 +25,14 @@ import { fileURLToPath } from "node:url";
 import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import {
-  AuthError, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
+  AuthError, checkPassword, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
+  hashNewPassword, issueTokens,
   listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
   rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
 } from "./auth.js";
+import {
+  applyNewPassword, completeReset, mintChallenge, putRecoveryWrapper, recoveryStatus,
+} from "./recovery.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, storeBlob } from "./blobs.js";
@@ -73,6 +77,8 @@ const registerBody = z.object({
   publicKey: z.string().min(1),
   wrappedPriv: z.string().min(1),
   kdfSalt: z.string().min(1),
+  wrappedPrivRec: z.string().min(1).optional(),
+  recSalt: z.string().min(1).optional(),
   deviceLabel: z.string().max(120).optional(),
 });
 app.post("/api/register", async (req, res) => {
@@ -114,6 +120,88 @@ app.post("/api/sessions/:id/revoke", authed, async (req, res) => {
   try {
     await revokeSession((req as AuthedReq).userId, req.params.id);
     res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- key vault + account recovery ----
+//
+// The identity private key is what makes stored history readable, so it
+// gets wrapped twice: once under the password, once under a recovery
+// code. These routes manage the second wrapper and the reset that uses
+// it. See recovery.ts for the threat model.
+
+app.get("/api/me/recovery", authed, async (req, res) => {
+  try { res.json(await recoveryStatus((req as AuthedReq).userId)); }
+  catch (e) { handleError(res, e); }
+});
+
+app.put("/api/me/recovery", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      wrappedPrivRec: z.string().min(1),
+      recSalt: z.string().min(1),
+    }).parse(req.body);
+    await putRecoveryWrapper((req as AuthedReq).userId, body);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// Change password while signed in. The client re-wraps the SAME private
+// key under the new password and sends the new wrapper with it, so no
+// message ever becomes unreadable.
+app.post("/api/password/change", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(8),
+      wrappedPriv: z.string().min(1),
+      kdfSalt: z.string().min(1),
+    }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    if (!(await checkPassword(uid, body.currentPassword))) {
+      throw new AuthError("bad_credentials", "Current password is wrong.");
+    }
+    await applyNewPassword(uid, {
+      passwordHash: await hashNewPassword(body.newPassword),
+      wrappedPriv: body.wrappedPriv,
+      kdfSalt: body.kdfSalt,
+    });
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// Step 1 of a reset: hand back the recovery wrapper plus a nonce boxed
+// to the account's public key. Unauthenticated by necessity — the whole
+// point is that the user can't sign in. Both returned secrets are inert
+// without the user's 128-bit recovery code.
+app.post("/api/recovery/challenge", async (req, res) => {
+  try {
+    const body = z.object({ email: z.string().email() }).parse(req.body);
+    res.json(await mintChallenge(body.email));
+  } catch (e) { handleError(res, e); }
+});
+
+// Step 2: the proof is the nonce, which only the identity private key
+// could have revealed. On success we also sign the device in.
+app.post("/api/password/reset", async (req, res) => {
+  try {
+    const body = z.object({
+      challengeId: z.string().min(1),
+      proof: z.string().min(1),
+      newPassword: z.string().min(8),
+      wrappedPriv: z.string().min(1),
+      kdfSalt: z.string().min(1),
+      deviceLabel: z.string().max(120).optional(),
+    }).parse(req.body);
+    const u = await completeReset({
+      challengeId: body.challengeId,
+      proof: body.proof,
+      passwordHash: await hashNewPassword(body.newPassword),
+      wrappedPriv: body.wrappedPriv,
+      kdfSalt: body.kdfSalt,
+    });
+    const tokens = await issueTokens(u.id, body.deviceLabel);
+    res.json({ user: toPublic(u, livePresence), ...tokens });
   } catch (e) { handleError(res, e); }
 });
 
@@ -257,27 +345,68 @@ app.post("/api/groups/:id/join", authed, async (req, res) => {
 app.get("/api/inbox", authed, async (req, res) => {
   try {
     const uid = (req as AuthedReq).userId;
-    // ?all=true → full-drain (for new-device restore). Every message
-    // this user has ever received or self-echoed, delivered or not.
-    // Default → only undelivered (incremental sync path).
+    // Drain semantics.
+    //
+    // `all=true` is the availability path: every envelope ever
+    // addressed to this user (delivered or not, self-echoes included),
+    // which is what a brand-new device needs to rebuild the account's
+    // whole history. Without `all` we return only undelivered rows.
+    //
+    // Paging is keyset, not offset: (created_at, id) is a total order,
+    // so a cursor resumes exactly where it stopped even when many
+    // envelopes share a millisecond and even if the set grows
+    // underneath us. The previous unbounded response meant a few
+    // thousand messages arrived as one multi-megabyte JSON the client
+    // had to ingest in a single shot — precisely when history looked
+    // "cut off".
     const wantAll = String(req.query.all ?? "") === "true";
-    // Optional ?since=<ms> to fetch only rows newer than a client-side
-    // watermark — cheap incremental refresh for a device that already
-    // has most history.
     const since = Number(req.query.since ?? 0) || 0;
+    const afterId = String(req.query.afterId ?? "");
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 400) || 400, 1), 1000);
 
-    const rows = wantAll
-      ? await db.prepare(
-          `SELECT * FROM messages
-             WHERE recipient_id = ? AND created_at >= ?
-             ORDER BY created_at ASC`,
-        ).all<MessageRow>(uid, since)
-      : await db.prepare(
-          `SELECT * FROM messages
-             WHERE recipient_id = ? AND delivered_at IS NULL
-             ORDER BY created_at ASC`,
-        ).all<MessageRow>(uid);
-    res.json(rows.map(envelopeOf));
+    const where: string[] = ["recipient_id = ?"];
+    const args: unknown[] = [uid];
+    if (!wantAll) where.push("delivered_at IS NULL");
+    if (afterId) {
+      where.push("(created_at > ? OR (created_at = ? AND id > ?))");
+      args.push(since, since, afterId);
+    } else if (since) {
+      where.push("created_at >= ?");
+      args.push(since);
+    }
+
+    const rows = await db.prepare(
+      `SELECT * FROM messages
+         WHERE ${where.join(" AND ")}
+         ORDER BY created_at ASC, id ASC
+         LIMIT ${limit}`,
+    ).all<MessageRow>(...args);
+
+    const last = rows[rows.length - 1];
+    res.json({
+      envelopes: rows.map(envelopeOf),
+      // `more` lets the client page without guessing.
+      more: rows.length === limit,
+      cursor: last ? { since: Number(last.created_at), afterId: last.id } : null,
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+// Availability watchdog. The client compares these counts against what
+// it actually holds locally; any shortfall triggers a full re-drain
+// instead of waiting for the user to notice missing messages.
+app.get("/api/inbox/stats", authed, async (req, res) => {
+  try {
+    const uid = (req as AuthedReq).userId;
+    const row = await db.prepare(
+      `SELECT COUNT(*) AS n, MAX(created_at) AS newest, MIN(created_at) AS oldest
+         FROM messages WHERE recipient_id = ?`,
+    ).get<{ n: number | string; newest: number | null; oldest: number | null }>(uid);
+    res.json({
+      total: Number(row?.n ?? 0),
+      newestAt: row?.newest ? Number(row.newest) : null,
+      oldestAt: row?.oldest ? Number(row.oldest) : null,
+    });
   } catch (e) { handleError(res, e); }
 });
 

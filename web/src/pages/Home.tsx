@@ -15,10 +15,11 @@ import { ContactsSheet } from "../components/Contacts.js";
 import { Brand } from "./Onboarding.js";
 import { api } from "../lib/api.js";
 import {
-  bumpInboxWatermark,
-  currentSession, ensureContact, ensureGroup, ingestEnvelope, pullInbox,
+  bumpInboxCursor,
+  currentSession, ensureContact, ensureGroup, flushOutbox, ingestEnvelope, pullInbox,
 } from "../lib/session.js";
 import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
+import { onReplication, replicationSummary, type ReplicationState } from "../lib/replication.js";
 import { onChatDeepLink } from "../lib/deeplinks.js";
 import { WelcomeTour, consumeTourPending } from "../components/WelcomeTour.js";
 import {
@@ -77,6 +78,17 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
 
   const me = currentSession()?.user;
 
+  // Replication status. Two jobs: tell the user their history is safe
+  // (or on its way), and re-render the thread list as restored messages
+  // land, so a new device fills in front of them without a tap.
+  const [rep, setRep] = useState<ReplicationState | null>(null);
+  useEffect(() => onReplication((s) => {
+    setRep((prev) => {
+      if (prev && s.localTotal !== prev.localTotal) setRefresh((k) => k + 1);
+      return s;
+    });
+  }), []);
+
   // Initial sync: pull known groups + drain inbox.
   //
   // The drain always uses the watermark-scoped pullInbox — no
@@ -98,8 +110,9 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           for (const uid of g.memberIds) await ensureContact(uid);
         }
       } catch { /* ignore */ }
-      try { await pullInbox(); }
+      try { await pullInbox({ reason: "boot" }); }
       catch (err) { console.warn("[boot] pullInbox failed", err); }
+      flushOutbox().catch((err) => console.warn("[boot] flushOutbox failed", err));
       setRefresh((k) => k + 1);
     })();
   }, []);
@@ -127,6 +140,9 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     return onConnected(() => {
       pullInbox().then((r) => { if (r.pulled > 0) setRefresh((k) => k + 1); })
         .catch((err) => console.warn("[reconnect] pullInbox failed", err));
+      // Anything composed while the socket was down goes out now.
+      flushOutbox().then((r) => { if (r.sent > 0) setRefresh((k) => k + 1); })
+        .catch((err) => console.warn("[reconnect] flushOutbox failed", err));
     });
   }, []);
 
@@ -145,7 +161,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       }
       // Advance the drain watermark so the next pullInbox doesn't
       // waste bandwidth re-fetching this envelope.
-      bumpInboxWatermark(env.createdAt);
+      bumpInboxCursor(env);
       // Bump refresh EVEN on ingest failure. Any partial state
       // change (e.g. ack landed but decrypt didn't) still deserves
       // a re-read so the UI stays consistent with the store.
@@ -305,6 +321,24 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
               <div className="small">@{me?.handle}</div>
             </div>
           </div>
+          {rep && rep.phase !== "synced" && rep.phase !== "idle" && (
+            <div style={{
+              margin: "8px 16px 0", padding: "7px 10px", borderRadius: 10,
+              fontSize: 12, display: "flex", alignItems: "center", gap: 8,
+              background: rep.phase === "offline"
+                ? "rgba(255,120,120,0.10)" : "rgba(138,125,255,0.14)",
+              border: "1px solid var(--glass-border-hi)",
+              color: "var(--text-dim)",
+            }}>
+              <span style={{
+                width: 7, height: 7, borderRadius: 999, flexShrink: 0,
+                background: rep.phase === "offline" ? "var(--danger)" : "var(--aqua)",
+              }} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {replicationSummary(rep)}
+              </span>
+            </div>
+          )}
           <div style={{ flex: 1, minHeight: 0, marginTop: 4 }}>
             <ThreadList
               activeId={thread?.peerId ?? null}

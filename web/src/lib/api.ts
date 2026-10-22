@@ -133,10 +133,40 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
   return r.json() as Promise<T>;
 }
 
+export type InboxPage = {
+  envelopes: Envelope[];
+  more: boolean;
+  cursor: { since: number; afterId: string } | null;
+};
+
+// A relay from before paging existed answers with a bare array. Accept
+// both shapes so a client that outlives a deploy (or an APK pointed at
+// an older relay) still drains instead of failing on `page.envelopes`.
+function normalizeInbox(r: InboxPage | Envelope[]): InboxPage {
+  if (Array.isArray(r)) return { envelopes: r, more: false, cursor: null };
+  return r;
+}
+
+export type InboxStats = {
+  total: number;
+  newestAt: number | null;
+  oldestAt: number | null;
+};
+
+export type RecoveryChallenge = {
+  challengeId: string;
+  serverPublicKey: string;
+  boxed: string;
+  wrappedPrivRec: string;
+  recSalt: string;
+  publicKey: string;
+};
+
 export const api = {
   register: (body: {
     email: string; phone?: string; displayName: string; password: string;
     publicKey: string; wrappedPriv: string; kdfSalt: string;
+    wrappedPrivRec?: string; recSalt?: string;
     deviceLabel?: string;
   }) => req<{ user: PublicUser; token: string; refreshToken: string; handle: string }>(
     "/api/register", { method: "POST", body: JSON.stringify(body) },
@@ -151,8 +181,26 @@ export const api = {
   login: (body: { email: string; password: string; deviceLabel?: string }) =>
     req<{
       user: PublicUser; token: string; refreshToken: string;
-      wrappedPriv: string; kdfSalt: string;
+      wrappedPriv: string; kdfSalt: string; hasRecoveryKey?: boolean;
     }>("/api/login", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- key vault / recovery ----
+  recoveryStatus: () => req<{ enabled: boolean }>("/api/me/recovery"),
+  putRecovery: (body: { wrappedPrivRec: string; recSalt: string }) =>
+    req<{ ok: true }>("/api/me/recovery", { method: "PUT", body: JSON.stringify(body) }),
+  changePassword: (body: {
+    currentPassword: string; newPassword: string;
+    wrappedPriv: string; kdfSalt: string;
+  }) => req<{ ok: true }>("/api/password/change", { method: "POST", body: JSON.stringify(body) }),
+  recoveryChallenge: (email: string) => req<RecoveryChallenge>(
+    "/api/recovery/challenge", { method: "POST", body: JSON.stringify({ email }) },
+  ),
+  resetPassword: (body: {
+    challengeId: string; proof: string; newPassword: string;
+    wrappedPriv: string; kdfSalt: string; deviceLabel?: string;
+  }) => req<{ user: PublicUser; token: string; refreshToken: string }>(
+    "/api/password/reset", { method: "POST", body: JSON.stringify(body) },
+  ),
   listSessions: () => req<Array<{
     id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
   }>>("/api/sessions"),
@@ -177,13 +225,20 @@ export const api = {
   getGroup: (id: string) => req<GroupApi>(`/api/groups/${id}`),
   joinGroup: (id: string) => req<GroupApi>(`/api/groups/${id}/join`, { method: "POST" }),
 
-  inbox: (opts: { all?: boolean; since?: number } = {}) => {
+  // One page of the drain. The server pages by the (createdAt, id)
+  // keyset so `cursor` can be fed straight back in to continue.
+  inbox: (opts: {
+    all?: boolean; since?: number; afterId?: string; limit?: number;
+  } = {}) => {
     const q = new URLSearchParams();
     if (opts.all) q.set("all", "true");
     if (opts.since) q.set("since", String(opts.since));
+    if (opts.afterId) q.set("afterId", opts.afterId);
+    if (opts.limit) q.set("limit", String(opts.limit));
     const qs = q.toString();
-    return req<Envelope[]>(`/api/inbox${qs ? `?${qs}` : ""}`);
+    return req<InboxPage | Envelope[]>(`/api/inbox${qs ? `?${qs}` : ""}`).then(normalizeInbox);
   },
+  inboxStats: () => req<InboxStats>("/api/inbox/stats"),
   ack: (ids: string[]) => req<{ ok: true }>("/api/ack", {
     method: "POST", body: JSON.stringify({ ids }),
   }),

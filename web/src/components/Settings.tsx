@@ -7,8 +7,12 @@ import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api, loadRefreshToken } from "../lib/api.js";
 import { b64 } from "../lib/crypto.js";
 import {
-  backupKey, currentSession, fullResyncInbox, logout, pushLocalHistoryToServer, refreshMe,
+  backupKey, changePassword, currentSession, fullResyncInbox, issueRecoveryKey, logout,
+  pushLocalHistoryToServer, refreshMe,
 } from "../lib/session.js";
+import {
+  onReplication, replicationSummary, type ReplicationState,
+} from "../lib/replication.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
 
@@ -129,23 +133,8 @@ export function Settings({
       </section>
 
       <section style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>SECURITY</div>
-        <div className="glass" style={{ padding: 12, borderRadius: 12, fontSize: 13 }}>
-          Your messages are encrypted end-to-end with a key only your
-          password unlocks. Signing in with the same email + password on
-          any device restores your messages — nothing to memorise.
-          <div style={{ marginTop: 10 }}>
-            <Button size="small" onClick={downloadRecoveryKit}>
-              Download recovery kit
-            </Button>
-            <div className="small" style={{ marginTop: 6 }}>
-              Optional offline fallback — a tiny file with your encryption
-              salt and wrapped key. Only useful if you ever forget your
-              password AND need help from support to recover; not required
-              for normal sign-in.
-            </div>
-          </div>
-        </div>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>ACCOUNT KEYS</div>
+        <AccountKeysPanel />
       </section>
 
       <section style={{ marginBottom: 20 }}>
@@ -272,6 +261,167 @@ function DevicesPanel({ onSignedOutEverywhere }: { onSignedOutEverywhere: () => 
       )}
     </div>
   );
+}
+
+// Account keys: the recovery key and the password that wrap it.
+//
+// The identity private key decrypts everything this account has ever
+// sent or received. It is wrapped twice — once under the password, once
+// under the recovery key — and both wrappers open the same key, so a
+// password change or a recovery-key reset never costs a message. This
+// panel is where the user manages the second wrapper and rotates the
+// first.
+function AccountKeysPanel() {
+  const [status, setStatus] = useState<{ enabled: boolean } | null>(null);
+  const [phrase, setPhrase] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
+  const [curPw, setCurPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+
+  useEffect(() => {
+    api.recoveryStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  async function issue() {
+    if (status?.enabled && !window.confirm(
+      "Replace your existing recovery key? The old one stops working immediately.",
+    )) return;
+    setBusy(true);
+    try {
+      const p = await issueRecoveryKey();
+      setPhrase(p);
+      setStatus({ enabled: true });
+      toast("New recovery key ready — save it now", "ok");
+    } catch (e) {
+      toast(`Couldn't create a recovery key: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+
+  async function savePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await changePassword({ currentPassword: curPw, newPassword: newPw });
+      setPwOpen(false); setCurPw(""); setNewPw("");
+      toast("Password changed — all your messages are untouched", "ok");
+    } catch (e) {
+      toast(`Password change failed: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="glass" style={{ padding: 12, borderRadius: 12, fontSize: 13 }}>
+      <div>
+        <strong>Your password is your key.</strong> Sign in with it on any
+        device and your whole history comes back — nothing to carry, nothing
+        to configure. The trade-off is that nobody, us included, can reset it
+        for you without losing the messages.
+        <div style={{ marginTop: 8 }}>
+          A <strong>recovery key</strong> is the optional second way in: one
+          code, generated here, that resets a forgotten password with every
+          message intact. Entirely up to you.
+        </div>
+      </div>
+
+      <div style={{
+        marginTop: 10, padding: "8px 10px", borderRadius: 10,
+        border: "1px solid var(--line)",
+        background: status?.enabled ? "rgba(70,220,160,0.08)" : "rgba(255,170,70,0.10)",
+      }}>
+        {status === null ? "Checking…"
+          : status.enabled
+            ? "✓ Recovery key is set up — a forgotten password can be reset without losing anything."
+            : "No recovery key on this account. Your password is the only way in."}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+        <Button size="small" onClick={issue} disabled={busy}>
+          {status?.enabled ? "Replace recovery key" : "Create recovery key"}
+        </Button>
+        <Button size="small" onClick={() => setPwOpen((v) => !v)} disabled={busy}>
+          Change password
+        </Button>
+        <Button size="small" variant="ghost" onClick={downloadRecoveryKit}>
+          Account proof file
+        </Button>
+      </div>
+
+      {phrase && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Your recovery key — save it now</div>
+          <div style={{
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontSize: 15, letterSpacing: 1, wordBreak: "break-all",
+            padding: "12px 14px", borderRadius: 10,
+            background: "rgba(255,255,255,0.05)", border: "1px solid var(--line-strong)",
+          }}>{phrase}</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <Button size="small" onClick={() => {
+              navigator.clipboard?.writeText(phrase)
+                .then(() => toast("Copied", "ok"))
+                .catch(() => toast("Copy failed — write it down", "error"));
+            }}>Copy</Button>
+            <Button size="small" onClick={() => downloadRecoveryPhrase(phrase)}>Download kit</Button>
+            <Button size="small" variant="ghost" onClick={() => setPhrase(null)}>Hide</Button>
+          </div>
+          <div className="small" style={{ marginTop: 6 }}>
+            We can't show this again. A replacement can be generated any
+            time you're signed in.
+          </div>
+        </div>
+      )}
+
+      {pwOpen && (
+        <form onSubmit={savePassword} style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div>
+            <label>Current password</label>
+            <input type="password" required value={curPw} autoComplete="current-password"
+              onChange={(e) => setCurPw(e.target.value)} />
+          </div>
+          <div>
+            <label>New password</label>
+            <input type="password" required minLength={8} value={newPw} autoComplete="new-password"
+              onChange={(e) => setNewPw(e.target.value)} placeholder="8 characters minimum" />
+          </div>
+          <div className="small">
+            Changing your password re-wraps your encryption key. Nothing is
+            re-encrypted and no message is lost — other signed-in devices
+            keep working.
+          </div>
+          <div>
+            <Button type="submit" size="small" variant="primary" disabled={busy}>
+              {busy ? "Saving…" : "Save new password"}
+            </Button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function downloadRecoveryPhrase(phrase: string): void {
+  const me = currentSession()?.user;
+  const body = [
+    "Aegent recovery kit",
+    "===================",
+    "",
+    `Account: ${me?.email ?? ""}`,
+    `Issued:  ${new Date().toISOString()}`,
+    "",
+    "Recovery key:",
+    `    ${phrase}`,
+    "",
+    "Use it at sign-in → \"Forgot your password?\". It resets the password",
+    "without losing a single message. Keep this file somewhere you'll",
+    "still have it in five years.",
+    "",
+  ].join("\n");
+  const url = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = "aegent-recovery-kit.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 // Recovery kit = a small JSON file carrying the wrapping salt, the
@@ -425,6 +575,11 @@ function ResyncPanel() {
   const [pushing, setPushing] = useState(false);
   const [pushProgress, setPushProgress] = useState<{ done: number; total: number } | null>(null);
   const [lastRun, setLastRun] = useState<string | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  // Live state from the replication loop — the honest answer to "is all
+  // my history actually on this device?", updated without being asked.
+  const [rep, setRep] = useState<ReplicationState | null>(null);
+  useEffect(() => onReplication(setRep), []);
 
   async function pull() {
     setPulling(true);
@@ -457,9 +612,41 @@ function ResyncPanel() {
   const busy = pulling || pushing;
   return (
     <div className="glass" style={{ padding: 12, borderRadius: 12 }}>
-      <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 10 }}>
-        New messages replicate automatically. These are the manual
-        recovery tools — safe to run any time, both are idempotent.
+      {rep && (
+        <div style={{
+          marginBottom: 10, padding: "10px 12px", borderRadius: 10, fontSize: 13,
+          border: "1px solid var(--line)",
+          background: rep.phase === "synced" ? "rgba(70,220,160,0.08)"
+            : rep.phase === "offline" ? "rgba(255,120,120,0.10)"
+            : "rgba(255,170,70,0.10)",
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>{replicationSummary(rep)}</div>
+          <div className="small">
+            {rep.serverTotal < 0
+              ? "Relay unreachable — this device still has everything it had before."
+              : `${rep.localTotal} of ${rep.serverTotal} envelopes on this device`}
+            {rep.pending > 0 && ` · ${rep.pending} retrying`}
+            {rep.queuedOutbound > 0 && ` · ${rep.queuedOutbound} queued to send`}
+          </div>
+        </div>
+      )}
+      <div style={{ fontSize: 13, color: "var(--text-dim)" }}>
+        Replication is continuous and automatic — every message is copied to
+        the relay as ciphertext the moment it's sent, and this device
+        re-checks against the server on every reconnect. There is nothing
+        here you need to switch on.
+      </div>
+      <button type="button" onClick={() => setAdvanced((v) => !v)}
+        style={{
+          background: "none", border: "none", padding: "8px 0 0",
+          color: "var(--accent-strong)", cursor: "pointer", fontSize: 13,
+        }}>
+        {advanced ? "Hide recovery tools" : "Manual recovery tools"}
+      </button>
+      {advanced && (
+      <div style={{ marginTop: 8 }}>
+      <div className="small" style={{ marginBottom: 10 }}>
+        Only needed if something looks missing. Both are idempotent.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <div>
@@ -486,6 +673,8 @@ function ResyncPanel() {
         </div>
       </div>
       {lastRun && <div className="small" style={{ marginTop: 10 }}>{lastRun}</div>}
+      </div>
+      )}
     </div>
   );
 }

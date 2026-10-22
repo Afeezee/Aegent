@@ -58,7 +58,7 @@ export function newKdfSalt(): Uint8Array {
 export async function deriveKey(
   password: string,
   salt: Uint8Array,
-  context: "priv-wrap" | "local-store",
+  context: "priv-wrap" | "local-store" | "rec-wrap",
 ): Promise<Uint8Array> {
   const raw = await argon2id({
     password: `${context}:${password}`,
@@ -68,6 +68,34 @@ export async function deriveKey(
     outputType: "binary",
   });
   return raw as Uint8Array;
+}
+
+// Key that wraps the identity private key under the user's recovery
+// code. Same Argon2id parameters as the password path, different
+// domain-separation context, and the input is the 128-bit entropy of
+// the code rather than a human-chosen secret.
+export async function recoveryWrapKey(
+  entropy: Uint8Array, salt: Uint8Array,
+): Promise<Uint8Array> {
+  return deriveKey(b64.encode(entropy), salt, "rec-wrap");
+}
+
+// Local-store key, derived from the identity private key instead of the
+// password.
+//
+// Deriving it from the password tied every row on disk to a secret the
+// user is allowed to change: a password change (or a reset) silently
+// turned the whole local history into "<corrupt>". The private key, by
+// contrast, is fixed for the life of the account — the same property
+// that already makes `backupKeyFromPrivate` work — so this key survives
+// password changes, and re-wrapping the private key under a new
+// password leaves local storage completely untouched.
+export function storeKeyFromPrivate(privateKey: Uint8Array): Uint8Array {
+  const ctx = new TextEncoder().encode("aegent:local-store:v2");
+  const material = new Uint8Array(ctx.length + privateKey.length);
+  material.set(ctx, 0);
+  material.set(privateKey, ctx.length);
+  return nacl.hash(material).slice(0, 32);
 }
 
 // ---- symmetric wrap (secretbox) ----

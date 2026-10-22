@@ -37,6 +37,28 @@ async function verifyPassword(hash: string, password: string): Promise<boolean> 
   catch { return false; }
 }
 
+// Exposed so the recovery flow can hash a replacement password and
+// re-verify the current one without duplicating the Argon2 params.
+export async function hashNewPassword(password: string): Promise<string> {
+  return hashPassword(password);
+}
+export async function checkPassword(userId: string, password: string): Promise<boolean> {
+  const row = await db.prepare("SELECT password_hash FROM users WHERE id = ?")
+    .get<{ password_hash: string }>(userId);
+  if (!row) return false;
+  return verifyPassword(row.password_hash, password);
+}
+
+// Issue a fresh access + refresh pair for a user row. Used by login and
+// by a completed password reset (which signs the device straight in —
+// bouncing a just-recovered user back to the login form is one more
+// chance for them to get locked out).
+export async function issueTokens(userId: string, deviceLabel?: string): Promise<{
+  token: string; refreshToken: string;
+}> {
+  return { token: sign(userId), refreshToken: await issueRefreshToken(userId, deviceLabel) };
+}
+
 // ---- registration / login ----
 
 export async function registerUser(input: {
@@ -47,6 +69,11 @@ export async function registerUser(input: {
   publicKey: string;
   wrappedPriv: string;
   kdfSalt: string;
+  // Second wrapper of the same private key, under the recovery code
+  // generated on-device at signup. Optional only so older clients keep
+  // working; the current client always sends it.
+  wrappedPrivRec?: string;
+  recSalt?: string;
   deviceLabel?: string;
 }): Promise<{ user: PublicUser; token: string; refreshToken: string; handle: string }> {
   const email = input.email.toLowerCase().trim();
@@ -67,11 +94,13 @@ export async function registerUser(input: {
   await db.prepare(
     `INSERT INTO users
        (id, email, phone, display_name, handle, password_hash, public_key,
-        wrapped_priv, kdf_salt, read_receipts, presence, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+        wrapped_priv, kdf_salt, wrapped_priv_rec, rec_salt,
+        read_receipts, presence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
   ).run(
     id, email, phone, input.displayName, handle,
-    passwordHash, input.publicKey, input.wrappedPriv, input.kdfSalt, now,
+    passwordHash, input.publicKey, input.wrappedPriv, input.kdfSalt,
+    input.wrappedPrivRec ?? null, input.recSalt ?? null, now,
   );
 
   const user = await getUserById(id);
@@ -84,7 +113,7 @@ export async function loginUser(input: {
   email: string; password: string; deviceLabel?: string;
 }): Promise<{
   user: PublicUser; token: string; refreshToken: string;
-  wrappedPriv: string; kdfSalt: string;
+  wrappedPriv: string; kdfSalt: string; hasRecoveryKey: boolean;
 }> {
   const email = input.email.toLowerCase().trim();
   const row = await db.prepare("SELECT * FROM users WHERE email = ?").get<UserRow>(email);
@@ -104,6 +133,7 @@ export async function loginUser(input: {
     refreshToken,
     wrappedPriv: row.wrapped_priv,
     kdfSalt: row.kdf_salt,
+    hasRecoveryKey: !!row.wrapped_priv_rec,
   };
 }
 

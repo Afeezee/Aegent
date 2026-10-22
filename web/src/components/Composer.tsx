@@ -83,6 +83,9 @@ export function Composer({
       } else {
         const res = await sendText(peerId, isGroup, body, replyTo ?? undefined);
         if (!res.ok) { toast(`Send failed: ${res.error}`, "error"); return; }
+        // Offline isn't a failure any more: the message is saved and
+        // queued, and goes out on the next reconnect.
+        if (res.queued) toast("Offline — queued, will send when you reconnect", "info");
         onClearReply();
         onSent();
       }

@@ -1,9 +1,10 @@
 // Post-signup walkthrough. Fires once per account on this device,
-// right after a successful register(). The one card that cannot be
-// skipped without acknowledgement is the password-recovery warning —
-// Aegent's model makes the password the single thing the server
-// cannot help with, and users need to know that in a calm tone, up
-// front, before they've accumulated chats they'd miss.
+// right after a successful register(). The card that cannot be skipped
+// without acknowledgement is the one about keys: a password and a
+// recovery key both unwrap the same encryption key, and between them
+// they are the whole reason history survives a lost device or a
+// forgotten password. Users should hear that in a calm tone, up front,
+// before they've accumulated chats they'd miss.
 //
 // Trigger: Auth.tsx sets localStorage.aegent.pending-tour on register.
 // Home.tsx reads that flag on mount and opens the tour.
@@ -59,21 +60,23 @@ const STEPS: Step[] = [
   },
   {
     art: <Lock />,
-    title: "Your password is your key",
+    title: "Two keys, one archive",
     critical: true,
     body: (
       <>
-        <strong>Signing in on another device restores everything</strong> — you don't need
-        a recovery phrase, a backup file, or anything you have to save
-        and remember separately. Just email and password.
+        <strong>Signing in on another device restores everything</strong> — every
+        message you've ever sent or received, pulled back from the
+        server and decrypted on the spot. Just email and password.
         <br /><br />
-        The flipside: if you forget your password, there's no reset
-        link that recovers messages. The server has your messages, but
-        only your password can unlock them.
+        Your messages are encrypted with a key only your devices hold,
+        and two things unwrap it: your <strong>password</strong> and your{" "}
+        <strong>recovery key</strong>. We showed you the recovery key when
+        you signed up — that's what resets a forgotten password without
+        losing a single message.
         <br /><br />
-        <strong>Save it in your password manager now</strong> — Chrome,
-        Apple Passwords, 1Password, Bitwarden all work. That one habit
-        protects everything else.
+        <strong>Put the password in your password manager and the recovery
+        key somewhere you'll still have it in five years.</strong> With both,
+        your history is never more than a sign-in away.
       </>
     ),
   },

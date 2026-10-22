@@ -53,6 +53,12 @@ export type UserRow = {
   public_key: string;
   wrapped_priv: string;
   kdf_salt: string;
+  // Second wrapping of the SAME identity private key, this one under a
+  // key derived from the user's recovery code. Lets a forgotten
+  // password be reset without destroying message history (the private
+  // key is what decrypts every stored envelope).
+  wrapped_priv_rec: string | null;
+  rec_salt: string | null;
   read_receipts: number;
   presence: number;
   last_seen_at: number | null;
@@ -215,6 +221,8 @@ const SCHEMA = `
     public_key     TEXT NOT NULL,
     wrapped_priv   TEXT NOT NULL,
     kdf_salt       TEXT NOT NULL,
+    wrapped_priv_rec TEXT,
+    rec_salt         TEXT,
     read_receipts  INTEGER NOT NULL DEFAULT 0,
     presence       INTEGER NOT NULL DEFAULT 0,
     last_seen_at   ${BIG},
@@ -250,6 +258,11 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_messages_recipient
     ON messages(recipient_id, delivered_at, created_at);
+  -- Keyset-pagination index for the inbox drain: (created_at, id) is a
+  -- total order, so a resumable cursor never skips or repeats a row
+  -- even when several envelopes share a millisecond.
+  CREATE INDEX IF NOT EXISTS idx_messages_drain
+    ON messages(recipient_id, created_at, id);
 
   CREATE TABLE IF NOT EXISTS blobs (
     id           TEXT PRIMARY KEY,
@@ -292,7 +305,32 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_refresh_user
     ON refresh_tokens(user_id, revoked_at);
+
+  -- Proof-of-key challenges for password reset. The server boxes a
+  -- random nonce to the user's identity public key; only a client that
+  -- can unwrap the private key (via the recovery code) can read it
+  -- back. Possession of the private key is exactly the right authority
+  -- to reset a password, because that key is what makes the stored
+  -- history readable in the first place.
+  CREATE TABLE IF NOT EXISTS recovery_challenges (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    nonce       TEXT NOT NULL,
+    created_at  ${BIG} NOT NULL,
+    used_at     ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_recovery_user
+    ON recovery_challenges(user_id, created_at);
 `;
+
+// Columns added after the first release. Both backends get the same
+// idempotent treatment: Postgres has ADD COLUMN IF NOT EXISTS, SQLite
+// needs a pragma probe first.
+const ADDED_USER_COLUMNS: Array<{ name: string; ddl: string }> = [
+  { name: "phone", ddl: "ALTER TABLE users ADD COLUMN phone TEXT" },
+  { name: "wrapped_priv_rec", ddl: "ALTER TABLE users ADD COLUMN wrapped_priv_rec TEXT" },
+  { name: "rec_salt", ddl: "ALTER TABLE users ADD COLUMN rec_salt TEXT" },
+];
 
 export async function initSchema(): Promise<void> {
   await db.exec(SCHEMA);
@@ -300,12 +338,14 @@ export async function initSchema(): Promise<void> {
   // existed. Postgres has ADD COLUMN IF NOT EXISTS; SQLite doesn't, so
   // we probe pragma_table_info first.
   if (isPg) {
-    await db.exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT");
+    for (const c of ADDED_USER_COLUMNS) {
+      await db.exec(c.ddl.replace("ADD COLUMN", "ADD COLUMN IF NOT EXISTS"));
+    }
   } else {
     const cols = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
-    if (!cols.some((c) => c.name === "phone")) {
-      await db.exec("ALTER TABLE users ADD COLUMN phone TEXT");
-      await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
+    for (const c of ADDED_USER_COLUMNS) {
+      if (!cols.some((x) => x.name === c.name)) await db.exec(c.ddl);
     }
   }
+  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");
 }

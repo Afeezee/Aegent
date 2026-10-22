@@ -1,22 +1,53 @@
-// Session bootstrap and the high-level send/receive pipeline.
+// Session bootstrap, the key vault, and the high-level send/receive
+// pipeline.
 //
-// Registration/login derives the identity keys and the local-store key
-// without either ever leaving the device in cleartext. Once open, this
-// module also exposes the send/receive helpers every UI screen uses,
-// so the components never have to know about crypto or envelopes.
+// Availability is the first-order requirement here: every message this
+// account has ever sent or received must be reachable from any device,
+// on demand, forever. Three mechanisms carry that guarantee, and they
+// are deliberately independent so no single failure hides history:
+//
+//   1. Server-side replication. Every send fans out a self-addressed
+//      ciphertext copy, so the relay holds the sender's history as well
+//      as the recipient's. The relay is the source of truth; local
+//      storage is only a cache.
+//
+//   2. A ledgered, resumable drain. Every envelope the server hands us
+//      is recorded in an on-device ledger as ingested-or-pending. The
+//      paging cursor can therefore be advanced freely (the ledger
+//      dedupes) while anything that failed to ingest is retried on
+//      every later drain instead of being skipped forever. A count
+//      check against the server catches any divergence and re-drains.
+//
+//   3. A key vault, not a single wrapper. The identity private key is
+//      what makes stored ciphertext readable, so it can be wrapped more
+//      than once: always under the password, and optionally under a
+//      recovery code the user asks for in Settings. The local store key
+//      is derived from the private key rather than the password, so
+//      changing or resetting a password re-wraps a key that never
+//      changes and cannot cost anybody their history.
+//
+// Signup deliberately does NOT force a recovery code on anyone: your
+// password is your key, which is the whole point, and a mandatory
+// "write these words down" screen is friction most people answer by
+// screenshotting it into the same phone they'd lose. The recovery code
+// exists for people who go looking for it.
 
 import {
   b64, backupKeyFromPrivate, decryptFromPeer, deriveKey, encryptForPeer,
-  generateIdentity,
-  initCrypto, newKdfSalt, secretBoxOpen, secretBoxSeal,
+  entropyFromPhrase, generateIdentity,
+  initCrypto, newKdfSalt, newRecoveryPhrase, recoveryWrapKey,
+  secretBoxOpen, secretBoxSeal, storeKeyFromPrivate,
 } from "./crypto.js";
+import { startReplication, stopReplication } from "./replication.js";
 import {
   api, apiUrl, loadToken, setRefreshToken, setToken,
-  type MeApi, type PublicUser,
+  type Envelope, type InboxStats, type MeApi, type PublicUser,
 } from "./api.js";
 import {
-  applyDelete, applyEdit, applyReaction, closeStore, getContact, getGroup,
-  markDelivered, markRead, openStore, saveMediaMessage, saveTextMessage,
+  applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
+  enqueueOutbox, getContact, getGroup, getMeta, ledgerClear, ledgerCounts, ledgerMarkOk,
+  ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered, markRead,
+  openStore, outboxCount, rekeyMessages, saveMediaMessage, saveTextMessage, setMeta,
   upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
@@ -47,11 +78,35 @@ export function currentSession(): Session | null { return CURRENT; }
 const KEY_PRIV = "aegent.priv";
 const KEY_STORE = "aegent.storekey";
 const KEY_BACKUP = "aegent.backupkey";
-// Watermark: the highest server createdAt we've successfully drained
-// for this user. Namespaced by userId so switching accounts on the
-// same device stays clean. Absence → drain everything from the start
-// (fresh install / new device path).
-function KEY_WATERMARK(userId: string) { return `aegent.inbox.watermark.${userId}`; }
+
+// Drain cursor: the (createdAt, id) keyset position we have paged
+// through for this user. Namespaced by userId so switching accounts on
+// the same device stays clean. Absence → drain from the beginning of
+// time, which is the fresh-install / new-device path.
+type Cursor = { since: number; afterId: string } | null;
+function KEY_CURSOR(userId: string) { return `aegent.inbox.cursor.${userId}`; }
+// Pre-ledger installs stored a bare timestamp watermark under this key.
+// It is read once (so an upgrade doesn't re-drain from zero) and then
+// ignored.
+function KEY_LEGACY_WATERMARK(userId: string) { return `aegent.inbox.watermark.${userId}`; }
+
+function readCursor(userId: string): Cursor {
+  try {
+    const raw = localStorage.getItem(KEY_CURSOR(userId));
+    if (raw) {
+      const c = JSON.parse(raw) as Cursor;
+      if (c && typeof c.since === "number") return c;
+    }
+    const legacy = Number(localStorage.getItem(KEY_LEGACY_WATERMARK(userId)) ?? 0) || 0;
+    return legacy ? { since: legacy, afterId: "" } : null;
+  } catch { return null; }
+}
+function writeCursor(userId: string, c: Cursor): void {
+  try {
+    if (c) localStorage.setItem(KEY_CURSOR(userId), JSON.stringify(c));
+    else localStorage.removeItem(KEY_CURSOR(userId));
+  } catch { /* private browsing / storage full — degrade quietly */ }
+}
 
 let CACHED_BACKUP_KEY: Uint8Array | null = null;
 export function backupKey(): Uint8Array | null { return CACHED_BACKUP_KEY; }
@@ -89,160 +144,446 @@ function clearPersistedKeys() {
   } catch { /* ignore */ }
 }
 
+// ---- local-store key migration ----
+//
+// Old devices sealed their Dexie rows with a password-derived key; the
+// key is now derived from the identity private key so a password change
+// can't orphan local history. `openLocalStore` opens with the new key
+// and, when a legacy key is available and the store hasn't been
+// converted yet, re-seals the existing rows in place.
+const META_STOREKEY_VERSION = "storeKeyVersion";
+
+async function openLocalStore(
+  userId: string, privateKey: Uint8Array, legacyKey?: Uint8Array | null,
+): Promise<Uint8Array> {
+  const storeKey = storeKeyFromPrivate(privateKey);
+  openStore(userId, storeKey);
+  try {
+    const version = await getMeta(META_STOREKEY_VERSION);
+    if (version !== "2") {
+      if (legacyKey && !eqBytes(legacyKey, storeKey)) {
+        const r = await rekeyMessages(legacyKey);
+        console.log(`[session] re-keyed local store: ${r.rekeyed} rows${r.failed ? `, ${r.failed} left for re-sync` : ""}`);
+      }
+      await setMeta(META_STOREKEY_VERSION, "2");
+    }
+  } catch (e) {
+    console.warn("[session] store re-key skipped:", (e as Error).message);
+  }
+  return storeKey;
+}
+
+function eqBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 // ---- inbox drain ----
 //
-// Always full-drain by createdAt watermark. `?all=true` returns every
-// envelope addressed to us — delivered or not, self-echo included —
-// since the watermark. On a fresh install the watermark is 0 and we
-// get the entire history. On a repeat login/socket-reconnect we get
-// only what's newer than our high-water mark, so it stays cheap.
-//
-// This is what "nothing is lost, whether logged in or out" hinges on:
-// the client never trusts local Dexie as the source of truth — the
-// server's message log is. Every session boot re-drains from the
-// point we last successfully caught up.
+// Paged, ledgered, resumable. Every page is acked in one request, every
+// envelope is recorded in the ledger, and the cursor only ever means
+// "we have *seen* up to here" — never "we have successfully ingested
+// up to here", which is what used to let a transient failure drop a
+// message permanently.
+
+const PAGE_SIZE = 300;
+
+// Progress out of the drain, so the UI can show a real count while a
+// brand-new device rebuilds an account instead of staring at an empty
+// chat list. One listener set, fanned out defensively.
+type DrainProgress = { ingested: number; serverTotal: number; reason: string };
+const drainListeners = new Set<(p: DrainProgress) => void>();
+export function onDrainProgress(cb: (p: DrainProgress) => void): () => void {
+  drainListeners.add(cb);
+  return () => { drainListeners.delete(cb); };
+}
+function emitDrainProgress(p: DrainProgress): void {
+  for (const cb of drainListeners) {
+    try { cb(p); } catch { /* a progress listener must never break a drain */ }
+  }
+}
+
 let PULL_IN_FLIGHT: Promise<{ pulled: number }> | null = null;
-export async function pullInbox(): Promise<{ pulled: number }> {
+
+export async function pullInbox(opts: { reason?: string } = {}): Promise<{ pulled: number }> {
   if (!CURRENT) return { pulled: 0 };
-  // Coalesce: if a pull is already running, join it. Prevents the
-  // boot + focus + socket-reconnect trio from triggering three
+  // Coalesce: boot + focus + socket-reconnect otherwise trigger three
   // parallel drains on the same instant.
   if (PULL_IN_FLIGHT) return PULL_IN_FLIGHT;
-  const userId = CURRENT.user.id;
-  const key = KEY_WATERMARK(userId);
-  const watermark = Number(localStorage.getItem(key) ?? 0) || 0;
-  PULL_IN_FLIGHT = (async () => {
-    try {
-      const envs = await api.inbox({ all: true, since: watermark });
-      let highest = watermark;
-      let pulled = 0;
-      for (const e of envs) {
-        try {
-          const res = await ingestEnvelope(e);
-          if (res) pulled++;
-        } catch (err) {
-          console.warn("[pullInbox] ingest failed", e.id, err);
-        }
-        // Bump watermark even if ingest failed — the envelope is on the
-        // server permanently, and a broken decrypt won't be fixed by
-        // re-fetching. This prevents one bad row from stalling the
-        // whole drain on every boot.
-        if (e.createdAt > highest) highest = e.createdAt;
-      }
-      // Persist as (highest + 1) so a `>= since` query on the next
-      // drain doesn't re-return the last row.
-      if (highest > watermark) {
-        try { localStorage.setItem(key, String(highest + 1)); } catch { /* ignore */ }
-      }
-      return { pulled };
-    } finally {
-      PULL_IN_FLIGHT = null;
-    }
-  })();
+  PULL_IN_FLIGHT = drain(opts.reason ?? "incremental").finally(() => { PULL_IN_FLIGHT = null; });
   return PULL_IN_FLIGHT;
 }
 
-// Device-to-device backfill. For every message in this device's
-// local store that THIS user sent, encrypt a self-copy and send it
-// to the server. Other devices (same account, same password → same
-// private key) will then see those messages on their next inbox
-// drain, closing the "sent before self-echo was wired" gap.
+async function drain(reason: string): Promise<{ pulled: number }> {
+  const userId = CURRENT!.user.id;
+  let pulled = 0;
+  let cursor = readCursor(userId);
+  let pages = 0;
+  // Fetched before the first page purely so progress has a denominator.
+  let serverTotal = -1;
+  try { serverTotal = (await api.inboxStats()).total; } catch { /* advisory */ }
+
+  // Page forward until the server says there is nothing left. The
+  // page limit is a safety valve against a pathological loop, not an
+  // expected ceiling: 2000 pages is ~600k envelopes.
+  for (; pages < 2000; pages++) {
+    const page = await api.inbox({
+      all: true,
+      since: cursor?.since ?? 0,
+      afterId: cursor?.afterId ?? undefined,
+      limit: PAGE_SIZE,
+    });
+    if (page.envelopes.length === 0) break;
+    pulled += await ingestBatch(page.envelopes);
+    if (page.cursor) {
+      cursor = page.cursor;
+      writeCursor(userId, cursor);
+    }
+    try {
+      const counts = await ledgerCounts();
+      emitDrainProgress({ ingested: counts.total, serverTotal, reason });
+    } catch { /* ignore */ }
+    if (!page.more) break;
+  }
+
+  // Retry anything still pending from this or an earlier drain.
+  const retried = await retryPending();
+
+  // Divergence check: the ledger knows exactly how many envelopes we
+  // have accounted for. If the server holds more, our cursor has moved
+  // past something we never saw (an envelope committed out of order, a
+  // cursor written during a failed write, a cleared ledger) — so start
+  // over from the beginning. This is the backstop that makes "messages
+  // are always there" true rather than merely intended.
+  let healed = 0;
+  try {
+    const [stats, counts] = await Promise.all([api.inboxStats(), ledgerCounts()]);
+    writeDiag({ serverTotal: stats.total, localTotal: counts.total, pending: counts.pending });
+    if (stats.total > counts.total && reason !== "heal") {
+      console.warn(`[drain] server has ${stats.total} envelopes, ledger has ${counts.total} — re-draining from the start`);
+      writeCursor(userId, null);
+      const again = await drain("heal");
+      healed = again.pulled;
+    }
+  } catch { /* stats are advisory; never fail a drain over them */ }
+
+  writeDiag({ lastPullAt: Date.now(), lastPulled: pulled + retried + healed, lastReason: reason });
+  return { pulled: pulled + retried + healed };
+}
+
+// Ingest one page: skip what the ledger already has, ingest the rest,
+// then ack the whole page in a single request. The old code issued one
+// ack HTTP call per envelope, which made a first-login drain of a few
+// thousand messages thousands of round trips.
+async function ingestBatch(envelopes: Envelope[]): Promise<number> {
+  const toAck: string[] = [];
+  let pulled = 0;
+  for (const env of envelopes) {
+    try {
+      const seen = await ledgerStatus(env.id);
+      if (seen?.status === "ok") { toAck.push(env.id); continue; }
+      const res = await ingestEnvelope(env, { ack: false });
+      if (res) { pulled++; toAck.push(env.id); }
+    } catch (err) {
+      console.warn("[drain] ingest threw", env.id, err);
+      await ledgerMarkPending(env, (err as Error).message || "threw").catch(() => { /* ignore */ });
+    }
+  }
+  if (toAck.length) await api.ack(toAck).catch(() => { /* delivery flag is advisory */ });
+  return pulled;
+}
+
+// Walk the pending ledger. Each row still carries its ciphertext, so a
+// retry needs no network round trip beyond whatever the failure
+// originally needed (usually a contact lookup).
+async function retryPending(): Promise<number> {
+  let fixed = 0;
+  const pending = await ledgerPending();
+  if (pending.length === 0) return 0;
+  const toAck: string[] = [];
+  for (const row of pending) {
+    if (!row.raw) continue;
+    try {
+      const res = await ingestEnvelope(row.raw, { ack: false });
+      if (res) { fixed++; toAck.push(row.raw.id); }
+    } catch { /* stays pending; next drain tries again */ }
+  }
+  if (toAck.length) await api.ack(toAck).catch(() => { /* ignore */ });
+  if (fixed > 0) console.log(`[drain] recovered ${fixed} previously-stuck message${fixed === 1 ? "" : "s"}`);
+  return fixed;
+}
+
+// Force-drain: forget the cursor AND the ledger, then pull every
+// envelope the server has. Used by Settings → "Re-sync all history" and
+// on every sign-in, so a device that joined mid-conversation (or lost
+// its local Dexie) rebuilds the whole account. Idempotent — message
+// rows are keyed by msgId, so re-ingesting overwrites in place.
+export async function fullResyncInbox(): Promise<{ pulled: number }> {
+  if (!CURRENT) return { pulled: 0 };
+  writeCursor(CURRENT.user.id, null);
+  try { await ledgerClear(); } catch { /* store may not be open yet */ }
+  return pullInbox({ reason: "full" });
+}
+
+// Called from the live-socket handler after a real-time delivery so the
+// next drain doesn't re-page over what we already hold. Safe because
+// the ledger — not the cursor — is what guarantees completeness.
+export function bumpInboxCursor(env: { id: string; createdAt: number }): void {
+  if (!CURRENT) return;
+  const userId = CURRENT.user.id;
+  const cur = readCursor(userId);
+  if (!cur || env.createdAt > cur.since) {
+    writeCursor(userId, { since: env.createdAt, afterId: env.id });
+  }
+}
+
+// ---- availability report ----
+
+export type AvailabilityReport = {
+  serverTotal: number;
+  localLedger: number;
+  pending: number;
+  queuedOutbound: number;
+  newestAt: number | null;
+  oldestAt: number | null;
+  healthy: boolean;
+};
+
+// What Settings → Sync shows. Comparing the server's envelope count with
+// the ledger's is the honest answer to "do I actually have all my
+// messages on this device?".
+export async function availabilityReport(): Promise<AvailabilityReport> {
+  const [stats, counts, queued] = await Promise.all([
+    api.inboxStats().catch((): InboxStats => ({ total: -1, newestAt: null, oldestAt: null })),
+    ledgerCounts().catch(() => ({ ok: 0, pending: 0, total: 0 })),
+    outboxCount().catch(() => 0),
+  ]);
+  return {
+    serverTotal: stats.total,
+    localLedger: counts.total,
+    pending: counts.pending,
+    queuedOutbound: queued,
+    newestAt: stats.newestAt,
+    oldestAt: stats.oldestAt,
+    healthy: stats.total >= 0 && counts.total >= stats.total && counts.pending === 0 && queued === 0,
+  };
+}
+
+// ---- device-to-device backfill ----
 //
-// Nothing leaves the client as plaintext: the self-copy is
-// encrypted to our own public key with our own private key, exactly
-// the way sendToPeer does it. The server stores opaque bytes keyed
-// to our user id, and only our own private key can decrypt them.
+// For every message in this device's local store that THIS user sent,
+// encrypt a self-copy and send it to the relay. Other devices (same
+// account → same private key) then see those messages on their next
+// drain, closing the gap for anything sent before self-echo existed.
 //
-// Idempotent: ingestEnvelope dedupes by msgId, so running this
-// twice (or running it when the server already has the self-echo
-// for some messages) is harmless; those just redundant-insert on
-// the server side but overlay the same Dexie row elsewhere.
+// Nothing leaves as plaintext: the self-copy is encrypted to our own
+// public key with our own private key, exactly as sendToPeer does.
+// Idempotent — the receiving side dedupes by msgId.
 export async function pushLocalHistoryToServer(opts: {
   onProgress?: (done: number, total: number) => void;
 } = {}): Promise<{ pushed: number; skipped: number }> {
   if (!CURRENT) return { pushed: 0, skipped: 0 };
   const selfId = CURRENT.user.id;
-  const selfPub = CURRENT.publicKey;
-  // Lazy import so this feature doesn't pull store/protocol into the
-  // auth bundle on cold boot.
-  const [{ everyMessage }, { packPayload }] = await Promise.all([
-    import("./store.js"),
-    import("./protocol.js"),
-  ]);
+  const { everyMessage } = await import("./store.js");
   const rows = await everyMessage();
   const mine = rows.filter((m) => m.senderId === selfId && !m.deletedAt);
+  const pushedSet = PUSHED_CACHE?.uid === selfId ? PUSHED_CACHE.set : readPushedSet(selfId);
   let pushed = 0, skipped = 0;
   for (let i = 0; i < mine.length; i++) {
     opts.onProgress?.(i, mine.length);
     const m = mine[i];
+    const payload = selfCopyPayload(m);
+    if (!payload) { skipped++; continue; }
     try {
-      // Rebuild the payload exactly as the original sendText/sendMedia
-      // would have produced. The msgId stays stable so Dexie dedupes
-      // against the existing row on any device that already has it.
-      let payload: Record<string, unknown>;
-      if (m.media) {
-        payload = { v: 1, t: "media", msgId: m.id, caption: m.caption, media: m.media };
-      } else if (m.body || m.editedBody) {
-        payload = { v: 1, t: "text", msgId: m.id, body: m.editedBody ?? m.body };
-      } else { skipped++; continue; }
-      // _thread is what lets a self-echo land under the right chat on
-      // the receiving device — recipient_id is self, so there's no
-      // routing info otherwise.
-      payload._thread = m.peerId;
-      const packed = packPayload(payload as unknown as import("./protocol.js").Payload);
-      const cipher = encryptForPeer(packed, selfPub, CURRENT.privateKey);
+      const cipher = encryptForPeer(packPayload(payload), CURRENT.publicKey, CURRENT.privateKey);
       const res = await sendCipher(selfId, cipher);
-      if (res.ok) pushed++; else skipped++;
+      if (res.ok) { pushed++; pushedSet.add(m.id); } else skipped++;
     } catch { skipped++; }
   }
+  writePushedSet(selfId, pushedSet);
   opts.onProgress?.(mine.length, mine.length);
+  writeDiag({ lastPushedAt: Date.now(), lastPushed: pushed });
   return { pushed, skipped };
 }
 
-// Force-drain: discards the local watermark and pulls EVERY envelope
-// the server has for this user. Used by Settings → "Re-sync all
-// history" so a device that joined mid-conversation (or lost its
-// local Dexie) can catch up. Idempotent — ingestEnvelope dedupes by
-// msgId, so running it twice is harmless.
-export async function fullResyncInbox(): Promise<{ pulled: number }> {
-  if (!CURRENT) return { pulled: 0 };
-  const userId = CURRENT.user.id;
-  const key = KEY_WATERMARK(userId);
-  try { localStorage.removeItem(key); } catch { /* ignore */ }
-  return pullInbox();
+// Rebuild the payload a past send would have produced. The msgId stays
+// stable so every device dedupes against the row it already has.
+function selfCopyPayload(m: {
+  id: string; peerId: string; body: string | null; editedBody: string | null;
+  caption: string | null; media: MediaRef | null;
+}): Payload | null {
+  if (m.media) {
+    return {
+      v: 1, t: "media", msgId: m.id, caption: m.caption ?? undefined,
+      media: m.media, _thread: m.peerId,
+    } as Payload;
+  }
+  const body = m.editedBody ?? m.body;
+  if (!body) return null;
+  return { v: 1, t: "text", msgId: m.id, body, _thread: m.peerId } as Payload;
 }
 
-// Called from the live-socket handler after every real-time delivery
-// so a subsequent pullInbox() doesn't re-fetch what we already have.
-export function bumpInboxWatermark(createdAt: number): void {
-  if (!CURRENT) return;
-  const key = KEY_WATERMARK(CURRENT.user.id);
+// Which of our own messages the relay already has a self-copy of. Seeded
+// from ingested self-echoes too, so a second device never re-uploads the
+// history it just downloaded.
+function pushedKey(uid: string) { return `aegent.pushed-msgids.${uid}`; }
+function readPushedSet(uid: string): Set<string> {
+  try { return new Set<string>(JSON.parse(localStorage.getItem(pushedKey(uid)) ?? "[]")); }
+  catch { return new Set<string>(); }
+}
+function writePushedSet(uid: string, s: Set<string>): void {
+  try { localStorage.setItem(pushedKey(uid), JSON.stringify([...s])); } catch { /* ignore */ }
+}
+// Buffered: a full-history drain marks thousands of self-echoes, and
+// re-serialising the whole set per message turned that into quadratic
+// localStorage writes.
+let PUSHED_CACHE: { uid: string; set: Set<string> } | null = null;
+let PUSHED_FLUSH: number | null = null;
+function markPushed(uid: string, msgId: string): void {
+  if (!PUSHED_CACHE || PUSHED_CACHE.uid !== uid) {
+    PUSHED_CACHE = { uid, set: readPushedSet(uid) };
+  }
+  if (PUSHED_CACHE.set.has(msgId)) return;
+  PUSHED_CACHE.set.add(msgId);
+  if (PUSHED_FLUSH !== null) return;
+  PUSHED_FLUSH = setTimeout(() => {
+    PUSHED_FLUSH = null;
+    if (PUSHED_CACHE) writePushedSet(PUSHED_CACHE.uid, PUSHED_CACHE.set);
+  }, 1500) as unknown as number;
+}
+
+// Replicate anything that exists only on this device. Awaitable, so the
+// replication loop can sequence it against the drain; `scheduleAutoPush`
+// is the fire-and-forget wrapper used on the send path.
+let AUTO_PUSH_IN_FLIGHT: Promise<{ pushed: number }> | null = null;
+
+// The first cycle of a session sweeps the whole store (it may hold
+// messages from a build that predates replication); every cycle after
+// that only looks at what's newer than the last one, so the steady-state
+// cost is an index lookup rather than a full decrypt pass.
+let SWEPT_THIS_SESSION = false;
+function copiedThroughKey(uid: string) { return `aegent.cloud-copied-through.${uid}`; }
+
+export function replicateUnpushed(): Promise<{ pushed: number }> {
+  if (!CURRENT) return Promise.resolve({ pushed: 0 });
+  if (AUTO_PUSH_IN_FLIGHT) return AUTO_PUSH_IN_FLIGHT;
+  const uid = CURRENT.user.id;
+  AUTO_PUSH_IN_FLIGHT = (async () => {
+    let newly = 0;
+    try {
+      const { everyMessage, outboundSince } = await import("./store.js");
+      let through = 0;
+      try { through = Number(localStorage.getItem(copiedThroughKey(uid)) ?? 0) || 0; }
+      catch { /* ignore */ }
+      const rows = SWEPT_THIS_SESSION
+        ? await outboundSince(through)
+        : await everyMessage();
+      SWEPT_THIS_SESSION = true;
+      const pushedSet = PUSHED_CACHE?.uid === uid ? PUSHED_CACHE.set : readPushedSet(uid);
+      const todo = rows.filter((m) => m.senderId === uid && !m.deletedAt && !pushedSet.has(m.id));
+      // Advance the watermark over everything we just considered, even
+      // when nothing needed copying — the pushed set remains the
+      // authority on what has actually landed.
+      const highest = rows.reduce((max, m) => Math.max(max, m.createdAt), through);
+      if (highest > through) {
+        try { localStorage.setItem(copiedThroughKey(uid), String(highest)); } catch { /* ignore */ }
+      }
+      if (todo.length === 0) return { pushed: 0 };
+      for (const m of todo) {
+        const payload = selfCopyPayload(m);
+        if (!payload) continue;
+        try {
+          const cipher = encryptForPeer(packPayload(payload), CURRENT!.publicKey, CURRENT!.privateKey);
+          const res = await sendCipher(uid, cipher);
+          if (res.ok) { pushedSet.add(m.id); newly++; }
+        } catch { /* retry next cycle */ }
+      }
+      if (newly > 0) {
+        writePushedSet(uid, pushedSet);
+        console.log(`[replication] cloud-copied ${newly} local message${newly === 1 ? "" : "s"}`);
+      }
+    } finally { AUTO_PUSH_IN_FLIGHT = null; }
+    return { pushed: newly };
+  })();
+  return AUTO_PUSH_IN_FLIGHT;
+}
+
+export function scheduleAutoPush(): void {
+  void replicateUnpushed().catch(() => { /* the loop will retry */ });
+}
+
+// ---- outbox ----
+//
+// A send that can't reach the relay is queued, not lost. Flushed on
+// boot and on every socket reconnect.
+let FLUSH_IN_FLIGHT: Promise<{ sent: number; left: number }> | null = null;
+
+export async function flushOutbox(): Promise<{ sent: number; left: number }> {
+  if (!CURRENT) return { sent: 0, left: 0 };
+  if (FLUSH_IN_FLIGHT) return FLUSH_IN_FLIGHT;
+  FLUSH_IN_FLIGHT = (async () => {
+    let sent = 0, left = 0;
+    try {
+      const rows = await listOutbox();
+      for (const row of rows) {
+        try {
+          const payload = unpackPayload(row.packed);
+          const res = await fanOut(row.peerId, row.isGroup, payload);
+          if (res.ok) { await dequeueOutbox(row.id); sent++; }
+          else { await bumpOutboxAttempt(row.id, res.error); left++; }
+        } catch (e) {
+          await bumpOutboxAttempt(row.id, (e as Error).message).catch(() => { /* ignore */ });
+          left++;
+        }
+      }
+      if (sent > 0) console.log(`[outbox] delivered ${sent} queued message${sent === 1 ? "" : "s"}`);
+    } finally { FLUSH_IN_FLIGHT = null; }
+    return { sent, left };
+  })();
+  return FLUSH_IN_FLIGHT;
+}
+
+// ---- diagnostics ----
+
+const SYNC_DIAG_KEY = "aegent.sync.diag";
+type SyncDiag = {
+  lastPullAt?: number; lastPulled?: number; lastReason?: string;
+  skipped?: Record<string, number>;
+  lastPushedAt?: number; lastPushed?: number;
+  serverTotal?: number; localTotal?: number; pending?: number;
+};
+function readDiag(): SyncDiag {
+  try { return JSON.parse(localStorage.getItem(SYNC_DIAG_KEY) ?? "{}"); }
+  catch { return {}; }
+}
+function writeDiag(patch: Partial<SyncDiag>): void {
   try {
-    const cur = Number(localStorage.getItem(key) ?? 0) || 0;
-    if (createdAt + 1 > cur) localStorage.setItem(key, String(createdAt + 1));
+    const cur = readDiag();
+    localStorage.setItem(SYNC_DIAG_KEY, JSON.stringify({ ...cur, ...patch }));
   } catch { /* ignore */ }
 }
+function bumpSkipCounter(reason: string): void {
+  const d = readDiag();
+  const skipped = { ...(d.skipped ?? {}) };
+  skipped[reason] = (skipped[reason] ?? 0) + 1;
+  writeDiag({ skipped });
+}
+export function readSyncDiag(): SyncDiag { return readDiag(); }
 
 // ---- registration / login ----
 
 export async function register(input: {
   email: string; phone?: string; displayName: string; password: string;
 }): Promise<{ session: Session }> {
-  // No more recovery phrase at signup. New-device restore flows through
-  // the server-held `wrappedPriv`: password derives the wrap key, which
-  // unwraps the private key, which decrypts the ciphertext inbox
-  // (including self-echoes) at next login. The recovery phrase was a
-  // redundant backup path people were being told to safeguard.
-  //
-  // An optional downloadable "recovery kit" lives in Settings for users
-  // who want an offline fallback; it is never forced on anyone.
   await initCrypto();
   const id = generateIdentity();
   const salt = newKdfSalt();
-  const [wrapKey, storeKey] = await Promise.all([
-    deriveKey(input.password, salt, "priv-wrap"),
-    deriveKey(input.password, salt, "local-store"),
-  ]);
+  const wrapKey = await deriveKey(input.password, salt, "priv-wrap");
+  // One wrapper at signup: the password. Signing in with it on any
+  // device unwraps this exact key and the whole history decrypts. A
+  // second wrapper (recovery code) is available in Settings for anyone
+  // who wants a fallback, but it is never forced at signup.
   const wrappedPriv = secretBoxSeal(wrapKey, id.privateKey);
 
   const { user, token, refreshToken } = await api.register({
@@ -258,17 +599,19 @@ export async function register(input: {
   setToken(token);
   setRefreshToken(refreshToken);
   connectSocket(token);
-  openStore(user.id, storeKey);
+  const storeKey = await openLocalStore(user.id, id.privateKey);
 
   const me = await api.me();
   CURRENT = { user: me, privateKey: id.privateKey, publicKey: id.publicKey };
   const bk = backupKeyFromPrivate(id.privateKey);
   persistKeys(id.privateKey, storeKey, bk);
+  startReplication();
   return { session: CURRENT };
 }
 
-// Called after every successful send to keep the cloud backup fresh.
-// Throttled inside scheduleAutoBackup; safe to spam.
+// Called after every successful send to keep the cloud backup fresh AND
+// to replicate the message to the user's own inbox so other devices
+// pull it. Throttled internally; safe to spam.
 export function tickAutoBackup(): void {
   const bk = backupKey();
   const me = CURRENT?.user;
@@ -277,7 +620,12 @@ export function tickAutoBackup(): void {
     id: me.id, email: me.email, handle: me.handle,
     displayName: me.displayName, publicKey: me.publicKey,
   });
+  scheduleAutoPush();
 }
+
+// Re-exported so UI code has one import for "is my history safe".
+export { onReplication, replicationState, replicationSummary } from "./replication.js";
+export type { ReplicationPhase, ReplicationState } from "./replication.js";
 
 export async function login(input: { email: string; password: string }): Promise<Session> {
   await initCrypto();
@@ -285,8 +633,9 @@ export async function login(input: { email: string; password: string }): Promise
     ...input, deviceLabel: describeDevice(),
   });
   const salt = b64.decode(kdfSalt);
-  const [wrapKey, storeKey] = await Promise.all([
+  const [wrapKey, legacyStoreKey] = await Promise.all([
     deriveKey(input.password, salt, "priv-wrap"),
+    // Only needed to convert a store sealed by an older build.
     deriveKey(input.password, salt, "local-store"),
   ]);
   const privateKey = secretBoxOpen(wrapKey, wrappedPriv);
@@ -294,87 +643,77 @@ export async function login(input: { email: string; password: string }): Promise
   setRefreshToken(refreshToken);
   connectSocket(token);
   const me = await api.me();
-  openStore(me.id, storeKey);
+  const storeKey = await openLocalStore(me.id, privateKey, legacyStoreKey);
   CURRENT = { user: me, privateKey, publicKey: b64.decode(me.publicKey) };
-  // Backup key is deterministic from the private key, so this login
-  // on a brand-new device gets the same key that produced any prior
-  // backups on the account — no separate recovery-code prompt needed.
+  // Backup key is deterministic from the private key, so a login on a
+  // brand-new device gets the same key that produced any prior backup.
   const bk = backupKeyFromPrivate(privateKey);
   persistKeys(privateKey, storeKey, bk);
-  // Best-effort cloud-restore: if this account has a backup on the
-  // relay and our local store is empty (or missing content), pull
-  // and rehydrate. Runs in the background — login returns
-  // immediately either way.
   attemptCloudRestore(bk, me.id, storeKey).catch(() => { /* silent */ });
-  // Full inbox drain (all messages since watermark, delivered or not).
-  // On a fresh device with no watermark this pulls the entire history
-  // from the server — the app's "nothing is lost, even signed out"
-  // guarantee comes from this line.
-  pullInbox().catch((err) => console.warn("[login] pullInbox failed", err));
+  // Sign-in force-drains once: every sign-in rebuilds everything this
+  // device doesn't yet have, old or new, rather than trusting a local
+  // cursor. From here on the replication loop keeps it converged.
+  fullResyncInbox()
+    .catch((err) => console.warn("[login] force resync failed", err))
+    .finally(() => startReplication());
   return CURRENT;
 }
 
-// Fetch the encrypted backup with the JWT already established by
-// login(), decrypt with the private-key-derived backup key, and merge
-// missing messages/contacts into the local store. Idempotent — running
-// twice does nothing the second time.
+// Fetch the encrypted backup with the JWT from login, decrypt with the
+// private-key-derived backup key, and merge anything missing into the
+// local store. Idempotent.
 async function attemptCloudRestore(bk: Uint8Array, userId: string, storeKey: Uint8Array): Promise<void> {
   const t = loadToken();
   if (!t) return;
   const r = await fetch(apiUrl("/api/backup"), {
     headers: { authorization: `Bearer ${t}` },
   });
-  if (!r.ok) return; // 404 = no backup yet, treat as "nothing to restore"
+  if (!r.ok) return; // 404 = no backup yet
   const ct = new Uint8Array(await r.arrayBuffer());
   try {
     const { openBackupCiphertext, rehydrateInto } = await import("./backup.js");
     const payload = openBackupCiphertext(bk, ct);
     await rehydrateInto(payload, { id: userId, storeKey });
   } catch (e) {
-    // Wrong key (old v1 backup encrypted with recovery-phrase key), or
-    // corrupted bytes. Silent — user still has their live session.
     console.warn("[session] cloud restore skipped:", (e as Error).message);
   }
 }
 
-// Attempt a silent session restore at boot: if we have a JWT and both
-// persisted keys, validate the JWT by fetching /me, then reopen the
-// store and socket. Any failure (bad/expired token, tampered keys)
-// falls back to a clean state so the user sees the auth screen.
+// Silent session restore at boot.
 export async function tryRestoreSession(): Promise<Session | null> {
   await initCrypto();
   const token = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.token");
   const refresh = (typeof localStorage !== "undefined") && localStorage.getItem("aegent.refresh");
   const keys = loadPersistedKeys();
-  // Need the crypto keys at minimum; either the access token OR a
-  // refresh token can establish the session (the refresh will be
-  // auto-exchanged on the first authed request if the access is dead).
   if (!keys || (!token && !refresh)) return null;
   if (token) setToken(token);
   if (refresh) setRefreshToken(refresh);
   try {
-    const me = await api.me(); // implicitly validates (and auto-refreshes if needed)
+    const me = await api.me(); // implicitly validates (and auto-refreshes)
     connectSocket(loadToken() ?? "");
-    openStore(me.id, keys.storeKey);
+    // The persisted store key may predate the private-key derivation;
+    // pass it as the legacy key so rows get converted once.
+    const storeKey = await openLocalStore(me.id, keys.privateKey, keys.storeKey);
+    persistKeys(keys.privateKey, storeKey, keys.backupKey ?? backupKeyFromPrivate(keys.privateKey));
     CURRENT = {
       user: me,
       privateKey: keys.privateKey,
       publicKey: b64.decode(me.publicKey),
     };
-    // Restore path: pull anything the server has that this device
-    // doesn't. Watermark-scoped so it's cheap on repeat launches and
-    // full on a fresh reinstall.
-    pullInbox().catch((err) => console.warn("[restore] pullInbox failed", err));
+    // The replication loop takes it from here: catch-up drain, outbox
+    // flush, and cloud-copy of anything local, on a timer and on every
+    // reconnect — no user action anywhere in that path.
+    startReplication();
     return CURRENT;
   } catch {
-    // Token no longer valid, or /me refused — full reset so the user
-    // isn't stuck in a half-restored state.
     logout();
     return null;
   }
 }
 
 export function logout() {
+  SWEPT_THIS_SESSION = false;
+  stopReplication();
   disconnectSocket();
   closeStore();
   setToken(null);
@@ -383,9 +722,92 @@ export function logout() {
   CURRENT = null;
 }
 
-// Short human-readable device label stored with the refresh token so
-// Settings > Devices can show "Android (Chrome Mobile)" instead of a
-// random id. Non-identifying — just UA family + platform family.
+// ---- key vault: recovery key, password change, password reset ----
+
+// Mint (or re-mint) the recovery key for the signed-in account and
+// upload the resulting wrapper. Returns the phrase so the UI can show
+// it once; we never store it.
+export async function issueRecoveryKey(): Promise<string> {
+  if (!CURRENT) throw new Error("no_session");
+  const recSalt = newKdfSalt();
+  const { phrase, entropy } = newRecoveryPhrase();
+  const recKey = await recoveryWrapKey(entropy, recSalt);
+  await api.putRecovery({
+    wrappedPrivRec: secretBoxSeal(recKey, CURRENT.privateKey),
+    recSalt: b64.encode(recSalt),
+  });
+  return phrase;
+}
+
+// Change the password of the signed-in account. The private key is
+// re-wrapped, not re-generated, and the local store key doesn't depend
+// on the password at all — so nothing in the history moves.
+export async function changePassword(input: {
+  currentPassword: string; newPassword: string;
+}): Promise<void> {
+  if (!CURRENT) throw new Error("no_session");
+  const salt = newKdfSalt();
+  const wrapKey = await deriveKey(input.newPassword, salt, "priv-wrap");
+  await api.changePassword({
+    currentPassword: input.currentPassword,
+    newPassword: input.newPassword,
+    wrappedPriv: secretBoxSeal(wrapKey, CURRENT.privateKey),
+    kdfSalt: b64.encode(salt),
+  });
+}
+
+// Reset a forgotten password with the recovery key, then sign in.
+//
+// The server hands back the recovery wrapper plus a nonce boxed to the
+// account's public key. We unwrap the private key with the recovery
+// code, open the box to prove possession, and upload a fresh
+// password-wrapper for that same private key. Every stored envelope
+// stays readable, because the key that reads them never changed.
+export async function resetPasswordWithRecoveryKey(input: {
+  email: string; recoveryPhrase: string; newPassword: string;
+}): Promise<Session> {
+  await initCrypto();
+  const entropy = entropyFromPhrase(input.recoveryPhrase);
+  const ch = await api.recoveryChallenge(input.email);
+  const recKey = await recoveryWrapKey(entropy, b64.decode(ch.recSalt));
+  let privateKey: Uint8Array;
+  try {
+    privateKey = secretBoxOpen(recKey, ch.wrappedPrivRec);
+  } catch {
+    throw new Error("That recovery key doesn't match this account.");
+  }
+  // Prove we hold the private key by opening the server's box.
+  const proof = decryptFromPeer(ch.boxed, b64.decode(ch.serverPublicKey), privateKey);
+
+  const salt = newKdfSalt();
+  const wrapKey = await deriveKey(input.newPassword, salt, "priv-wrap");
+  const { user, token, refreshToken } = await api.resetPassword({
+    challengeId: ch.challengeId,
+    proof,
+    newPassword: input.newPassword,
+    wrappedPriv: secretBoxSeal(wrapKey, privateKey),
+    kdfSalt: b64.encode(salt),
+    deviceLabel: describeDevice(),
+  });
+
+  setToken(token);
+  setRefreshToken(refreshToken);
+  connectSocket(token);
+  const me = await api.me();
+  const storeKey = await openLocalStore(me.id, privateKey);
+  CURRENT = { user: me, privateKey, publicKey: b64.decode(me.publicKey) };
+  const bk = backupKeyFromPrivate(privateKey);
+  persistKeys(privateKey, storeKey, bk);
+  attemptCloudRestore(bk, me.id, storeKey).catch(() => { /* silent */ });
+  fullResyncInbox()
+    .catch((err) => console.warn("[reset] force resync failed", err))
+    .finally(() => startReplication());
+  void user;
+  return CURRENT;
+}
+
+// ---- device label ----
+
 function describeDevice(): string {
   try {
     const ua = navigator.userAgent;
@@ -411,30 +833,23 @@ export async function refreshMe() {
 
 // ---- send / receive ----
 
-// One envelope per recipient. For 1:1 that's one call; for a group we
-// fan out and skip our own id (we keep a local copy anyway).
-export async function sendToPeer(
-  targetPeerId: string,   // user id (1:1) or group id
+// Fan out one payload: an envelope per recipient, plus a self-copy so
+// the relay holds the sender's history too. For 1:1 that's two
+// envelopes; for a group it's one per member (self included).
+async function fanOut(
+  targetPeerId: string,
   isGroup: boolean,
   payload: Payload,
 ): Promise<{ ok: true; envelopeId: string } | { ok: false; error: string }> {
   if (!CURRENT) return { ok: false, error: "no_session" };
   const selfId = CURRENT.user.id;
 
-  // Stamp the thread id on the payload so any self-copy that arrives
-  // back through the socket knows which chat to file itself under.
-  // Non-self recipients derive the thread from env.senderId/groupId
-  // and ignore this field.
+  // `_thread` lets a self-copy file itself under the right chat on
+  // arrival — recipient_id is self, so there's no routing info
+  // otherwise. Third-party recipients ignore it.
   const withThread: Payload = { ...payload, _thread: targetPeerId } as Payload;
   const packed = packPayload(withThread);
 
-  // Compose the recipient list:
-  //  - 1:1     → [targetPeerId, self]
-  //  - group   → every member (including self)
-  // The self-copy is what gives us server-side replication: every
-  // message you send is now on the relay as ciphertext for you too,
-  // so a new device restores by draining the inbox — no separate
-  // backup dance for chat content.
   let recipients: string[] = [];
   if (isGroup) {
     const g = await getGroup(targetPeerId);
@@ -445,118 +860,166 @@ export async function sendToPeer(
   }
   if (recipients.length === 0) return { ok: false, error: "no_recipients" };
 
-  // Cache self's public key so we don't need a store lookup for the
-  // self-copy — it's the same key already resident in CURRENT.
   const selfPubKey = CURRENT.publicKey;
-
   let firstEnvelopeId: string | undefined;
+  let selfCopyLanded = false;
   for (const rid of recipients) {
     let peerPubKey: Uint8Array | null = null;
     if (rid === selfId) {
       peerPubKey = selfPubKey;
     } else {
-      const peer = await getContact(rid);
+      const peer = await getContact(rid) ?? await ensureContact(rid);
       if (!peer) continue;
       peerPubKey = b64.decode(peer.publicKey);
     }
     const cipher = encryptForPeer(packed, peerPubKey, CURRENT.privateKey);
     const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined);
     if (!res.ok) return { ok: false, error: res.error };
+    if (rid === selfId) selfCopyLanded = true;
     firstEnvelopeId = firstEnvelopeId ?? res.envelope.id;
   }
+  // The self-copy is this message's cloud durability; record it so the
+  // background replicator doesn't upload a second one.
+  const msgId = (payload as { msgId?: string }).msgId;
+  if (selfCopyLanded && msgId) markPushed(selfId, msgId);
   return { ok: true, envelopeId: firstEnvelopeId ?? "" };
 }
 
-// High-level: compose + persist + fan-out for a text message.
+// Kept as the public name used by the agent tools.
+export const sendToPeer = fanOut;
+
+// Try to deliver; queue on failure. The caller's message is already in
+// the local store by this point, so "offline" costs a delay, never the
+// content.
+async function deliverOrQueue(
+  targetPeerId: string, isGroup: boolean, payload: Payload,
+): Promise<{ ok: true; queued: boolean } | { ok: false; error: string }> {
+  const res = await fanOut(targetPeerId, isGroup, payload).catch(
+    (e): { ok: false; error: string } => ({ ok: false, error: (e as Error).message }),
+  );
+  if (res.ok) return { ok: true, queued: false };
+  // Unrecoverable addressing problems shouldn't sit in a queue forever.
+  if (res.error === "no_session" || res.error === "unknown_group" || res.error === "no_recipients") {
+    return { ok: false, error: res.error };
+  }
+  const msgId = (payload as { msgId?: string }).msgId ?? newMsgId();
+  await enqueueOutbox({
+    id: msgId,
+    peerId: targetPeerId,
+    isGroup,
+    packed: packPayload({ ...payload, _thread: targetPeerId } as Payload),
+  });
+  console.log(`[outbox] queued ${msgId} (${res.error})`);
+  return { ok: true, queued: true };
+}
+
+// High-level: persist + fan-out for a text message. Persisting FIRST is
+// deliberate — a send that fails must never take the user's words with
+// it.
 export async function sendText(
   targetPeerId: string, isGroup: boolean, body: string,
   replyTo?: { id: string; preview: string; author: string },
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; queued?: boolean } | { ok: false; error: string }> {
+  if (!CURRENT) return { ok: false, error: "no_session" };
   const payload: Payload = {
     v: 1, t: "text", msgId: newMsgId(), body,
     replyTo: replyTo && { id: replyTo.id, preview: replyTo.preview, author: replyTo.author },
   };
-  const res = await sendToPeer(targetPeerId, isGroup, payload);
-  if (!res.ok) return res;
   await saveTextMessage({
     id: payload.msgId,
     peerId: targetPeerId,
-    senderId: CURRENT!.user.id,
+    senderId: CURRENT.user.id,
     direction: "out",
     createdAt: Date.now(),
     body,
     replyTo,
   });
+  const res = await deliverOrQueue(targetPeerId, isGroup, payload);
+  if (!res.ok) return res;
   tickAutoBackup();
-  return { ok: true };
+  return { ok: true, queued: res.queued };
 }
 
 export async function sendMedia(
   targetPeerId: string, isGroup: boolean, media: MediaRef, caption?: string,
   replyTo?: { id: string; preview: string; author: string },
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; queued?: boolean } | { ok: false; error: string }> {
+  if (!CURRENT) return { ok: false, error: "no_session" };
   const payload: Payload = {
     v: 1, t: "media", msgId: newMsgId(), caption, media,
     replyTo: replyTo && { id: replyTo.id, preview: replyTo.preview, author: replyTo.author },
   };
-  const res = await sendToPeer(targetPeerId, isGroup, payload);
-  if (!res.ok) return res;
   await saveMediaMessage({
     id: payload.msgId,
     peerId: targetPeerId,
-    senderId: CURRENT!.user.id,
+    senderId: CURRENT.user.id,
     direction: "out",
     createdAt: Date.now(),
     caption, media, replyTo,
   });
+  const res = await deliverOrQueue(targetPeerId, isGroup, payload);
+  if (!res.ok) return res;
   tickAutoBackup();
-  return { ok: true };
+  return { ok: true, queued: res.queued };
 }
 
 export async function sendReaction(
   targetPeerId: string, isGroup: boolean, targetMsgId: string, emoji: string,
 ) {
   const payload: Payload = { v: 1, t: "reaction", msgId: newMsgId(), targetId: targetMsgId, emoji };
-  await sendToPeer(targetPeerId, isGroup, payload);
   await applyReaction(targetMsgId, CURRENT!.user.id, emoji);
+  await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
 export async function sendEdit(
   targetPeerId: string, isGroup: boolean, targetMsgId: string, body: string,
 ) {
   const payload: Payload = { v: 1, t: "edit", msgId: newMsgId(), targetId: targetMsgId, body };
-  await sendToPeer(targetPeerId, isGroup, payload);
   await applyEdit(targetMsgId, body);
+  await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
 export async function sendDelete(targetPeerId: string, isGroup: boolean, targetMsgId: string) {
   const payload: Payload = { v: 1, t: "delete", msgId: newMsgId(), targetId: targetMsgId };
-  await sendToPeer(targetPeerId, isGroup, payload);
   await applyDelete(targetMsgId);
+  await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
 // ---- receive path ----
 
-// Decode one incoming envelope. Returns the resolved thread id so the
-// UI can bump/highlight it. Also handles reactions/edits/deletes by
-// mutating the target message in the local store.
+// Decode one envelope into the local store. Returns the resolved thread
+// so the UI can bump it. Every outcome is recorded in the ledger:
+// success means we never process it again, failure means we will.
 export async function ingestEnvelope(env: {
   id: string; senderId: string; recipientId: string; groupId: string | null;
   ciphertext: string; createdAt: number;
-}): Promise<{ threadId: string; msgId: string } | null> {
+}, opts: { ack?: boolean } = {}): Promise<{ threadId: string; msgId: string } | null> {
   if (!CURRENT) return null;
+  const ack = opts.ack !== false;
   const selfId = CURRENT.user.id;
   const isSelfEcho = env.senderId === selfId;
 
-  // For a self-echo we decrypt with (self-pub, self-priv). For a
-  // normal inbound we look up the sender's public key. `ensureContact`
-  // for `self` would try to fetch our own contact record — skip.
+  // For a self-echo we decrypt with (self-pub, self-priv). For normal
+  // inbound we need the sender's public key.
   let peerPubKey: Uint8Array;
   if (isSelfEcho) {
     peerPubKey = CURRENT.publicKey;
   } else {
-    const sender = await ensureContact(env.senderId);
-    if (!sender) return null;
+    // Retry: a single network hiccup during a fresh-device drain used
+    // to silently drop that sender's entire history.
+    let sender: Awaited<ReturnType<typeof ensureContact>> = null;
+    for (let attempt = 0; attempt < 3 && !sender; attempt++) {
+      sender = await ensureContact(env.senderId);
+      if (!sender && attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
+    if (!sender) {
+      // NOT dropped: parked in the ledger with its ciphertext so the
+      // next drain retries it.
+      console.warn("[ingest] contact lookup failed", env.id, "sender:", env.senderId);
+      bumpSkipCounter("contact_lookup");
+      await ledgerMarkPending(env, "contact_lookup").catch(() => { /* ignore */ });
+      return null;
+    }
     peerPubKey = b64.decode(sender.publicKey);
   }
 
@@ -564,20 +1027,35 @@ export async function ingestEnvelope(env: {
   try {
     packed = decryptFromPeer(env.ciphertext, peerPubKey, CURRENT.privateKey);
   } catch (e) {
+    // A decrypt failure won't fix itself by retrying with the same key,
+    // but it might after a key-material repair, so keep the ciphertext
+    // and mark it pending rather than acking it into oblivion.
     console.warn("[ingest] decrypt failed", env.id, (e as Error).message);
-    // Ack anyway so a broken message doesn't clog the inbox forever.
-    await api.ack([env.id]).catch(() => { /* ignore */ });
+    bumpSkipCounter("decrypt");
+    await ledgerMarkPending(env, "decrypt").catch(() => { /* ignore */ });
     return null;
   }
-  const payload = unpackPayload(packed);
 
-  // Thread id: for a self-echo the recipient_id is self, so we
-  // can't infer the target from server routing. The sender stamped
-  // `_thread` for exactly this case.
+  let payload: Payload;
+  try { payload = unpackPayload(packed); }
+  catch (e) {
+    bumpSkipCounter("payload");
+    await ledgerMarkPending(env, `payload:${(e as Error).message}`).catch(() => { /* ignore */ });
+    return null;
+  }
+
+  // Thread id: a self-echo is addressed to us, so server routing can't
+  // tell us which chat it belongs to — the sender stamped `_thread`.
   const threadId = isSelfEcho
     ? (payload._thread ?? env.groupId ?? env.recipientId)
     : (env.groupId ?? env.senderId);
   const direction: "in" | "out" = isSelfEcho ? "out" : "in";
+
+  // Make sure the thread has a metadata row. Without this, a new device
+  // that drains its own sent copies for a chat has the messages but no
+  // contact — and the chat list, which is built from contacts, showed
+  // nothing at all. This is the bug behind "new device, empty inbox".
+  await ensureThreadEntity(threadId, !!env.groupId);
 
   if (payload.t === "text") {
     await saveTextMessage({
@@ -607,11 +1085,34 @@ export async function ingestEnvelope(env: {
   } else if (payload.t === "delete") {
     await applyDelete(payload.targetId);
   }
-  // Ack once the ingest actually landed (both for normal inbound
-  // and self-echoes so the server-side delivered_at flips).
-  await api.ack([env.id]).catch(() => { /* best-effort */ });
+
+  // A self-echo IS the cloud copy of one of our own sends; remember that
+  // so the replicator on this device doesn't upload a duplicate.
+  if (isSelfEcho) markPushed(selfId, payload.msgId);
+
+  await ledgerMarkOk(env.id, env.createdAt).catch(() => { /* ignore */ });
+  if (ack) await api.ack([env.id]).catch(() => { /* best-effort */ });
   await markDelivered(env.id).catch(() => { /* ignore */ });
-  return { threadId, msgId: (payload as { msgId?: string }).msgId ?? env.id };
+  return { threadId, msgId: payload.msgId };
+}
+
+// Resolve metadata for a thread id, trying the contact directory first
+// and groups second (or the other way around when we have a hint).
+// Failure is tolerated: listThreads() lists message-bearing threads even
+// without metadata, so history is visible either way.
+async function ensureThreadEntity(threadId: string, groupHint: boolean): Promise<void> {
+  if (!CURRENT || threadId === CURRENT.user.id) return;
+  try {
+    if (await getContact(threadId)) return;
+    if (await getGroup(threadId)) return;
+    if (groupHint) {
+      if (await ensureGroup(threadId)) return;
+      await ensureContact(threadId);
+    } else {
+      if (await ensureContact(threadId)) return;
+      await ensureGroup(threadId);
+    }
+  } catch { /* metadata is a nicety; messages are the point */ }
 }
 
 export async function ensureContact(id: string): Promise<{ id: string; publicKey: string; displayName: string } | null> {
@@ -634,7 +1135,6 @@ export async function ensureGroup(id: string) {
   if (existing) return existing;
   try {
     const g = await api.getGroup(id);
-    // Cache each member as a contact too.
     for (const mid of g.memberIds) await ensureContact(mid);
     const row = {
       id: g.id, name: g.name, memberIds: g.memberIds,
@@ -649,7 +1149,7 @@ export async function ensureGroup(id: string) {
 // ---- external helpers ----
 export function myId(): string { return CURRENT!.user.id; }
 
-// Mark reads and notify server if the user has read receipts enabled.
+// Mark reads and notify the server if read receipts are enabled.
 export async function reportRead(envelopeIds: string[]) {
   if (envelopeIds.length === 0) return;
   for (const id of envelopeIds) await markRead(id);
@@ -657,3 +1157,6 @@ export async function reportRead(envelopeIds: string[]) {
     try { await api.markRead(envelopeIds); } catch { /* best-effort */ }
   }
 }
+
+// Consumed so tree-shaking keeps the type import honest.
+export type { PublicUser };
