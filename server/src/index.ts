@@ -36,7 +36,11 @@ import {
 } from "./recovery.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
 import { createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
-import { MAX_BLOB_BYTES, readBlob, storeBlob } from "./blobs.js";
+import { MAX_BLOB_BYTES, readBlob, readBlobFor, storeBlob } from "./blobs.js";
+import {
+  MAX_AUDIENCE, archiveFor, deleteEntry, feedFor, granteesOf, markSeen,
+  publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
+} from "./diary.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentTurn } from "./agent.js";
 
@@ -579,11 +583,111 @@ app.post("/api/backup/by-pubkey", async (req, res) => {
 
 app.get("/api/blobs/:id", authed, async (req, res) => {
   try {
-    const b = await readBlob(req.params.id);
+    // 404 rather than 403 for a blob the caller may not read: the
+    // difference between "gone" and "not yours" is itself information
+    // about someone else's diary.
+    const b = await readBlobFor(req.params.id, (req as AuthedReq).userId);
     if (!b) return res.status(404).json({ error: "not_found" });
     res.setHeader("content-type", b.mime);
     res.setHeader("x-byte-size", String(b.byte_size));
     res.send(Buffer.from(b.ciphertext));
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- diary ----
+//
+// A separate rail from messages on purpose. See diary.ts for why expiry
+// is implemented as grant deletion, and why none of this is allowed near
+// the envelope ledger.
+
+const diaryGrant = z.object({ viewerId: z.string().min(1), wrappedKey: z.string().min(1) });
+
+app.post("/api/diary/entries", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      id: z.string().min(1).max(100),
+      dayKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      tzOffsetMin: z.number().int().min(-900).max(900),
+      seq: z.number().int().min(0),
+      kind: z.enum(["text", "media"]),
+      createdAt: z.number().int(),
+      bodyCt: z.string().min(1),
+      authorKey: z.string().min(1),
+      grants: z.array(diaryGrant).max(MAX_AUDIENCE),
+      blobIds: z.array(z.string()).max(8).optional(),
+    }).parse(req.body);
+
+    const authorId = (req as AuthedReq).userId;
+    const out = await publishEntry(authorId, { ...body, blobIds: body.blobIds ?? [] });
+
+    // Liveness only: metadata, never the key or the ciphertext. The
+    // client treats this as "pull now", the same way live message
+    // delivery is an accelerator rather than a source of truth.
+    for (const viewerId of await granteesOf(body.id)) {
+      if (viewerId === authorId) continue;
+      io.to(`u:${viewerId}`).emit("diary", {
+        entryId: out.id, authorId, createdAt: out.createdAt, expiresAt: out.expiresAt,
+      });
+    }
+    res.json(out);
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/diary/feed", authed, async (req, res) => {
+  try {
+    const entries = await feedFor((req as AuthedReq).userId, {
+      since: Number(req.query.since ?? 0) || 0,
+      afterId: String(req.query.afterId ?? "") || undefined,
+      limit: Number(req.query.limit ?? 50) || 50,
+    });
+    // Opportunistic and throttled — correctness already comes from every
+    // read joining a live grant.
+    sweepExpiredGrants().catch(() => { /* hygiene only */ });
+    res.json(diaryPage(entries, Number(req.query.limit ?? 50) || 50));
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/diary/mine", authed, async (req, res) => {
+  try {
+    const entries = await archiveFor((req as AuthedReq).userId, {
+      since: Number(req.query.since ?? 0) || 0,
+      afterId: String(req.query.afterId ?? "") || undefined,
+      limit: Number(req.query.limit ?? 50) || 50,
+    });
+    res.json(diaryPage(entries, Number(req.query.limit ?? 50) || 50));
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/diary/seen", authed, async (req, res) => {
+  try {
+    const body = z.object({ entryIds: z.array(z.string()).max(200) }).parse(req.body);
+    await markSeen((req as AuthedReq).userId, body.entryIds);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/diary/entries/:id/views", authed, async (req, res) => {
+  try { res.json(await viewsOf((req as AuthedReq).userId, req.params.id)); }
+  catch (e) { handleError(res, e); }
+});
+
+app.patch("/api/diary/entries/:id/grants", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      add: z.array(diaryGrant).max(MAX_AUDIENCE).optional(),
+      remove: z.array(z.string()).max(MAX_AUDIENCE).optional(),
+    }).parse(req.body);
+    await updateGrants((req as AuthedReq).userId, req.params.id, {
+      add: body.add ?? [], remove: body.remove ?? [],
+    });
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.delete("/api/diary/entries/:id", authed, async (req, res) => {
+  try {
+    await deleteEntry((req as AuthedReq).userId, req.params.id);
+    res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });
 
@@ -717,6 +821,37 @@ function authed(req: express.Request, res: express.Response, next: express.NextF
     (req as AuthedReq).userId = verifyToken(m[1]);
     next();
   } catch { res.status(401).json({ error: "unauthorized" }); }
+}
+
+// Shapes a diary page the same way the inbox pages, so the client's
+// cursor logic reads identically on both rails. `serverNow` is what the
+// client uses as its expiry clock — a device whose own clock has moved
+// backwards would otherwise resurrect entries it should have dropped.
+function diaryPage(
+  rows: Array<{ id: string; author_id: string; day_key: string; tz_offset_min: number;
+    seq: number; kind: string; body_ct: string; created_at: number;
+    wrapped_key: string; expires_at: number | null; seen_at: number | null }>,
+  limit: number,
+) {
+  const last = rows[rows.length - 1];
+  return {
+    entries: rows.map((r) => ({
+      id: r.id,
+      authorId: r.author_id,
+      dayKey: r.day_key,
+      tzOffsetMin: Number(r.tz_offset_min),
+      seq: Number(r.seq),
+      kind: r.kind,
+      bodyCt: r.body_ct,
+      wrappedKey: r.wrapped_key,
+      createdAt: Number(r.created_at),
+      expiresAt: r.expires_at === null ? null : Number(r.expires_at),
+      seenAt: r.seen_at === null ? null : Number(r.seen_at),
+    })),
+    serverNow: Date.now(),
+    more: rows.length === limit,
+    cursor: last ? { since: Number(last.created_at), afterId: last.id } : null,
+  };
 }
 
 function envelopeOf(m: MessageRow) {

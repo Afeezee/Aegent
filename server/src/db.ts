@@ -338,6 +338,61 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_recovery_user
     ON recovery_challenges(user_id, created_at);
+
+  -- Diary.
+  --
+  -- An entry is sealed once with a random per-entry key; diary_grants
+  -- holds that key sealed to each person who may read it. Expiry is the
+  -- deletion of a grant rather than of content, which is what lets the
+  -- author keep the entry forever while a viewer's access ends — the
+  -- server never holds the key in the clear either way.
+  --
+  -- Deliberately separate from the messages table: that one is the rail the
+  -- availability guarantee is built on, and a row designed to become
+  -- unreadable on schedule inside that accounting would be reported as a
+  -- permanent deficit.
+  CREATE TABLE IF NOT EXISTS diary_entries (
+    id             TEXT PRIMARY KEY,
+    author_id      TEXT NOT NULL REFERENCES users(id),
+    -- 'YYYY-MM-DD' in the AUTHOR's timezone, computed on their device.
+    -- Opaque here: the relay never derives a date.
+    day_key        TEXT NOT NULL,
+    tz_offset_min  INTEGER NOT NULL,
+    seq            INTEGER NOT NULL,
+    kind           TEXT NOT NULL,
+    body_ct        TEXT NOT NULL,
+    created_at     ${BIG} NOT NULL,
+    revoked_at     ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_diary_author
+    ON diary_entries(author_id, created_at, id);
+
+  CREATE TABLE IF NOT EXISTS diary_grants (
+    entry_id     TEXT NOT NULL REFERENCES diary_entries(id),
+    viewer_id    TEXT NOT NULL REFERENCES users(id),
+    -- The entry key, sealed to this viewer. The relay stores it and
+    -- cannot open it.
+    wrapped_key  TEXT NOT NULL,
+    created_at   ${BIG} NOT NULL,
+    -- NULL means never: that is the author's own grant, i.e. the archive.
+    expires_at   ${BIG},
+    seen_at      ${BIG},
+    PRIMARY KEY (entry_id, viewer_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_diary_grants_viewer
+    ON diary_grants(viewer_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_diary_grants_expiry
+    ON diary_grants(expires_at);
+
+  -- Binds an uploaded blob to an entry so the blob can be access-
+  -- controlled. Chat blobs have no row here and keep their existing
+  -- capability model, because their reference lives inside ciphertext
+  -- and the relay cannot know who may read them.
+  CREATE TABLE IF NOT EXISTS diary_blobs (
+    blob_id   TEXT PRIMARY KEY REFERENCES blobs(id),
+    entry_id  TEXT NOT NULL REFERENCES diary_entries(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_diary_blobs_entry ON diary_blobs(entry_id);
 `;
 
 // Columns added after the first release. Both backends get the same
