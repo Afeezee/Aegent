@@ -260,6 +260,70 @@ export async function gcDiary(): Promise<number> {
   return removed;
 }
 
+// ---- responding ----
+//
+// A reaction and a reply are the same thing at different lengths: an
+// ordinary end-to-end message to the author, carrying a reference to the
+// entry. That is the whole social layer.
+//
+// Riding the message rail rather than inventing a diary-comment store
+// buys a lot for free — offline queueing, delivery receipts, the
+// author's existing chat thread, and permanence for the response even
+// though the entry it answers will expire. It also means nothing a
+// viewer writes is readable by another viewer, which is what keeps this
+// feature free of a moderation surface.
+
+export async function reactToEntry(entry: { id: string; authorId: string }, emoji: string): Promise<void> {
+  const { sendText } = await import("./session.js");
+  const res = await sendText(entry.authorId, false, emoji, undefined, {
+    diaryRef: { entryId: entry.id, authorId: entry.authorId, kind: "reaction", emoji },
+  });
+  if (!res.ok) throw new Error(res.error);
+}
+
+export async function replyToEntry(entry: { id: string; authorId: string }, body: string): Promise<void> {
+  const { sendText } = await import("./session.js");
+  const res = await sendText(entry.authorId, false, body, undefined, {
+    diaryRef: { entryId: entry.id, authorId: entry.authorId, kind: "reply" },
+  });
+  if (!res.ok) throw new Error(res.error);
+}
+
+export type EntryResponses = {
+  reactions: Array<{ emoji: string; from: string[] }>;
+  replies: number;
+  mine: string | null;          // the emoji this device already sent, if any
+};
+
+// Reactions are counted from the messages already on this device. There
+// is no server-side reaction store to keep in sync, and nothing extra
+// for the relay to learn.
+export async function responsesFor(entryId: string): Promise<EntryResponses> {
+  const { messagesAboutEntry } = await import("./store.js");
+  const me = currentSession()?.user.id;
+  const rows = await messagesAboutEntry(entryId);
+
+  const byEmoji = new Map<string, Set<string>>();
+  let replies = 0;
+  let mine: string | null = null;
+  for (const m of rows) {
+    if (m.diaryRef?.kind === "reply") { replies++; continue; }
+    const emoji = m.diaryRef?.emoji ?? m.body ?? "";
+    if (!emoji) continue;
+    const who = byEmoji.get(emoji) ?? new Set<string>();
+    who.add(m.senderId);
+    byEmoji.set(emoji, who);
+    if (m.senderId === me) mine = emoji;
+  }
+  return {
+    reactions: [...byEmoji.entries()]
+      .map(([emoji, from]) => ({ emoji, from: [...from] }))
+      .sort((a, b) => b.from.length - a.from.length),
+    replies,
+    mine,
+  };
+}
+
 // ---- views ----
 
 export async function reportSeen(entryIds: string[]): Promise<void> {

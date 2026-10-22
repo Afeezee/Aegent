@@ -20,6 +20,15 @@ export const PROTOCOL_VERSION = 1;
 
 export type MediaKind = "image" | "video" | "audio" | "voice" | "file";
 
+// `_at` (optional): when the sender actually wrote this message.
+//
+// The envelope's `created_at` is when the RELAY received it, which is
+// normally the same thing — except for a self-copy uploaded later. The
+// background replicator cloud-copies messages that only existed locally,
+// and those arrive at the relay now, not when they were written. Without
+// `_at`, ingesting that copy overwrites the original time and the
+// message jumps to the moment it was backed up.
+//
 // `_thread` (optional): the sender-side thread id for self-replicated
 // copies. Every send now encrypts a self-copy alongside the recipient
 // copies so the server stores the sender's own message history too.
@@ -28,6 +37,27 @@ export type MediaKind = "image" | "video" | "audio" | "voice" | "file";
 // _thread carries that (peer id for 1:1, group id for groups). Only
 // meaningful on self-copies; ignored by third-party recipients.
 
+// `diaryRef` (optional, on text): this message is a response to a diary
+// entry — a reaction or a private reply.
+//
+// Added as a FIELD on the existing text variant rather than a new `t`,
+// which is the safest extension available: an older client renders the
+// text and ignores what it doesn't recognise, where an unknown type
+// would be dropped entirely.
+//
+// It deliberately carries NO preview of the entry. The reply is a
+// permanent message; the entry expires in 24 hours. Embedding a snippet
+// would quietly make a copy of the thing we promised would stop being
+// readable. Both sides render the quotation from their own local diary
+// row while it exists, and degrade to "a diary entry" afterwards.
+
+export type DiaryRef = {
+  entryId: string;
+  authorId: string;
+  kind: "reaction" | "reply";
+  emoji?: string;
+};
+
 export type Payload =
   | {
       v: 1;
@@ -35,7 +65,9 @@ export type Payload =
       msgId: string;
       body: string;
       replyTo?: { id: string; preview: string; author: string };
+      diaryRef?: DiaryRef;
       _thread?: string;
+      _at?: number;
     }
   | {
       v: 1;
@@ -59,10 +91,11 @@ export type Payload =
       };
       replyTo?: { id: string; preview: string; author: string };
       _thread?: string;
+      _at?: number;
     }
-  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string }
-  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string }
-  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string };
+  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string; _at?: number }
+  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string; _at?: number }
+  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number };
 
 export function packPayload(p: Payload): string {
   return JSON.stringify(p);
@@ -83,6 +116,22 @@ export function newMsgId(): string {
   counter = (counter + 1) & 0xffff;
   const rand = b64.encode(cryptoRandomBytes(6)).replace(/[+/=]/g, "").slice(0, 6);
   return `${Date.now().toString(36)}-${counter.toString(36)}-${rand}`;
+}
+
+// The first segment of a msgId is base36 of the sender's clock at the
+// moment it was composed. That makes the authored time recoverable from
+// the id alone, which is how a message whose timestamp was overwritten
+// can be put back where it belongs.
+export function sentTimeFromMsgId(id: string): number | null {
+  const head = id.split("-")[0];
+  if (!head) return null;
+  const t = parseInt(head, 36);
+  if (!Number.isFinite(t)) return null;
+  // Anything outside a plausible window is not a timestamp — ids from
+  // other schemes must not be mistaken for one.
+  const FLOOR = Date.UTC(2020, 0, 1);
+  const CEILING = Date.now() + 86400_000;
+  return t > FLOOR && t < CEILING ? t : null;
 }
 
 function cryptoRandomBytes(n: number): Uint8Array {

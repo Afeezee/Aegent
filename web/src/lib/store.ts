@@ -13,6 +13,7 @@
 // plain fields.
 
 import Dexie, { type Table } from "dexie";
+import { sentTimeFromMsgId, type DiaryRef } from "./protocol.js";
 import { secretBoxOpen, secretBoxSeal } from "./crypto.js";
 import { embed, tokenize } from "./embeddings.js";
 
@@ -71,6 +72,10 @@ export type StoredMessage = {
   media: MediaRef | null;
 
   replyTo: { id: string; preview: string; author: string } | null;
+  // Set when this message is a reaction or reply to a diary entry.
+  // Indexed (dotted key path) so the author's diary view can find the
+  // responses to one entry without scanning every message they own.
+  diaryRef: DiaryRef | null;
   editedBody_ct: string | null;   // if set, replaces body_ct on display
   deletedAt: number | null;       // if set, render as tombstone
   reactions: Record<string, string[]>; // emoji → [userId, ...]
@@ -251,6 +256,12 @@ class AegentDB extends Dexie {
       diaryAudience: "dayKey",
       diaryOutbox: "id, createdAt",
     });
+    // v6: index responses to a diary entry. Re-declares the messages
+    // index list in full, which is how Dexie adds an index to an
+    // existing store. Rows without a diaryRef simply aren't in it.
+    this.version(6).stores({
+      messages: "id, peerId, direction, createdAt, [peerId+createdAt], diaryRef.entryId",
+    });
   }
 }
 
@@ -370,10 +381,19 @@ export async function listThreads(): Promise<Thread[]> {
   return threads.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+// Upper bound of a thread query.
+//
+// This used to be `Date.now() + 1`, which quietly made the device's own
+// clock a filter: if the relay ran even slightly ahead, the newest
+// messages sorted past the bound and simply did not render. A thread
+// should show everything in it, not everything the local clock believes
+// has happened yet.
+const END_OF_TIME = Number.MAX_SAFE_INTEGER;
+
 async function lastMessageIn(peerId: string): Promise<OpenedMessage | undefined> {
   const rows = await requireDb().messages
     .where("[peerId+createdAt]")
-    .between([peerId, 0], [peerId, Date.now() + 1])
+    .between([peerId, 0], [peerId, END_OF_TIME])
     .reverse()
     .limit(1)
     .toArray();
@@ -419,6 +439,7 @@ export async function saveTextMessage(input: {
   createdAt: number;
   body: string;
   replyTo?: { id: string; preview: string; author: string } | null;
+  diaryRef?: DiaryRef | null;
 }): Promise<OpenedMessage> {
   const stored = mkStored({
     ...input,
@@ -569,7 +590,7 @@ export async function threadWith(peerId: string, limit = 500): Promise<OpenedMes
   // index — that silently lost history for threads above the cap.
   const rows = await requireDb().messages
     .where("[peerId+createdAt]")
-    .between([peerId, 0], [peerId, Date.now() + 1])
+    .between([peerId, 0], [peerId, END_OF_TIME])
     .reverse()
     .limit(limit)
     .toArray();
@@ -594,7 +615,7 @@ export async function threadBefore(
 export async function threadMessageCount(peerId: string): Promise<number> {
   return requireDb().messages
     .where("[peerId+createdAt]")
-    .between([peerId, 0], [peerId, Date.now() + 1])
+    .between([peerId, 0], [peerId, END_OF_TIME])
     .count();
 }
 
@@ -729,6 +750,37 @@ export async function repairTimestamps(): Promise<number> {
     if (typeof g.lastSeenAt !== "number") patch.lastSeenAt = num(g.lastSeenAt) ?? 0;
     if (typeof g.createdAt !== "number") patch.createdAt = num(g.createdAt) ?? 0;
     if (Object.keys(patch).length > 0) { await db.groups.update(g.id, patch); fixed++; }
+  }
+  return fixed;
+}
+
+// Put our own messages back where they belong in time.
+//
+// The background replicator uploads messages that existed only on this
+// device so other devices can see them. Until now the self-copy carried
+// no authored time, so the relay stamped it with the moment of upload
+// and ingesting it overwrote the original — re-dating a whole history to
+// whenever the backup happened. On screen that reads as every message
+// you ever sent bunched together, separated from the replies they
+// belong beside.
+//
+// The fix stops it happening again; this undoes what already happened.
+// A message id's first segment is base36 of the sender's clock when it
+// was composed, so the real time is recoverable from the id alone.
+// Only outbound messages are touched: inbound ones carry the relay's
+// receipt time, which was never wrong.
+export async function repairSentTimes(): Promise<number> {
+  const db = requireDb();
+  let fixed = 0;
+  for (const m of await db.messages.toArray()) {
+    if (m.direction !== "out") continue;
+    const authored = sentTimeFromMsgId(m.id);
+    if (authored === null) continue;
+    // A minute of slack: small differences are just clock jitter between
+    // composing and sending, and rewriting those would be noise.
+    if (Math.abs(authored - m.createdAt) < 60_000) continue;
+    await db.messages.update(m.id, { createdAt: authored });
+    fixed++;
   }
   return fixed;
 }
@@ -909,6 +961,18 @@ export async function distinctThreadIds(): Promise<string[]> {
   return keys.map((k) => String(k));
 }
 
+// Every reaction and reply pointed at one diary entry. Uses the dotted
+// index added in v6, so this stays cheap as the archive grows.
+export async function messagesAboutEntry(entryId: string): Promise<OpenedMessage[]> {
+  const rows = await requireDb().messages
+    .where("diaryRef.entryId").equals(entryId)
+    .toArray();
+  return rows
+    .filter((m) => !m.deletedAt)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(openMessage);
+}
+
 // ---- diary ----
 
 export function openDiaryEntry(r: DiaryEntryRow): OpenedDiaryEntry {
@@ -1044,6 +1108,7 @@ function mkStored(input: {
   caption_ct: string | null;
   media: MediaRef | null;
   replyTo?: { id: string; preview: string; author: string } | null;
+  diaryRef?: DiaryRef | null;
 }): StoredMessage {
   return {
     id: input.id,
@@ -1055,6 +1120,7 @@ function mkStored(input: {
     caption_ct: input.caption_ct,
     media: input.media,
     replyTo: input.replyTo ?? null,
+    diaryRef: input.diaryRef ?? null,
     editedBody_ct: null,
     deletedAt: null,
     reactions: {},

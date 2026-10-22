@@ -54,6 +54,24 @@ export function MessageBubble(p: BubbleProps) {
   const body = msg.editedBody ?? msg.body;
   const deleted = !!msg.deletedAt;
 
+  // A reaction to a diary entry arrives as a message whose whole content
+  // is one emoji. Giving it a full bubble would bury the conversation
+  // under hearts, so it renders as a quiet one-line note instead.
+  if (msg.diaryRef?.kind === "reaction" && !deleted) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+        style={{
+          display: "flex", justifyContent: "center",
+          fontSize: 12, color: "var(--text-dim)", padding: "2px 0 6px", gap: 6,
+        }}
+      >
+        <span style={{ fontSize: 15 }}>{msg.diaryRef.emoji ?? body}</span>
+        <span>{isMine ? "You reacted to their diary" : `${p.senderName} reacted to your diary`}</span>
+      </motion.div>
+    );
+  }
+
   return (
     <motion.div
       ref={rowRef}
@@ -73,6 +91,17 @@ export function MessageBubble(p: BubbleProps) {
         {p.isGroup && !isMine && p.showAvatar && (
           <div style={{ fontSize: 11, color: "var(--text-dim)", padding: "0 12px 4px" }}>
             {p.senderName}
+          </div>
+        )}
+
+        {msg.diaryRef?.kind === "reply" && (
+          <div style={{
+            padding: "6px 10px", marginBottom: 4, borderRadius: 10,
+            background: "rgba(255,255,255,0.05)", border: "1px solid var(--line)",
+            borderLeft: "3px solid var(--aqua)",
+            fontSize: 12, color: "var(--text-dim)",
+          }}>
+            {isMine ? "You replied to a diary entry" : "Replied to your diary entry"}
           </div>
         )}
 

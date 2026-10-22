@@ -47,12 +47,13 @@ import {
   applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
-  markRead, openStore, outboxCount, rekeyLocalStore, repairTimestamps, saveMediaMessage,
+  markRead, openStore, outboxCount, rekeyLocalStore, repairSentTimes, repairTimestamps,
+  saveMediaMessage,
   saveTextMessage, setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
 import { connectSocket, disconnectSocket, sendCipher } from "./socket.js";
-import { newMsgId, packPayload, unpackPayload, type Payload } from "./protocol.js";
+import { newMsgId, packPayload, unpackPayload, type DiaryRef, type Payload } from "./protocol.js";
 
 export type Session = {
   user: MeApi;
@@ -153,6 +154,7 @@ function clearPersistedKeys() {
 // converted yet, re-seals the existing rows in place.
 const META_STOREKEY_VERSION = "storeKeyVersion";
 const META_TS_REPAIR = "timestampRepair";
+const META_SENT_TIME_REPAIR = "sentTimeRepair";
 
 async function openLocalStore(
   userId: string, privateKey: Uint8Array, legacyKey?: Uint8Array | null,
@@ -175,6 +177,13 @@ async function openLocalStore(
       const fixed = await repairTimestamps();
       if (fixed > 0) console.log(`[session] repaired ${fixed} row(s) with non-numeric timestamps`);
       await setMeta(META_TS_REPAIR, "1");
+    }
+    // Undo the re-dating caused by self-copies that carried no authored
+    // time — see repairSentTimes.
+    if (await getMeta(META_SENT_TIME_REPAIR) !== "1") {
+      const moved = await repairSentTimes();
+      if (moved > 0) console.log(`[session] restored the original time of ${moved} sent message(s)`);
+      await setMeta(META_SENT_TIME_REPAIR, "1");
     }
   } catch (e) {
     console.warn("[session] store migration skipped:", (e as Error).message);
@@ -509,18 +518,18 @@ export async function pushLocalHistoryToServer(opts: {
 // Rebuild the payload a past send would have produced. The msgId stays
 // stable so every device dedupes against the row it already has.
 function selfCopyPayload(m: {
-  id: string; peerId: string; body: string | null; editedBody: string | null;
+  id: string; peerId: string; createdAt: number; body: string | null; editedBody: string | null;
   caption: string | null; media: MediaRef | null;
 }): Payload | null {
   if (m.media) {
     return {
       v: 1, t: "media", msgId: m.id, caption: m.caption ?? undefined,
-      media: m.media, _thread: m.peerId,
+      media: m.media, _thread: m.peerId, _at: m.createdAt,
     } as Payload;
   }
   const body = m.editedBody ?? m.body;
   if (!body) return null;
-  return { v: 1, t: "text", msgId: m.id, body, _thread: m.peerId } as Payload;
+  return { v: 1, t: "text", msgId: m.id, body, _thread: m.peerId, _at: m.createdAt } as Payload;
 }
 
 // Which of our own messages the relay already has a self-copy of. Seeded
@@ -1021,20 +1030,25 @@ async function deliverOrQueue(
 export async function sendText(
   targetPeerId: string, isGroup: boolean, body: string,
   replyTo?: { id: string; preview: string; author: string },
+  opts: { diaryRef?: DiaryRef } = {},
 ): Promise<{ ok: true; queued?: boolean } | { ok: false; error: string }> {
   if (!CURRENT) return { ok: false, error: "no_session" };
+  const sentAt = Date.now();
   const payload: Payload = {
     v: 1, t: "text", msgId: newMsgId(), body,
     replyTo: replyTo && { id: replyTo.id, preview: replyTo.preview, author: replyTo.author },
+    diaryRef: opts.diaryRef,
+    _at: sentAt,
   };
   await saveTextMessage({
     id: payload.msgId,
     peerId: targetPeerId,
     senderId: CURRENT.user.id,
     direction: "out",
-    createdAt: Date.now(),
+    createdAt: sentAt,
     body,
     replyTo,
+    diaryRef: opts.diaryRef ?? null,
   });
   const res = await deliverOrQueue(targetPeerId, isGroup, payload);
   if (!res.ok) return res;
@@ -1047,16 +1061,18 @@ export async function sendMedia(
   replyTo?: { id: string; preview: string; author: string },
 ): Promise<{ ok: true; queued?: boolean } | { ok: false; error: string }> {
   if (!CURRENT) return { ok: false, error: "no_session" };
+  const sentAt = Date.now();
   const payload: Payload = {
     v: 1, t: "media", msgId: newMsgId(), caption, media,
     replyTo: replyTo && { id: replyTo.id, preview: replyTo.preview, author: replyTo.author },
+    _at: sentAt,
   };
   await saveMediaMessage({
     id: payload.msgId,
     peerId: targetPeerId,
     senderId: CURRENT.user.id,
     direction: "out",
-    createdAt: Date.now(),
+    createdAt: sentAt,
     caption, media, replyTo,
   });
   const res = await deliverOrQueue(targetPeerId, isGroup, payload);
@@ -1158,6 +1174,22 @@ export async function ingestEnvelope(envIn: {
     : (env.groupId ?? env.senderId);
   const direction: "in" | "out" = isSelfEcho ? "out" : "in";
 
+  // When did this message happen?
+  //
+  // For anything from a peer, the relay's receipt time — it is one clock
+  // for everyone and cannot be skewed by someone else's device.
+  //
+  // For our OWN copy, the time we wrote it. A self-copy may be uploaded
+  // long after the fact (the replicator sweeps messages that only
+  // existed on this device), and taking the relay's time there would
+  // re-date our whole history to the moment it was backed up — bunching
+  // every message we ever sent together, away from the replies they
+  // belong beside. `_at` is only trusted for our own messages, and is
+  // never allowed to sit in the future.
+  const authoredAt = isSelfEcho && typeof payload._at === "number"
+    ? Math.min(payload._at, env.createdAt)
+    : env.createdAt;
+
   // Make sure the thread has a metadata row. Without this, a new device
   // that drains its own sent copies for a chat has the messages but no
   // contact — and the chat list, which is built from contacts, showed
@@ -1170,9 +1202,10 @@ export async function ingestEnvelope(envIn: {
       peerId: threadId,
       senderId: env.senderId,
       direction,
-      createdAt: env.createdAt,
+      createdAt: authoredAt,
       body: payload.body,
       replyTo: payload.replyTo ?? null,
+      diaryRef: payload.diaryRef ?? null,
     });
   } else if (payload.t === "media") {
     await saveMediaMessage({
@@ -1180,7 +1213,7 @@ export async function ingestEnvelope(envIn: {
       peerId: threadId,
       senderId: env.senderId,
       direction,
-      createdAt: env.createdAt,
+      createdAt: authoredAt,
       caption: payload.caption,
       media: payload.media,
       replyTo: payload.replyTo ?? null,
