@@ -14,6 +14,7 @@ import { Settings } from "../components/Settings.js";
 import { AgentSheet, pushAgentEvent } from "../components/Agent.js";
 import { ForwardSheet } from "../components/ForwardSheet.js";
 import { ContactsSheet } from "../components/Contacts.js";
+import { GroupInfo } from "../components/GroupInfo.js";
 import { Brand } from "./Onboarding.js";
 import { api } from "../lib/api.js";
 import {
@@ -53,6 +54,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [forwardMsg, setForwardMsg] = useState<OpenedMessage | null>(null);
   const [contactsOpen, setContactsOpen] = useState(false);
+  const [groupInfoFor, setGroupInfoFor] = useState<string | null>(null);
   // Agent-driven "jump to message" target. Chat consumes highlight.msgId
   // when thread.peerId === highlight.peerId. We keep peerId in the
   // target so an open-another-chat-later doesn't accidentally re-pulse
@@ -407,6 +409,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                     fromAgent={cameFromAgent}
                     onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
                     onInvokeAgent={(q) => { setPendingAgentQuery(q); setAgentOpen(true); }}
+                    onOpenGroupInfo={() => setGroupInfoFor(thread.peerId)}
                   />
                 </ErrorBoundary>
               </motion.div>
@@ -476,6 +479,11 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       <ForwardSheet open={!!forwardMsg} onClose={() => setForwardMsg(null)} message={forwardMsg} />
       <ContactsSheet open={contactsOpen} onClose={() => setContactsOpen(false)}
         onOpenThread={(pid) => openThread(pid, false)} />
+      <GroupInfo
+        open={!!groupInfoFor} groupId={groupInfoFor}
+        onClose={() => setGroupInfoFor(null)}
+        onChanged={() => setRefresh((k) => k + 1)}
+      />
 
       {tourOpen && <WelcomeTour onDone={() => setTourOpen(false)} />}
     </div>

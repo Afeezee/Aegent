@@ -27,6 +27,23 @@ export type GroupApi = {
   memberIds: string[];
 };
 
+export type GroupRole = "owner" | "admin" | "member";
+export type GroupMember = {
+  id: string; role: GroupRole; joinedAt: number; mutedUntil: number | null;
+};
+export type GroupSettings = {
+  description: string | null;
+  joinMode: "closed" | "invite" | "request";
+  postPolicy: "all" | "admins";
+  historyPolicy: "none" | "all";
+  agentPolicy: "off" | "members";
+};
+export type GroupDetail = GroupApi & {
+  members?: GroupMember[];
+  settings?: GroupSettings;
+  myRole?: GroupRole;
+};
+
 export type MeApi = PublicUser & {
   settings: { readReceipts: boolean; presence: boolean };
 };
@@ -269,7 +286,42 @@ export const api = {
   createGroup: (name: string, memberIds: string[]) =>
     req<GroupApi>("/api/groups", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
   listGroups: () => req<GroupApi[]>("/api/groups"),
-  getGroup: (id: string) => req<GroupApi>(`/api/groups/${id}`),
+  getGroup: (id: string) => req<GroupDetail>(`/api/groups/${id}`),
+  updateGroup: (id: string, patch: Partial<GroupSettings> & { name?: string }) =>
+    req<{ ok: true; settings: GroupSettings }>(`/api/groups/${id}`, {
+      method: "PATCH", body: JSON.stringify(patch),
+    }),
+  groupAddMember: (id: string, userId: string) => req<{ ok: true; memberIds: string[] }>(
+    `/api/groups/${id}/members`, { method: "POST", body: JSON.stringify({ userId }) },
+  ),
+  groupRemoveMember: (id: string, userId: string) => req<{ ok: true }>(
+    `/api/groups/${id}/members/${encodeURIComponent(userId)}`, { method: "DELETE" },
+  ),
+  groupSetRole: (id: string, userId: string, role: "admin" | "member") => req<{ ok: true }>(
+    `/api/groups/${id}/members/${encodeURIComponent(userId)}/role`,
+    { method: "POST", body: JSON.stringify({ role }) },
+  ),
+  groupMute: (id: string, userId: string, minutes: number) => req<{ ok: true }>(
+    `/api/groups/${id}/members/${encodeURIComponent(userId)}/mute`,
+    { method: "POST", body: JSON.stringify({ minutes }) },
+  ),
+  groupBan: (id: string, userId: string) => req<{ ok: true }>(
+    `/api/groups/${id}/ban/${encodeURIComponent(userId)}`, { method: "POST" },
+  ),
+  groupCreateInvite: (id: string, opts: { expiresInMinutes?: number; maxUses?: number }) =>
+    req<{ token: string; id: string }>(`/api/groups/${id}/invites`, {
+      method: "POST", body: JSON.stringify(opts),
+    }),
+  groupRedeemInvite: (token: string) => req<{
+    state: "joined" | "requested"; group: { id: string; name: string; memberIds?: string[] };
+  }>("/api/groups/join", { method: "POST", body: JSON.stringify({ token }) }),
+  groupRequests: (id: string) => req<Array<{ userId: string; requestedAt: number }>>(
+    `/api/groups/${id}/requests`,
+  ),
+  groupResolveRequest: (id: string, userId: string, approve: boolean) => req<{ ok: true }>(
+    `/api/groups/${id}/requests/${encodeURIComponent(userId)}`,
+    { method: "POST", body: JSON.stringify({ approve }) },
+  ),
   joinGroup: (id: string) => req<GroupApi>(`/api/groups/${id}/join`, { method: "POST" }),
 
   // One page of the drain. The server pages by the (createdAt, id)

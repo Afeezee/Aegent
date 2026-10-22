@@ -951,7 +951,7 @@ async function fanOut(
   targetPeerId: string,
   isGroup: boolean,
   payload: Payload,
-): Promise<{ ok: true; envelopeId: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; envelopeId: string; unreachable?: string[] } | { ok: false; error: string }> {
   if (!CURRENT) return { ok: false, error: "no_session" };
   const selfId = CURRENT.user.id;
 
@@ -963,9 +963,28 @@ async function fanOut(
 
   let recipients: string[] = [];
   if (isGroup) {
-    const g = await getGroup(targetPeerId);
-    if (!g) return { ok: false, error: "unknown_group" };
-    recipients = Array.from(new Set([...g.memberIds, selfId]));
+    // Membership comes from the relay, not the local cache.
+    //
+    // Fanning out to a cached member list silently drops anyone who
+    // joined since this device last looked, and keeps writing to people
+    // who have left. The cache is still the fallback, because a send
+    // must not fail just because the directory is briefly unreachable.
+    let memberIds: string[] | null = null;
+    try {
+      const fresh = await api.getGroup(targetPeerId);
+      memberIds = fresh.memberIds;
+      await upsertGroup({
+        id: fresh.id, name: fresh.name, memberIds: fresh.memberIds,
+        createdBy: fresh.created_by, createdAt: fresh.created_at,
+        lastSeenAt: Date.now(),
+      });
+    } catch { /* fall back to what we know */ }
+    if (!memberIds) {
+      const g = await getGroup(targetPeerId);
+      if (!g) return { ok: false, error: "unknown_group" };
+      memberIds = g.memberIds;
+    }
+    recipients = Array.from(new Set([...memberIds, selfId]));
   } else {
     recipients = Array.from(new Set([targetPeerId, selfId]));
   }
@@ -974,26 +993,47 @@ async function fanOut(
   const selfPubKey = CURRENT.publicKey;
   let firstEnvelopeId: string | undefined;
   let selfCopyLanded = false;
+  // Who this send never reached. A recipient whose key cannot be
+  // resolved used to be skipped in silence, so the sender believed a
+  // message had gone to the whole group when it had not.
+  const unreachable: string[] = [];
+
   for (const rid of recipients) {
     let peerPubKey: Uint8Array | null = null;
     if (rid === selfId) {
       peerPubKey = selfPubKey;
     } else {
       const peer = await getContact(rid) ?? await ensureContact(rid);
-      if (!peer) continue;
+      if (!peer) { unreachable.push(rid); continue; }
       peerPubKey = b64.decode(peer.publicKey);
     }
     const cipher = encryptForPeer(packed, peerPubKey, CURRENT.privateKey);
     const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined);
-    if (!res.ok) return { ok: false, error: res.error };
+    if (!res.ok) {
+      // Abandoning here leaves earlier recipients holding a message that
+      // later ones never get, and the retry re-sends to everyone. Carry
+      // on and report instead: the envelope ledger dedupes by msgId, so
+      // a resend is harmless, while a half-delivered group message that
+      // nobody is told about is not.
+      unreachable.push(rid);
+      continue;
+    }
     if (rid === selfId) selfCopyLanded = true;
     firstEnvelopeId = firstEnvelopeId ?? res.envelope.id;
+  }
+
+  // Nothing landed at all — treat it as a failure so the outbox keeps it.
+  if (!firstEnvelopeId && unreachable.length > 0) {
+    return { ok: false, error: "no_recipients_reached" };
+  }
+  if (unreachable.length > 0) {
+    console.warn("[send] could not reach", unreachable.length, "recipient(s)", unreachable);
   }
   // The self-copy is this message's cloud durability; record it so the
   // background replicator doesn't upload a second one.
   const msgId = (payload as { msgId?: string }).msgId;
   if (selfCopyLanded && msgId) markPushed(selfId, msgId);
-  return { ok: true, envelopeId: firstEnvelopeId ?? "" };
+  return { ok: true, envelopeId: firstEnvelopeId ?? "", unreachable };
 }
 
 // Kept as the public name used by the agent tools.

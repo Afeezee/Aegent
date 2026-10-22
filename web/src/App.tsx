@@ -11,7 +11,7 @@ import { hasOnboarded, Onboarding } from "./pages/Onboarding.js";
 import { api } from "./lib/api.js";
 import { currentSession, tryRestoreSession } from "./lib/session.js";
 import { initCrypto } from "./lib/crypto.js";
-import { upsertContact } from "./lib/store.js";
+import { upsertContact, upsertGroup } from "./lib/store.js";
 import { installDeepLinkHandlers } from "./lib/deeplinks.js";
 
 export default function App() {
@@ -39,6 +39,30 @@ export default function App() {
   useEffect(() => {
     if (!signedIn) return;
     const parseHash = async () => {
+      // Group invite: #/g/<token>. The token is the authorisation, so
+      // redeeming it is a server call — depending on the group it either
+      // joins you or files a request for an admin.
+      const g = /^#\/g\/(.+)$/.exec(location.hash);
+      if (g) {
+        const token = decodeURIComponent(g[1]);
+        location.hash = "";
+        try {
+          const r = await api.groupRedeemInvite(token);
+          if (r.state === "joined") {
+            await upsertGroup({
+              id: r.group.id, name: r.group.name, memberIds: r.group.memberIds ?? [],
+              createdBy: "", createdAt: Date.now(), lastSeenAt: Date.now(),
+            });
+            toast(`Joined ${r.group.name}`, "ok");
+          } else {
+            toast(`Asked to join ${r.group.name} — an admin will decide`, "info");
+          }
+        } catch (e) {
+          toast((e as Error).message, "warn");
+        }
+        return;
+      }
+
       const m = /^#\/i\/(.+)$/.exec(location.hash);
       if (!m) return;
       const handle = decodeURIComponent(m[1]).replace(/^@/, "");
