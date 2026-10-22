@@ -49,7 +49,8 @@ export type PendingAction =
   | { kind: "schedule_send"; targetPeerId: string; isGroup: boolean; toDisplay: string; body: string; whenIso: string }
   | { kind: "calendar_event"; title: string; whenIso: string; durationMin: number; notes?: string }
   | { kind: "add_contact"; handle: string; displayName: string; explain: string }
-  | { kind: "save_contact_to_phone"; displayName: string; handle: string; email: string; phone: string | null };
+  | { kind: "save_contact_to_phone"; displayName: string; handle: string; email: string; phone: string | null }
+  | { kind: "schedule_backup"; peerId: string; peerLabel: string; recipientEmail: string; whenIso: string; note?: string };
 
 export type ToolResult =
   | { ok: true; kind: "data"; value: unknown }
@@ -817,21 +818,22 @@ export async function schedule_backup(args: {
     ?? (await getGroup(args.peerId))?.name;
   if (!label) return { ok: false, error: "unknown_thread" };
 
-  await addScheduledBackup({
-    peerId: args.peerId,
-    peerLabel: label,
-    recipientEmail: args.recipientEmail,
-    whenIso: when.toISOString(),
-    note: args.note,
-  });
-  await saveReminder(`Backup ${label} to ${args.recipientEmail}`, when.toISOString());
+  // Stage it. This used to write the schedule straight to the store and
+  // report success, so the model could arrange an export of a whole
+  // thread to an arbitrary email address with no confirmation — the card
+  // only appeared later, when it fired. Every other write in this file
+  // returns `pending`; this one escaped the gate.
   return {
-    ok: true, kind: "data",
-    value: {
-      scheduled: true,
-      when: when.toLocaleString(),
-      note: "You'll see a confirm card the next time the app is open at or after that time.",
+    ok: true, kind: "pending",
+    action: {
+      kind: "schedule_backup",
+      peerId: args.peerId,
+      peerLabel: label,
+      recipientEmail: args.recipientEmail,
+      whenIso: when.toISOString(),
+      note: args.note,
     },
+    explain: `Schedule a backup of ${label} to ${args.recipientEmail} for ${when.toLocaleString()}. Email isn't E2E encrypted — you'll get a second confirm card when it fires.`,
   };
 }
 
@@ -1291,6 +1293,18 @@ export async function executePending(action: PendingAction) {
       return { ok: true } as const;
     } catch { return { ok: false, error: "lookup_failed" } as const; }
   }
+  if (action.kind === "schedule_backup") {
+    await addScheduledBackup({
+      peerId: action.peerId,
+      peerLabel: action.peerLabel,
+      recipientEmail: action.recipientEmail,
+      whenIso: action.whenIso,
+      note: action.note,
+    });
+    await saveReminder(`Backup ${action.peerLabel} to ${action.recipientEmail}`, action.whenIso);
+    return { ok: true } as const;
+  }
+
   if (action.kind === "save_contact_to_phone") {
     await saveContactToPhone({
       displayName: action.displayName, handle: action.handle,

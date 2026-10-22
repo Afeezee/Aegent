@@ -421,3 +421,10 @@ async function allocateHandle(displayName: string): Promise<string> {
 export class AuthError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
+
+// Authorization failures are not bad requests. Reporting "you may not do
+// that" as a 400 makes every client treat a permission problem as a
+// malformed payload, which is how a missing check stays invisible.
+export class ForbiddenError extends Error {
+  constructor(public code: string, message: string) { super(message); }
+}

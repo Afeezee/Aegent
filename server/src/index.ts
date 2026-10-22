@@ -25,7 +25,8 @@ import { fileURLToPath } from "node:url";
 import { Server as SocketServer } from "socket.io";
 import { z } from "zod";
 import {
-  AuthError, checkPassword, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
+  AuthError, ForbiddenError,
+  checkPassword, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
   hashNewPassword, issueTokens,
   listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
   rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
@@ -34,7 +35,7 @@ import {
   applyNewPassword, completeReset, mintChallenge, putRecoveryWrapper, recoveryStatus,
 } from "./recovery.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
-import { addMember, createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
+import { createGroup, groupById, groupsForUser, isMember, membersOf } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, storeBlob } from "./blobs.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentTurn } from "./agent.js";
@@ -331,13 +332,23 @@ app.get("/api/groups/:id", authed, async (req, res) => {
   } catch (e) { handleError(res, e); }
 });
 
-app.post("/api/groups/:id/join", authed, async (req, res) => {
-  try {
-    const g = await groupById(req.params.id);
-    if (!g) return res.status(404).json({ error: "not_found" });
-    await addMember(g.id, (req as AuthedReq).userId);
-    res.json({ ...g, memberIds: await membersOf(g.id) });
-  } catch (e) { handleError(res, e); }
+// Joining by group id is closed.
+//
+// This route used to admit any authenticated caller who knew (or guessed)
+// a group's UUID — no invite, no approval, no role check. Group ids
+// travel in deep links, so that made the link itself a permanent
+// membership capability for anyone who ever saw it.
+//
+// Nothing in the shipped client calls this (`api.joinGroup` has no call
+// sites), so failing closed breaks no existing flow. Token-based
+// redemption arrives with the Groups work; until then this answers
+// legibly rather than 404-ing, so an older build shows "you need an
+// invite" instead of "this group is gone".
+app.post("/api/groups/:id/join", authed, async (_req, res) => {
+  res.status(403).json({
+    error: "invites_required",
+    message: "Groups can only be joined with an invite from a member.",
+  });
 });
 
 // ---- inbox + ack ----
@@ -590,6 +601,29 @@ io.use((socket, next) => {
   } catch { next(new Error("unauthorized")); }
 });
 
+// Per-socket membership cache.
+//
+// A group send is one envelope per member, so checking membership on
+// every envelope would turn a 256-member group into 512 round trips to
+// Postgres for a single message. Thirty seconds of staleness means a
+// member removed mid-conversation can post for a few more seconds — an
+// acceptable trade against making every group message quadratic.
+const GROUP_CACHE_TTL_MS = 30_000;
+type SocketData = { userId: string; groupCache?: Map<string, { member: boolean; at: number }> };
+
+async function socketIsMember(
+  socket: { data: unknown }, groupId: string, userId: string,
+): Promise<boolean> {
+  const data = socket.data as SocketData;
+  const cache = data.groupCache ?? (data.groupCache = new Map());
+  const hit = cache.get(groupId);
+  const now = Date.now();
+  if (hit && now - hit.at < GROUP_CACHE_TTL_MS) return hit.member;
+  const member = await isMember(groupId, userId);
+  cache.set(groupId, { member, at: now });
+  return member;
+}
+
 io.on("connection", (socket) => {
   const userId = (socket.data as { userId: string }).userId;
   livePresence.set(userId, Date.now());
@@ -606,8 +640,17 @@ io.on("connection", (socket) => {
 
       const recipient = await getUserById(body.recipientId);
       if (!recipient) return ack?.({ ok: false, error: "unknown_recipient" });
-      if (body.groupId && !(await isMember(body.groupId, body.recipientId))) {
-        return ack?.({ ok: false, error: "not_group_member" });
+      if (body.groupId) {
+        // Both checks matter and both must stay. The sender check is the
+        // one that was missing: the relay only verified that each named
+        // RECIPIENT was a member, so anyone who knew a group id could
+        // post into it by addressing real members.
+        if (!(await socketIsMember(socket, body.groupId, userId))) {
+          return ack?.({ ok: false, error: "not_group_member" });
+        }
+        if (!(await isMember(body.groupId, body.recipientId))) {
+          return ack?.({ ok: false, error: "recipient_not_member" });
+        }
       }
 
       const row: MessageRow = {
@@ -637,6 +680,9 @@ io.on("connection", (socket) => {
     if (payload.recipientId) {
       io.to(`u:${payload.recipientId}`).emit("typing", { from: userId, groupId: payload.groupId });
     } else if (payload.groupId) {
+      // Same hole as `send`: anyone who knew a group id could broadcast
+      // into it, here without even naming a recipient.
+      if (!(await socketIsMember(socket, payload.groupId, userId))) return;
       for (const uid of await membersOf(payload.groupId)) {
         if (uid !== userId) io.to(`u:${uid}`).emit("typing", { from: userId, groupId: payload.groupId });
       }
@@ -689,6 +735,7 @@ function envelopeOf(m: MessageRow) {
 }
 
 function handleError(res: express.Response, e: unknown) {
+  if (e instanceof ForbiddenError) return res.status(403).json({ error: e.code, message: e.message });
   if (e instanceof AuthError) return res.status(400).json({ error: e.code, message: e.message });
   if (e instanceof z.ZodError) return res.status(400).json({ error: "bad_request", issues: e.issues });
   console.error(e);

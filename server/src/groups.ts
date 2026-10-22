@@ -5,6 +5,12 @@
 
 import { randomUUID } from "node:crypto";
 import { db, type GroupRow } from "./db.js";
+import { AuthError } from "./auth.js";
+
+// A group send is one ciphertext envelope per member, so membership size
+// is a direct multiplier on every message's cost. The cap is a real
+// protocol constraint, not a product preference.
+export const MAX_GROUP_MEMBERS = 256;
 
 export async function createGroup(input: {
   name: string;
@@ -13,11 +19,24 @@ export async function createGroup(input: {
 }): Promise<GroupRow> {
   const id = randomUUID();
   const now = Date.now();
+
+  // Validate before inserting. The foreign key alone is not enough:
+  // addMember swallows constraint errors, and the two backends differ on
+  // whether they enforce FKs at all, so an unknown id could become a
+  // silently-missing member instead of an error.
+  const members = Array.from(new Set([input.createdBy, ...input.memberIds]));
+  if (members.length > MAX_GROUP_MEMBERS) {
+    throw new AuthError("too_many_members", `A group can hold at most ${MAX_GROUP_MEMBERS} members.`);
+  }
+  for (const uid of members) {
+    const row = await db.prepare("SELECT 1 AS one FROM users WHERE id = ?").get(uid);
+    if (!row) throw new AuthError("unknown_member", "One of those members no longer exists.");
+  }
+
   await db.tx(async () => {
     await db.prepare(
       "INSERT INTO groups (id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
     ).run(id, input.name, input.createdBy, now);
-    const members = new Set([input.createdBy, ...input.memberIds]);
     const stmt = db.prepare(
       "INSERT INTO group_members (group_id, user_id, joined_at) VALUES (?, ?, ?)",
     );

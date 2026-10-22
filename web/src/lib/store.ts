@@ -455,9 +455,29 @@ export async function applyEdit(targetId: string, newBody: string) {
   await requireDb().messages.update(targetId, { editedBody_ct: sealText(newBody) });
 }
 
-export async function applyDelete(targetId: string) {
+// May `by` tombstone this message?
+//
+// Only its author. A `delete` payload used to be honoured on the sender's
+// bare assertion, with no check at all, so anyone who knew a message id
+// could erase it on your device — not only in groups, where every member
+// sees every id, but in 1:1 chats, including messages you sent yourself.
+//
+// Kept as a pure function so the rule is testable without a database,
+// and so there is exactly one place to change when group admins gain the
+// right to remove other people's messages. That will NOT arrive as a
+// payload: with no signing keys, a recipient cannot verify a claim of
+// adminship, so it has to come as a server-attested group event.
+export function mayDelete(target: { senderId: string }, by: string): boolean {
+  return target.senderId === by;
+}
+
+export async function applyDelete(targetId: string, by: string) {
   const target = await requireDb().messages.get(targetId);
   if (!target) return;
+  if (!mayDelete(target, by)) {
+    console.warn("[store] refused delete of", targetId, "requested by", by);
+    return;
+  }
   await requireDb().messages.update(targetId, {
     deletedAt: Date.now(),
     body_ct: null,

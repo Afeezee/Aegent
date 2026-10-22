@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "og:build": "node scripts/build-og.mjs",
     "preview": "vite preview",
+    "test": "node --import tsx --test test/*.test.mjs",
     "android:add": "cap add android",
     "android:sync": "npm run build && cap sync android",
     "android:open": "cap open android",

@@ -393,7 +393,7 @@ function renderMsg(
           background: "var(--ink-2)", border: "1px solid var(--line)", borderRadius: 10,
           padding: 10, fontSize: 13, whiteSpace: "pre-wrap", marginBottom: 8,
         }}>{previewOf(m.action)}</div>
-        {m.action.kind === "email" && (
+        {(m.action.kind === "email" || m.action.kind === "schedule_backup") && (
           <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 8 }}>
             Email is not end-to-end encrypted the way Aegent messages are.
           </div>
@@ -429,6 +429,8 @@ function previewOf(a: PendingAction): string {
       return `Add @${a.handle} to your contacts`;
     case "save_contact_to_phone":
       return `Save ${a.displayName} to your phone Contacts\n@${a.handle}${a.phone ? `\n${a.phone}` : ""}${a.email ? `\n${a.email}` : ""}`;
+    case "schedule_backup":
+      return `Back up ${a.peerLabel} to ${a.recipientEmail}\nAt: ${new Date(a.whenIso).toLocaleString()}${a.note ? `\n\n${a.note}` : ""}`;
     default: return "";
   }
 }

@@ -1083,7 +1083,7 @@ export async function sendEdit(
 
 export async function sendDelete(targetPeerId: string, isGroup: boolean, targetMsgId: string) {
   const payload: Payload = { v: 1, t: "delete", msgId: newMsgId(), targetId: targetMsgId };
-  await applyDelete(targetMsgId);
+  await applyDelete(targetMsgId, CURRENT!.user.id);
   await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
@@ -1190,7 +1190,9 @@ export async function ingestEnvelope(envIn: {
   } else if (payload.t === "edit") {
     await applyEdit(payload.targetId, payload.body);
   } else if (payload.t === "delete") {
-    await applyDelete(payload.targetId);
+    // The envelope's sender is the authority here — not the payload,
+    // which anyone could have written.
+    await applyDelete(payload.targetId, env.senderId);
   }
 
   // A self-echo IS the cloud copy of one of our own sends; remember that

@@ -530,10 +530,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "save_contact_to_phone") return stageResult(await save_contact_to_phone(args as never));
     if (name === "export_to_email")     return stageResult(await export_to_email(args as never));
     if (name === "backup_thread")       return stageResult(await backup_thread(args as never));
-    if (name === "schedule_backup") {
-      const r = await schedule_backup(args as never);
-      return { forClaude: r.ok && r.kind === "data" ? r.value : { error: (r as { error?: string }).error ?? "unavailable" } };
-    }
+    if (name === "schedule_backup")     return stageResult(await schedule_backup(args as never));
     return { forClaude: { error: `unknown tool ${name}` } };
   } catch (e) {
     return { forClaude: { error: (e as Error).message } };
