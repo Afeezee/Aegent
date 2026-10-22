@@ -684,25 +684,56 @@ export async function repairTimestamps(): Promise<number> {
 // with the old key, so on first boot after the upgrade we unseal with
 // the old key and re-seal with the new one. Messages that cannot be
 // unsealed are left alone — the server drain will replace them.
-export async function rekeyMessages(oldKey: Uint8Array): Promise<{ rekeyed: number; failed: number }> {
+// Every table holding ciphertext sealed with the local-store key.
+//
+// This exists as a registry rather than a hand-written walk because the
+// old version re-keyed `messages` and nothing else — and `outbox` was
+// already being missed, so a message queued while offline became
+// permanently unreadable the moment the store key changed. A new sealed
+// table is now one line here instead of a bug nobody notices until
+// somebody changes their password.
+//
+// Add a table to this list in the same commit that starts sealing text
+// into it, and only once the table actually exists in the schema —
+// `db.table()` throws for a store the current version doesn't declare.
+const SEALED_TABLES: Array<{ table: string; fields: string[] }> = [
+  { table: "messages", fields: ["body_ct", "caption_ct", "editedBody_ct"] },
+  { table: "outbox",   fields: ["packed_ct"] },
+];
+
+// Re-seal everything under a new local-store key.
+//
+// Rows that cannot be opened with the old key are left exactly as they
+// are and counted as failed: they are either already under the new key
+// (a half-finished previous run) or genuinely lost, and overwriting them
+// with garbage would turn a recoverable state into an unrecoverable one.
+export async function rekeyLocalStore(oldKey: Uint8Array): Promise<{ rekeyed: number; failed: number }> {
   const db = requireDb();
   const newKey = LOCAL_STORE_KEY!;
-  const rows = await db.messages.toArray();
   let rekeyed = 0, failed = 0;
-  const move = (ct: string | null): string | null | undefined => {
-    if (!ct) return ct;
+
+  const move = (ct: unknown): string | null | undefined => {
+    if (ct === null || ct === undefined || ct === "") return null;
+    if (typeof ct !== "string") return null;
     try { return secretBoxSeal(newKey, secretBoxOpen(oldKey, ct)); }
     catch { return undefined; }   // undefined = could not convert
   };
-  for (const r of rows) {
-    const body = move(r.body_ct);
-    const caption = move(r.caption_ct);
-    const edited = move(r.editedBody_ct);
-    if (body === undefined || caption === undefined || edited === undefined) { failed++; continue; }
-    await db.messages.update(r.id, {
-      body_ct: body, caption_ct: caption, editedBody_ct: edited,
-    });
-    rekeyed++;
+
+  for (const spec of SEALED_TABLES) {
+    const table = db.table<Record<string, unknown>, string>(spec.table);
+    for (const row of await table.toArray()) {
+      const patch: Record<string, unknown> = {};
+      let broken = false;
+      for (const field of spec.fields) {
+        const next = move(row[field]);
+        if (next === undefined) { broken = true; break; }
+        if (next !== (row[field] ?? null)) patch[field] = next;
+      }
+      if (broken) { failed++; continue; }
+      if (Object.keys(patch).length === 0) continue;   // nothing sealed in this row
+      await table.update(row.id as string, patch);
+      rekeyed++;
+    }
   }
   return { rekeyed, failed };
 }
@@ -820,7 +851,7 @@ export async function distinctThreadIds(): Promise<string[]> {
 
 // ---- helpers ----
 
-function sealText(s: string): string {
+export function sealText(s: string): string {
   return secretBoxSeal(LOCAL_STORE_KEY!, new TextEncoder().encode(s));
 }
 

@@ -47,7 +47,7 @@ import {
   applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
-  markRead, openStore, outboxCount, rekeyMessages, repairTimestamps, saveMediaMessage,
+  markRead, openStore, outboxCount, rekeyLocalStore, repairTimestamps, saveMediaMessage,
   saveTextMessage, setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
@@ -163,7 +163,7 @@ async function openLocalStore(
     const version = await getMeta(META_STOREKEY_VERSION);
     if (version !== "2") {
       if (legacyKey && !eqBytes(legacyKey, storeKey)) {
-        const r = await rekeyMessages(legacyKey);
+        const r = await rekeyLocalStore(legacyKey);
         console.log(`[session] re-keyed local store: ${r.rekeyed} rows${r.failed ? `, ${r.failed} left for re-sync` : ""}`);
       }
       await setMeta(META_STOREKEY_VERSION, "2");

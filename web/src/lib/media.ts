@@ -57,6 +57,19 @@ export async function uploadMedia(
 // In-memory cache so re-renders don't re-download / re-decrypt.
 const OBJECT_URLS = new Map<string, string>();
 
+// Drop a decrypted object URL.
+//
+// The cache is keyed by blob id and was never evicted, which is fine for
+// chat media the user keeps — but a diary entry that expires has to take
+// its decrypted bytes with it. Deleting the row while the ObjectURL
+// still resolves would be cleanup in name only.
+export function revokeObjectUrlFor(blobId: string): void {
+  const url = OBJECT_URLS.get(blobId);
+  if (!url) return;
+  OBJECT_URLS.delete(blobId);
+  try { URL.revokeObjectURL(url); } catch { /* already gone */ }
+}
+
 export async function objectUrlFor(ref: MediaRef): Promise<string> {
   const cacheKey = ref.blobId;
   const hit = OBJECT_URLS.get(cacheKey);

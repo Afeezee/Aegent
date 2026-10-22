@@ -343,10 +343,15 @@ const SCHEMA = `
 // Columns added after the first release. Both backends get the same
 // idempotent treatment: Postgres has ADD COLUMN IF NOT EXISTS, SQLite
 // needs a pragma probe first.
-const ADDED_USER_COLUMNS: Array<{ name: string; ddl: string }> = [
-  { name: "phone", ddl: "ALTER TABLE users ADD COLUMN phone TEXT" },
-  { name: "wrapped_priv_rec", ddl: "ALTER TABLE users ADD COLUMN wrapped_priv_rec TEXT" },
-  { name: "rec_salt", ddl: "ALTER TABLE users ADD COLUMN rec_salt TEXT" },
+//
+// The table names here are interpolated into SQL rather than bound,
+// because `PRAGMA table_info(?)` rejects a parameter. That is safe only
+// because this list is a hard-coded literal — never build it from input.
+type AddedColumn = { table: string; name: string; ddl: string };
+const ADDED_COLUMNS: AddedColumn[] = [
+  { table: "users", name: "phone", ddl: "ALTER TABLE users ADD COLUMN phone TEXT" },
+  { table: "users", name: "wrapped_priv_rec", ddl: "ALTER TABLE users ADD COLUMN wrapped_priv_rec TEXT" },
+  { table: "users", name: "rec_salt", ddl: "ALTER TABLE users ADD COLUMN rec_salt TEXT" },
 ];
 
 export async function initSchema(): Promise<void> {
@@ -355,13 +360,21 @@ export async function initSchema(): Promise<void> {
   // existed. Postgres has ADD COLUMN IF NOT EXISTS; SQLite doesn't, so
   // we probe pragma_table_info first.
   if (isPg) {
-    for (const c of ADDED_USER_COLUMNS) {
+    for (const c of ADDED_COLUMNS) {
       await db.exec(c.ddl.replace("ADD COLUMN", "ADD COLUMN IF NOT EXISTS"));
     }
   } else {
-    const cols = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
-    for (const c of ADDED_USER_COLUMNS) {
-      if (!cols.some((x) => x.name === c.name)) await db.exec(c.ddl);
+    const byTable = new Map<string, AddedColumn[]>();
+    for (const c of ADDED_COLUMNS) {
+      const list = byTable.get(c.table) ?? [];
+      list.push(c);
+      byTable.set(c.table, list);
+    }
+    for (const [table, columns] of byTable) {
+      const existing = await db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+      for (const c of columns) {
+        if (!existing.some((x) => x.name === c.name)) await db.exec(c.ddl);
+      }
     }
   }
   await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL");

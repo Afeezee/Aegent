@@ -161,9 +161,49 @@ export function decryptFromPeer(
   return dec.decode(pt);
 }
 
+// ---- byte-level box ----
+//
+// `encryptForPeer` is string-in/string-out, which is right for message
+// payloads but wrong for wrapping a raw 32-byte key: round-tripping key
+// material through base64 and UTF-8 works by accident rather than by
+// design. These are the same primitive without the text assumption.
+
+export function boxSealBytes(
+  plaintext: Uint8Array,
+  peerPublicKey: Uint8Array,
+  myPrivateKey: Uint8Array,
+): string {
+  const nonce = nacl.randomBytes(nacl.box.nonceLength);
+  const ct = nacl.box(plaintext, nonce, peerPublicKey, myPrivateKey);
+  const out = new Uint8Array(nonce.length + ct.length);
+  out.set(nonce, 0); out.set(ct, nonce.length);
+  return b64.encode(out);
+}
+
+export function boxOpenBytes(
+  wrapped: string,
+  peerPublicKey: Uint8Array,
+  myPrivateKey: Uint8Array,
+): Uint8Array {
+  const buf = b64.decode(wrapped);
+  const nonce = buf.slice(0, nacl.box.nonceLength);
+  const ct = buf.slice(nacl.box.nonceLength);
+  const pt = nacl.box.open(ct, nonce, peerPublicKey, myPrivateKey);
+  if (!pt) throw new Error("decrypt_failed");
+  return pt;
+}
+
 // ---- media content key ----
 // One key per attachment; delivered inside the E2E-encrypted message.
 export function newContentKey(): Uint8Array {
+  return nacl.randomBytes(nacl.secretbox.keyLength);
+}
+
+// One key per diary entry. Named apart from `newContentKey` because the
+// two have different lifetimes and different revocation stories: a
+// content key lives inside a message forever, while an entry key is the
+// thing a diary grant hands out and later withholds.
+export function newEntryKey(): Uint8Array {
   return nacl.randomBytes(nacl.secretbox.keyLength);
 }
 

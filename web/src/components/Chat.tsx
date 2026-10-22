@@ -12,6 +12,7 @@ import {
   type ContactRow, type GroupRow,
 } from "../lib/store.js";
 import { onTyping } from "../lib/socket.js";
+import { formatDay, withDayBreaks } from "../lib/daybreaks.js";
 import {
   currentSession, myId, reportRead, sendDelete, sendEdit, sendReaction,
 } from "../lib/session.js";
@@ -284,13 +285,13 @@ export function Chat({
         {msgs.length === 0 ? (
           <EmptyChat title={thread.title} isGroup={thread.isGroup} />
         ) : (
-          renderWithDayBreaks(msgs).map((entry) => {
+          withDayBreaks(msgs).map((entry) => {
             if (entry.kind === "day") return (
               <div key={`day-${entry.at}`} style={{ textAlign: "center", margin: "10px 0" }}>
                 <span className="tag">{formatDay(entry.at)}</span>
               </div>
             );
-            const m = entry.msg;
+            const m = entry.item;
             // Look up the actual previous *message* (not the previous
             // grouped entry, which might be a day separator) so
             // consecutive-sender collapsing is correct.
@@ -386,29 +387,6 @@ function EmptyChat({ title, isGroup }: { title: string; isGroup: boolean }) {
       </div>
     </FadeIn>
   );
-}
-
-type Entry = { kind: "day"; at: number } | { kind: "msg"; msg: OpenedMessage };
-function renderWithDayBreaks(msgs: OpenedMessage[]): Entry[] {
-  const out: Entry[] = [];
-  let lastDay = "";
-  for (const m of msgs) {
-    const d = new Date(m.createdAt).toDateString();
-    if (d !== lastDay) { out.push({ kind: "day", at: m.createdAt }); lastDay = d; }
-    out.push({ kind: "msg", msg: m });
-  }
-  return out;
-}
-
-function formatDay(t: number): string {
-  const d = new Date(t);
-  const now = new Date();
-  const one = new Date(now); one.setDate(now.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return "Today";
-  if (d.toDateString() === one.toDateString()) return "Yesterday";
-  const week = 7 * 86400_000;
-  if (now.getTime() - t < week) return d.toLocaleDateString([], { weekday: "long" });
-  return d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
 function previewLabel(m: OpenedMessage): string {
