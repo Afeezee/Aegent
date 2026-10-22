@@ -15,6 +15,10 @@
      surfaces that don't set them, so the CSS below still works. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Height of the mobile tab bar. Zero everywhere else, so every
+     bottom-anchored element can add it unconditionally and desktop
+     arithmetic stays exactly as it was. */
+  --tabbar-h: 0px;
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
 

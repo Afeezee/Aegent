@@ -4,6 +4,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar, Button, ErrorBoundary, Glass, Icon } from "../components/ui.js";
+import { NavRail, TabBar, type Dest } from "../components/TabBar.js";
+import { Diary } from "./Diary.js";
 import { Chat } from "../components/Chat.js";
 import { ThreadList } from "../components/ThreadList.js";
 import { ComposeOverlay } from "../components/ComposeOverlay.js";
@@ -22,8 +24,9 @@ import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
 import { onReplication, replicationSummary, type ReplicationState } from "../lib/replication.js";
 import { onChatDeepLink } from "../lib/deeplinks.js";
 import { WelcomeTour, consumeTourPending } from "../components/WelcomeTour.js";
+import { diaryNow } from "../lib/diary.js";
 import {
-  getContact, listGroups, listThreads, markRead, setContactPresence,
+  getContact, listGroups, listThreads, liveDiaryEntries, markRead, setContactPresence,
   takeDueScheduledBackups,
   upsertContact, upsertGroup, type OpenedMessage, type Thread,
 } from "../lib/store.js";
@@ -77,6 +80,25 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   useEffect(() => { setCameFromAgent(false); }, [thread?.peerId]);
 
   const me = currentSession()?.user;
+
+  // Unseen entries from other people — the dot on the Diary tab, and
+  // the cheapest reason to come back to the app.
+  const [diaryUnread, setDiaryUnread] = useState(0);
+
+  // Which top-level destination is showing. Chats and Groups share one
+  // list (groups already flow through listThreads) and differ only by
+  // filter; Diary is its own surface.
+  const [dest, setDest] = useState<Dest>("chats");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const meId = currentSession()?.user.id;
+        const rows = await liveDiaryEntries(diaryNow());
+        setDiaryUnread(rows.filter((e) => e.authorId !== meId && !e.seenAt).length);
+      } catch { setDiaryUnread(0); }
+    })();
+  }, [refresh]);
 
   // Replication status. Two jobs: tell the user their history is safe
   // (or on its way), and re-render the thread list as restored messages
@@ -260,23 +282,36 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   }, []);
 
   const bp = useBreakpoint();
+  const barVisible = bp === "sm" && !thread;
+  useEffect(() => {
+    document.documentElement.style.setProperty("--tabbar-h", barVisible ? "56px" : "0px");
+    return () => document.documentElement.style.setProperty("--tabbar-h", "0px");
+  }, [barVisible]);
   const showSidebar = bp !== "sm" || !thread;
   const showChat = bp !== "sm" || !!thread;
 
   return (
     <div style={{
       display: "grid",
-      gridTemplateColumns: bp === "sm" ? "1fr" : "320px 1fr",
+      gridTemplateColumns: bp === "sm" ? "1fr"
+        : dest === "diary" ? "64px 1fr"
+        : "64px 320px 1fr",
       height: "100vh",
       // Reserve space around the OS chrome (Android nav bar at the
       // bottom, notch at the top). On desktop / web these insets are 0
       // so nothing changes.
       paddingTop: "calc(12px + var(--safe-top))",
-      paddingBottom: "calc(12px + var(--safe-bottom))",
+      paddingBottom: "calc(12px + var(--tabbar-h) + var(--safe-bottom))",
       paddingLeft: "calc(12px + var(--safe-left))",
       paddingRight: "calc(12px + var(--safe-right))",
       gap: 12, position: "relative",
     }}>
+      {bp !== "sm" && <NavRail dest={dest} onSelect={setDest} unread={{ diary: diaryUnread }} />}
+
+      {dest === "diary" ? (
+        <Diary refreshKey={refresh} />
+      ) : (
+      <>
       {showSidebar && (
         <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <div style={{
@@ -341,6 +376,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           )}
           <div style={{ flex: 1, minHeight: 0, marginTop: 4 }}>
             <ThreadList
+              filter={dest === "groups" ? "group" : "all"}
               activeId={thread?.peerId ?? null}
               onSelect={setThread}
               onCompose={() => setCompose(true)}
@@ -381,6 +417,11 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         </Glass>
       )}
 
+      </>
+      )}
+
+      {barVisible && <TabBar dest={dest} onSelect={setDest} unread={{ diary: diaryUnread }} />}
+
       {/*
         Floating agent button. Rules for where it lives:
         - Hide when the agent panel is already open.
@@ -394,7 +435,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           area applied so the Android nav bar doesn't clip it either.
       */}
       <AnimatePresence>
-        {!agentOpen && bp === "sm" && !thread && (
+        {!agentOpen && bp === "sm" && !thread && dest !== "diary" && (
           <motion.button
             initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.6, opacity: 0 }}
             whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
@@ -406,7 +447,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
               position: "fixed",
               right: "calc(18px + var(--safe-right))",
               // Above the composer bar so it never intercepts a Send tap.
-              bottom: "calc(90px + var(--safe-bottom))",
+              bottom: "calc(90px + var(--tabbar-h) + var(--safe-bottom))",
               zIndex: 400,
               width: 52, height: 52, borderRadius: 999, border: "none", cursor: "pointer",
               background: "linear-gradient(135deg, var(--violet), var(--aqua))",

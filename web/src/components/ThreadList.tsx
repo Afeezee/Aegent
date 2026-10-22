@@ -6,16 +6,21 @@ import { Avatar, Button, Icon, StaggerItem } from "./ui.js";
 import { listThreads, type Thread } from "../lib/store.js";
 
 export function ThreadList({
-  activeId, onSelect, onCompose, onOpenSearch, refreshKey,
+  activeId, onSelect, onCompose, onOpenSearch, refreshKey, filter = "all",
 }: {
   activeId: string | null;
   onSelect: (t: Thread) => void;
   onCompose: () => void;
   onOpenSearch: () => void;
   refreshKey: number;
+  // Groups are not a separate store — they already come through
+  // listThreads. The Groups destination is this list, filtered.
+  filter?: "all" | "direct" | "group";
 }) {
-  const [threads, setThreads] = useState<Thread[]>([]);
-  useEffect(() => { (async () => setThreads(await listThreads()))(); }, [refreshKey]);
+  const [all, setAll] = useState<Thread[]>([]);
+  useEffect(() => { (async () => setAll(await listThreads()))(); }, [refreshKey]);
+  const threads = all.filter((t) =>
+    filter === "all" ? true : filter === "group" ? t.isGroup : !t.isGroup);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>

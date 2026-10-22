@@ -151,7 +151,7 @@ export function Modal({
             // Safe-area padding so the modal doesn't clip under the
             // Android nav bar or a top notch.
             paddingTop: "calc(20px + var(--safe-top))",
-            paddingBottom: "calc(20px + var(--safe-bottom))",
+            paddingBottom: "calc(20px + var(--tabbar-h) + var(--safe-bottom))",
             paddingLeft: "calc(20px + var(--safe-left))",
             paddingRight: "calc(20px + var(--safe-right))",
             backdropFilter: "blur(10px)",
@@ -261,7 +261,7 @@ export function ToastHost() {
     <div style={{
       position: "fixed",
       right: "calc(20px + var(--safe-right))",
-      bottom: "calc(20px + var(--safe-bottom))",
+      bottom: "calc(20px + var(--tabbar-h) + var(--safe-bottom))",
       display: "flex", flexDirection: "column", gap: 8, zIndex: 2000, maxWidth: 320,
     }}>
       <AnimatePresence>
@@ -337,6 +337,9 @@ const ico = (path: ReactNode, size = 20) => (
 
 export const Icon = {
   send: () => ico(<><path d="M17 3L3 10l6 2 2 6 6-15z" /></>),
+  chat: () => ico(<><path d="M3 6a2 2 0 012-2h10a2 2 0 012 2v6a2 2 0 01-2 2H8l-4 3v-3a2 2 0 01-1-2V6z" /></>),
+  diary: () => ico(<><path d="M5 3h9a1 1 0 011 1v12a1 1 0 01-1 1H5a2 2 0 01-2-2V5a2 2 0 012-2z" /><path d="M3 14.5A2 2 0 015 13h10" /><path d="M7 7h5" /></>),
+  clock: () => ico(<><circle cx="10" cy="10" r="7" /><path d="M10 6v4l2.5 2" /></>),
   search: () => ico(<><circle cx="9" cy="9" r="6" /><path d="M17 17l-3.5-3.5" /></>),
   plus: () => ico(<><path d="M10 4v12M4 10h12" /></>),
   users: () => ico(<><circle cx="7" cy="8" r="3" /><circle cx="14" cy="8" r="2.5" /><path d="M1 17c0-3 3-5 6-5s6 2 6 5" /><path d="M13 12c2 0 6 1 6 5" /></>),
