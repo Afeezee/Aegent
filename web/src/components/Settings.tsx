@@ -624,8 +624,10 @@ function ResyncPanel() {
           <div className="small">
             {rep.serverTotal < 0
               ? "Relay unreachable — this device still has everything it had before."
-              : `${rep.localTotal} of ${rep.serverTotal} envelopes on this device`}
-            {rep.pending > 0 && ` · ${rep.pending} retrying`}
+              : rep.missing > 0
+                ? `${rep.missing} envelope${rep.missing === 1 ? "" : "s"} still to fetch`
+                : `Every one of the ${rep.serverTotal} envelope${rep.serverTotal === 1 ? "" : "s"} the relay holds is on this device`}
+            {rep.pending > 0 && ` · ${rep.pending} couldn't be read`}
             {rep.queuedOutbound > 0 && ` · ${rep.queuedOutbound} queued to send`}
           </div>
         </div>

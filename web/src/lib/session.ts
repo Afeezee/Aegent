@@ -45,10 +45,10 @@ import {
 } from "./api.js";
 import {
   applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
-  enqueueOutbox, getContact, getGroup, getMeta, ledgerClear, ledgerCounts, ledgerMarkOk,
-  ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered, markRead,
-  openStore, outboxCount, rekeyMessages, repairTimestamps, saveMediaMessage, saveTextMessage,
-  setMeta, upsertContact, upsertGroup, type MediaRef,
+  enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
+  ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
+  markRead, openStore, outboxCount, rekeyMessages, repairTimestamps, saveMediaMessage,
+  saveTextMessage, setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
 import { connectSocket, disconnectSocket, sendCipher } from "./socket.js";
@@ -236,49 +236,120 @@ async function drain(reason: string): Promise<{ pulled: number }> {
   // Page forward until the server says there is nothing left. The
   // page limit is a safety valve against a pathological loop, not an
   // expected ceiling: 2000 pages is ~600k envelopes.
-  for (; pages < 2000; pages++) {
-    const page = await api.inbox({
-      all: true,
-      since: cursor?.since ?? 0,
-      afterId: cursor?.afterId ?? undefined,
-      limit: PAGE_SIZE,
-    });
-    if (page.envelopes.length === 0) break;
-    pulled += await ingestBatch(page.envelopes);
-    if (page.cursor) {
-      cursor = { since: Number(page.cursor.since) || 0, afterId: page.cursor.afterId };
-      writeCursor(userId, cursor);
+  //
+  // A failure in here must NOT abort the rest of the drain. Reconciliation
+  // below fetches by id and depends on no cursor at all, so it is the one
+  // step that can still make progress when paging is broken — exactly the
+  // case where a device would otherwise sit at a frozen "N to go" forever,
+  // because the status numbers come from a different request that keeps
+  // succeeding.
+  try {
+    for (; pages < 2000; pages++) {
+      const page = await api.inbox({
+        all: true,
+        since: cursor?.since ?? 0,
+        afterId: cursor?.afterId ?? undefined,
+        limit: PAGE_SIZE,
+      });
+      if (page.envelopes.length === 0) break;
+      pulled += await ingestBatch(page.envelopes);
+      if (page.cursor) {
+        cursor = { since: Number(page.cursor.since) || 0, afterId: page.cursor.afterId };
+        writeCursor(userId, cursor);
+      }
+      try {
+        const counts = await ledgerCounts();
+        emitDrainProgress({ ingested: counts.total, serverTotal, reason });
+      } catch { /* ignore */ }
+      if (!page.more) break;
     }
-    try {
-      const counts = await ledgerCounts();
-      emitDrainProgress({ ingested: counts.total, serverTotal, reason });
-    } catch { /* ignore */ }
-    if (!page.more) break;
+  } catch (e) {
+    console.warn("[drain] paging failed, falling back to reconciliation:", (e as Error).message);
+    bumpSkipCounter("paging_failed");
   }
 
   // Retry anything still pending from this or an earlier drain.
-  const retried = await retryPending();
+  const retried = await retryPending().catch(() => 0);
 
-  // Divergence check: the ledger knows exactly how many envelopes we
-  // have accounted for. If the server holds more, our cursor has moved
-  // past something we never saw (an envelope committed out of order, a
-  // cursor written during a failed write, a cleared ledger) — so start
-  // over from the beginning. This is the backstop that makes "messages
-  // are always there" true rather than merely intended.
-  let healed = 0;
+  // Reconciliation: ask the relay which envelope ids it holds for us,
+  // diff against the ledger, and fetch exactly what's missing by id.
+  //
+  // This replaces a count comparison that could never converge. Counts
+  // answer "how far behind", which is the wrong question when the two
+  // sides are counting different things — an account whose history
+  // predates the ledger looks permanently behind while missing nothing,
+  // and the device re-drains forever trying to close a gap that isn't
+  // there. An id diff either converges or names what didn't.
+  const recovered = await reconcile(reason);
+
+  writeDiag({ lastPullAt: Date.now(), lastPulled: pulled + retried + recovered, lastReason: reason });
+  return { pulled: pulled + retried + recovered };
+}
+
+// The exact-accounting pass. Cheap in the common case (one request, and
+// the diff is empty), so it runs at the end of every drain.
+async function reconcile(reason: string): Promise<number> {
   try {
-    const [stats, counts] = await Promise.all([api.inboxStats(), ledgerCounts()]);
-    writeDiag({ serverTotal: stats.total, localTotal: counts.total, pending: counts.pending });
-    if (stats.total > counts.total && reason !== "heal") {
-      console.warn(`[drain] server has ${stats.total} envelopes, ledger has ${counts.total} — re-draining from the start`);
-      writeCursor(userId, null);
-      const again = await drain("heal");
-      healed = again.pulled;
+    const [listing, counts] = await Promise.all([api.inboxIds(), ledgerCounts()]);
+    if (listing.truncated) {
+      // Very large account: fall back to counts for reporting. The
+      // cursor drain above is still exhaustive.
+      writeDiag({
+        serverTotal: counts.total, localTotal: counts.total,
+        pending: counts.pending, missing: 0,
+      });
+      return 0;
     }
-  } catch { /* stats are advisory; never fail a drain over them */ }
+    const have = new Set(await ledgerAllIds());
+    const missing = listing.ids.filter((id) => !have.has(id));
 
-  writeDiag({ lastPullAt: Date.now(), lastPulled: pulled + retried + healed, lastReason: reason });
-  return { pulled: pulled + retried + healed };
+    let recovered = 0;
+    if (missing.length > 0) {
+      console.warn(`[reconcile] ${missing.length} envelope(s) the relay holds are not accounted for — fetching by id (${reason})`);
+      for (let i = 0; i < missing.length; i += 200) {
+        const chunk = missing.slice(i, i + 200);
+        const { envelopes } = await api.inboxFetch(chunk);
+        recovered += await ingestBatch(envelopes);
+        // An id the relay listed but then declined to hand over would
+        // otherwise stay "missing" on every future pass — a phantom
+        // deficit that never closes. Record it so the diff converges and
+        // the user is told something concrete instead of watching a
+        // counter that never moves.
+        const returned = new Set(envelopes.map((e) => e.id));
+        for (const id of chunk) {
+          if (returned.has(id)) continue;
+          await ledgerMarkPending(
+            { id, senderId: "", recipientId: "", groupId: null, ciphertext: "", createdAt: 0 },
+            "not_returned_by_relay",
+          ).catch(() => { /* ignore */ });
+        }
+        try {
+          const c = await ledgerCounts();
+          emitDrainProgress({ ingested: c.total, serverTotal: listing.ids.length, reason: "reconcile" });
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Re-diff so the number we report is what is true *now*, not what
+    // we hoped the repair achieved. Anything still unaccounted for is a
+    // real problem and says so rather than hiding behind a count.
+    const after = new Set(await ledgerAllIds());
+    const stillMissing = listing.ids.filter((id) => !after.has(id)).length;
+    const finalCounts = await ledgerCounts();
+    writeDiag({
+      serverTotal: listing.ids.length,
+      localTotal: Math.min(finalCounts.total, listing.ids.length),
+      pending: finalCounts.pending,
+      missing: stillMissing,
+    });
+    if (stillMissing > 0) {
+      console.warn(`[reconcile] ${stillMissing} envelope(s) could not be retrieved`);
+    }
+    return recovered;
+  } catch (e) {
+    console.warn("[reconcile] skipped:", (e as Error).message);
+    return 0;
+  }
 }
 
 // Ingest one page: skip what the ledger already has, ingest the rest,
@@ -306,13 +377,20 @@ async function ingestBatch(envelopes: Envelope[]): Promise<number> {
 // Walk the pending ledger. Each row still carries its ciphertext, so a
 // retry needs no network round trip beyond whatever the failure
 // originally needed (usually a contact lookup).
+// An envelope that has failed this many times is not going to start
+// working on the next tick — most likely it was encrypted to a key this
+// account no longer holds. We stop retrying it and keep reporting it, so
+// the user is told "2 messages couldn't be read" instead of watching a
+// sync that never finishes.
+const MAX_RETRY_ATTEMPTS = 8;
+
 async function retryPending(): Promise<number> {
   let fixed = 0;
-  const pending = await ledgerPending();
+  const pending = (await ledgerPending()).filter((r) => r.attempts <= MAX_RETRY_ATTEMPTS);
   if (pending.length === 0) return 0;
   const toAck: string[] = [];
   for (const row of pending) {
-    if (!row.raw) continue;
+    if (!row.raw || !row.raw.ciphertext) continue;
     try {
       const res = await ingestEnvelope(row.raw, { ack: false });
       if (res) { fixed++; toAck.push(row.raw.id); }
@@ -353,6 +431,9 @@ export function bumpInboxCursor(env: { id: string; createdAt: number }): void {
 export type AvailabilityReport = {
   serverTotal: number;
   localLedger: number;
+  // Envelopes the relay holds that this device has no record of at all.
+  // Exact, from the last reconciliation — not a difference of counts.
+  missing: number;
   pending: number;
   queuedOutbound: number;
   newestAt: number | null;
@@ -369,14 +450,22 @@ export async function availabilityReport(): Promise<AvailabilityReport> {
     ledgerCounts().catch(() => ({ ok: 0, pending: 0, total: 0 })),
     outboxCount().catch(() => 0),
   ]);
+  // `missing` comes from the last reconciliation, which compared ids
+  // rather than totals. Counts are for display only: the relay's total
+  // and the ledger's are not the same quantity (the relay counts rows,
+  // the ledger counts what this device has processed), and treating a
+  // difference between them as "messages are missing" is what produced
+  // a permanent, meaningless "122 to go".
+  const missing = Math.max(readDiag().missing ?? 0, 0);
   return {
     serverTotal: stats.total,
     localLedger: counts.total,
+    missing,
     pending: counts.pending,
     queuedOutbound: queued,
     newestAt: stats.newestAt,
     oldestAt: stats.oldestAt,
-    healthy: stats.total >= 0 && counts.total >= stats.total && counts.pending === 0 && queued === 0,
+    healthy: missing === 0 && counts.pending === 0 && queued === 0,
   };
 }
 
@@ -562,6 +651,9 @@ type SyncDiag = {
   skipped?: Record<string, number>;
   lastPushedAt?: number; lastPushed?: number;
   serverTotal?: number; localTotal?: number; pending?: number;
+  // Exact count of envelopes the relay holds that this device has no
+  // record of, as of the last reconciliation.
+  missing?: number;
 };
 function readDiag(): SyncDiag {
   try { return JSON.parse(localStorage.getItem(SYNC_DIAG_KEY) ?? "{}"); }

@@ -392,8 +392,55 @@ app.get("/api/inbox", authed, async (req, res) => {
   } catch (e) { handleError(res, e); }
 });
 
+// Exact reconciliation: the ids of every envelope addressed to this
+// user. The client diffs this against its own ledger to learn precisely
+// which envelopes it is missing, then asks for those by id.
+//
+// Counting was not good enough. A count says "you are 122 behind" but
+// not *which* 122, so a device whose history predates the ledger — or
+// which holds envelopes its paging cursor can no longer reach — can sit
+// at a permanent, unfixable deficit while in fact missing nothing. An id
+// diff converges or names exactly what didn't.
+app.get("/api/inbox/ids", authed, async (req, res) => {
+  try {
+    const uid = (req as AuthedReq).userId;
+    // Ids are ~36 bytes each. The cap keeps the response sane for very
+    // large accounts; past it the client falls back to count comparison.
+    const MAX_IDS = 20000;
+    const rows = await db.prepare(
+      `SELECT id FROM messages
+         WHERE recipient_id = ?
+         ORDER BY created_at ASC, id ASC
+         LIMIT ${MAX_IDS + 1}`,
+    ).all<{ id: string }>(uid);
+    const truncated = rows.length > MAX_IDS;
+    res.json({
+      ids: rows.slice(0, MAX_IDS).map((r) => r.id),
+      truncated,
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+// Fetch specific envelopes by id — the repair half of reconciliation.
+// Ordering and cursors are irrelevant here, which is the point: an
+// envelope that no cursor can reach is still retrievable by id.
+app.post("/api/inbox/fetch", authed, async (req, res) => {
+  try {
+    const body = z.object({ ids: z.array(z.string()).min(1).max(300) }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    const out: ReturnType<typeof envelopeOf>[] = [];
+    for (const id of body.ids) {
+      const row = await db.prepare(
+        "SELECT * FROM messages WHERE id = ? AND recipient_id = ?",
+      ).get<MessageRow>(id, uid);
+      if (row) out.push(envelopeOf(row));
+    }
+    res.json({ envelopes: out });
+  } catch (e) { handleError(res, e); }
+});
+
 // Availability watchdog. The client compares these counts against what
-// it actually holds locally; any shortfall triggers a full re-drain
+// it actually holds locally; any shortfall triggers reconciliation
 // instead of waiting for the user to notice missing messages.
 app.get("/api/inbox/stats", authed, async (req, res) => {
   try {

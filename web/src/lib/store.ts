@@ -724,6 +724,13 @@ export async function ledgerCounts(): Promise<{ ok: number; pending: number; tot
   return { ok, pending, total: ok + pending };
 }
 
+// Every envelope id this device has accounted for, successful or
+// parked. Used to diff against the relay's list.
+export async function ledgerAllIds(): Promise<string[]> {
+  const keys = await requireDb().envelopes.toCollection().primaryKeys();
+  return keys.map((k) => String(k));
+}
+
 // Used by "Re-sync all history": forget what we think we've seen so the
 // next drain re-ingests every envelope from scratch. Message rows are
 // keyed by msgId, so re-ingesting overwrites rather than duplicates.

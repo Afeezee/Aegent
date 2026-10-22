@@ -250,6 +250,14 @@ export const api = {
     return req<InboxPage | Envelope[]>(`/api/inbox${qs ? `?${qs}` : ""}`).then(normalizeInbox);
   },
   inboxStats: () => req<InboxStats>("/api/inbox/stats"),
+  // Exact reconciliation pair: every envelope id the relay holds for us,
+  // and retrieval of specific envelopes by id.
+  inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),
+  inboxFetch: (ids: string[]) => req<{ envelopes: Envelope[] }>("/api/inbox/fetch", {
+    method: "POST", body: JSON.stringify({ ids }),
+  }).then((r) => ({
+    envelopes: r.envelopes.map((e) => ({ ...e, createdAt: Number(e.createdAt) || 0 })),
+  })),
   ack: (ids: string[]) => req<{ ok: true }>("/api/ack", {
     method: "POST", body: JSON.stringify({ ids }),
   }),

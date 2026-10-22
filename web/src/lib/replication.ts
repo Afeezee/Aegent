@@ -41,6 +41,10 @@ export type ReplicationState = {
   // Envelope accounting — the honest measure of "do I have everything".
   serverTotal: number;      // -1 when the relay couldn't be reached
   localTotal: number;
+  // Exact, from reconciliation by id: envelopes the relay holds that
+  // this device has no record of. This — never a difference of totals —
+  // is what "behind" means.
+  missing: number;
   pending: number;          // envelopes parked for retry
   queuedOutbound: number;   // messages waiting to leave this device
   lastSyncAt: number | null;
@@ -51,6 +55,7 @@ const INITIAL: ReplicationState = {
   phase: "idle",
   serverTotal: -1,
   localTotal: 0,
+  missing: 0,
   pending: 0,
   queuedOutbound: 0,
   lastSyncAt: null,
@@ -166,9 +171,18 @@ async function cycle(reason: string): Promise<void> {
       lastError: null,
     });
 
-    await flushOutbox();
-    await replicateUnpushed();
-    await pullInbox({ reason });
+    // Each step is guarded on its own. These are independent jobs, and
+    // letting a failing outbox flush (say, one unreachable recipient)
+    // skip the drain is how a device ends up frozen at a number that
+    // never moves while the status request behind that number keeps
+    // succeeding.
+    const step = async (name: string, fn: () => Promise<unknown>) => {
+      try { await fn(); }
+      catch (e) { console.warn(`[replication] ${name} failed:`, (e as Error).message); }
+    };
+    await step("outbox flush", () => flushOutbox());
+    await step("cloud copy", () => replicateUnpushed());
+    await step("drain", () => pullInbox({ reason }));
 
     const report = await availabilityReport();
     const unreachable = report.serverTotal < 0;
@@ -177,6 +191,7 @@ async function cycle(reason: string): Promise<void> {
       phase: unreachable ? "offline" : report.healthy ? "synced" : "catching-up",
       serverTotal: report.serverTotal,
       localTotal: report.localLedger,
+      missing: report.missing,
       pending: report.pending,
       queuedOutbound: report.queuedOutbound,
       lastSyncAt: unreachable ? state.lastSyncAt : Date.now(),
@@ -207,7 +222,7 @@ export function replicationSummary(s: ReplicationState): string {
       return "Not signed in";
     case "restoring":
       return s.serverTotal > 0
-        ? `Restoring your messages… ${s.localTotal} of ${s.serverTotal}`
+        ? `Restoring your messages… ${Math.min(s.localTotal, s.serverTotal)} of ${s.serverTotal}`
         : "Restoring your messages…";
     case "syncing":
       return "Syncing…";
@@ -216,9 +231,10 @@ export function replicationSummary(s: ReplicationState): string {
         ? `Offline · ${s.queuedOutbound} waiting to send`
         : "Offline · will sync when you reconnect";
     case "catching-up": {
-      const behind = Math.max(s.serverTotal - s.localTotal, 0);
-      if (behind > 0) return `Catching up · ${behind} to go`;
-      if (s.pending > 0) return `Retrying ${s.pending}`;
+      if (s.missing > 0) return `Catching up · ${s.missing} to go`;
+      if (s.pending > 0) {
+        return `${s.pending} message${s.pending === 1 ? "" : "s"} couldn't be read yet`;
+      }
       if (s.queuedOutbound > 0) return `${s.queuedOutbound} waiting to send`;
       return "Catching up…";
     }
