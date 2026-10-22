@@ -27,6 +27,7 @@ import {
   replicateUnpushed,
 } from "./session.js";
 import { messageCount } from "./store.js";
+import { syncDiary } from "./diary.js";
 
 export type ReplicationPhase =
   | "idle"        // no session
@@ -183,6 +184,11 @@ async function cycle(reason: string): Promise<void> {
     await step("outbox flush", () => flushOutbox());
     await step("cloud copy", () => replicateUnpushed());
     await step("drain", () => pullInbox({ reason }));
+    // The diary rides the same cadence — ticks, reconnects, focus — but
+    // reports separately. It is lossy by design for viewers, and feeding
+    // that into a never-lose-a-message watchdog would manufacture a
+    // permanent false deficit.
+    await step("diary", () => syncDiary());
 
     const report = await availabilityReport();
     const unreachable = report.serverTotal < 0;

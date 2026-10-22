@@ -16,13 +16,17 @@ import { apiUrl, loadToken } from "./api.js";
 import { secretBoxOpenBytes, secretBoxSealBytes } from "./crypto.js";
 import { retryFetch } from "./retry.js";
 import {
-  everyMessage, listContacts, listGroups, listReminders,
+  everyMessage, listContacts, listGroups, listReminders, myDiaryEntries,
   openStore, upsertContact, upsertGroup,
-  saveTextMessage, saveMediaMessage, saveReminder,
+  saveDiaryEntry, saveTextMessage, saveMediaMessage, saveReminder,
   type StoredMessage, type ContactRow, type GroupRow,
 } from "./store.js";
+import { currentSession } from "./session.js";
 
-const SCHEMA_VERSION = 1;
+// v2 adds the author's diary archive. The version is bumped even though
+// the field is optional: a v1-only reader silently dropping someone's
+// diary is a worse failure than refusing to read a newer backup.
+const SCHEMA_VERSION = 2;
 
 // Message shape used on-the-wire. Bodies are the *plaintext* the user
 // wrote — we're re-encrypting the whole payload with the backup key,
@@ -54,6 +58,17 @@ export type BackupPayload = {
   groups: GroupRow[];
   messages: WireMessage[];
   reminders: Array<{ id: string; text: string; whenIso: string; createdAt: number }>;
+  // Only the author's own entries: the ones with no expiry. Entries
+  // other people lent us are not ours to put in a backup that outlives
+  // their 24 hours.
+  diary?: WireDiaryEntry[];
+};
+
+type WireDiaryEntry = {
+  id: string; dayKey: string; tzOffsetMin: number; seq: number;
+  kind: "text" | "media"; createdAt: number;
+  text: string | null; caption: string | null;
+  media: StoredMessage["media"];
 };
 
 // ---- upload ----
@@ -68,6 +83,7 @@ export async function pushBackup(
   const groups = await listGroups();
   const messages = await everyMessage();
   const reminders = await listReminders();
+  const diary = await ownDiaryForBackup();
 
   const wire: BackupPayload = {
     v: SCHEMA_VERSION,
@@ -77,6 +93,7 @@ export async function pushBackup(
     groups,
     messages: messages.map(toWire),
     reminders,
+    diary,
   };
   const json = new TextEncoder().encode(JSON.stringify(wire));
   const ct = secretBoxSealBytes(backupKey, json);
@@ -151,6 +168,28 @@ export async function rehydrateInto(payload: BackupPayload, me: { id: string; st
     }
   }
   for (const r of payload.reminders) await saveReminder(r.text, r.whenIso);
+  // Older backups have no diary field; that is not an error.
+  for (const d of payload.diary ?? []) {
+    await saveDiaryEntry({
+      id: d.id, authorId: me.id, dayKey: d.dayKey, tzOffsetMin: d.tzOffsetMin,
+      seq: d.seq, kind: d.kind, createdAt: d.createdAt,
+      expiresAt: null,                       // ours, and therefore permanent
+      text: d.text, caption: d.caption, media: d.media,
+    });
+  }
+}
+
+// Only entries we wrote. An entry someone shared with us expires on
+// their terms, and copying it into a backup would quietly outlive that.
+async function ownDiaryForBackup(): Promise<WireDiaryEntry[]> {
+  const me = currentSession()?.user.id;
+  if (!me) return [];
+  const rows = await myDiaryEntries(me);
+  return rows.map((d) => ({
+    id: d.id, dayKey: d.dayKey, tzOffsetMin: d.tzOffsetMin, seq: d.seq,
+    kind: d.kind, createdAt: d.createdAt,
+    text: d.text, caption: d.caption, media: d.media,
+  }));
 }
 
 // ---- auto-backup ----

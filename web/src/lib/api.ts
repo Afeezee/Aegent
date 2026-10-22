@@ -142,6 +142,15 @@ export type InboxPage = {
 // A relay from before paging existed answers with a bare array. Accept
 // both shapes so a client that outlives a deploy (or an APK pointed at
 // an older relay) still drains instead of failing on `page.envelopes`.
+function diaryQuery(opts: { since?: number; afterId?: string; limit?: number }): string {
+  const q = new URLSearchParams();
+  if (opts.since) q.set("since", String(opts.since));
+  if (opts.afterId) q.set("afterId", opts.afterId);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
 function normalizeInbox(r: InboxPage | Envelope[]): InboxPage {
   const page: InboxPage = Array.isArray(r)
     ? { envelopes: r, more: false, cursor: null }
@@ -162,6 +171,33 @@ export type InboxStats = {
   total: number;
   newestAt: number | null;
   oldestAt: number | null;
+};
+
+// A diary entry as the relay serves it: the sealed body plus our own
+// grant. The key arrives wrapped to us and is useless to anyone else,
+// including the relay that stored it.
+export type DiaryEntryApi = {
+  id: string;
+  authorId: string;
+  dayKey: string;
+  tzOffsetMin: number;
+  seq: number;
+  kind: "text" | "media";
+  bodyCt: string;
+  wrappedKey: string;
+  createdAt: number;
+  expiresAt: number | null;   // null = our own entry, kept forever
+  seenAt: number | null;
+};
+
+export type DiaryPage = {
+  entries: DiaryEntryApi[];
+  // The relay's clock. The client measures expiry against this rather
+  // than its own, so a device whose clock moved backwards cannot
+  // resurrect entries it should have dropped.
+  serverNow: number;
+  more: boolean;
+  cursor: { since: number; afterId: string } | null;
 };
 
 export type RecoveryChallenge = {
@@ -250,6 +286,33 @@ export const api = {
     return req<InboxPage | Envelope[]>(`/api/inbox${qs ? `?${qs}` : ""}`).then(normalizeInbox);
   },
   inboxStats: () => req<InboxStats>("/api/inbox/stats"),
+
+  // ---- diary ----
+  diaryPublish: (body: {
+    id: string; dayKey: string; tzOffsetMin: number; seq: number;
+    kind: "text" | "media"; createdAt: number; bodyCt: string; authorKey: string;
+    grants: Array<{ viewerId: string; wrappedKey: string }>; blobIds: string[];
+  }) => req<{ id: string; createdAt: number; expiresAt: number }>(
+    "/api/diary/entries", { method: "POST", body: JSON.stringify(body) },
+  ),
+  diaryFeed: (opts: { since?: number; afterId?: string; limit?: number } = {}) =>
+    req<DiaryPage>(`/api/diary/feed${diaryQuery(opts)}`),
+  diaryMine: (opts: { since?: number; afterId?: string; limit?: number } = {}) =>
+    req<DiaryPage>(`/api/diary/mine${diaryQuery(opts)}`),
+  diarySeen: (entryIds: string[]) => req<{ ok: true }>("/api/diary/seen", {
+    method: "POST", body: JSON.stringify({ entryIds }),
+  }),
+  diaryViews: (entryId: string) => req<{ count: number; viewers: Array<{ id: string; seenAt: number }> }>(
+    `/api/diary/entries/${encodeURIComponent(entryId)}/views`,
+  ),
+  diaryGrants: (entryId: string, body: {
+    add: Array<{ viewerId: string; wrappedKey: string }>; remove: string[];
+  }) => req<{ ok: true }>(`/api/diary/entries/${encodeURIComponent(entryId)}/grants`, {
+    method: "PATCH", body: JSON.stringify(body),
+  }),
+  diaryDelete: (entryId: string) => req<{ ok: true }>(
+    `/api/diary/entries/${encodeURIComponent(entryId)}`, { method: "DELETE" },
+  ),
   // Exact reconciliation pair: every envelope id the relay holds for us,
   // and retrieval of specific envelopes by id.
   inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),

@@ -87,6 +87,53 @@ export type StoredMessage = {
 
 export type ReminderRow = { id: string; text: string; whenIso: string; createdAt: number };
 
+// ---- diary ----
+//
+// One row per entry this device can read, whether we wrote it or someone
+// shared it. `expiresAt` is the whole asymmetry: null means ours and
+// kept forever, a number means somebody lent it to us until then.
+//
+// Text is sealed at rest with the local-store key like message bodies.
+// `media` is not: it holds the attachment's content key, which is the
+// same (knowingly imperfect) position chat media already takes.
+export type DiaryEntryRow = {
+  id: string;
+  authorId: string;
+  dayKey: string;          // 'YYYY-MM-DD' in the AUTHOR's timezone
+  tzOffsetMin: number;
+  seq: number;
+  kind: "text" | "media";
+  createdAt: number;
+  expiresAt: number | null;
+  text_ct: string | null;
+  caption_ct: string | null;
+  media: MediaRef | null;
+  seenAt: number | null;
+  // Author-side only: how many people have opened this entry.
+  viewCount: number | null;
+};
+
+export type OpenedDiaryEntry =
+  Omit<DiaryEntryRow, "text_ct" | "caption_ct"> & { text: string | null; caption: string | null };
+
+// Who a day's entries go to. Default is every contact; the override is
+// per day because that is the unit people think in ("not today").
+export type DiaryAudienceRow = {
+  dayKey: string;
+  mode: "all" | "only" | "except";
+  ids: string[];
+};
+
+// A publish that hasn't reached the relay yet. Separate from the message
+// outbox so `queuedOutbound` in the replication status keeps meaning
+// messages — a diary entry waiting to go out is not a message at risk.
+export type DiaryOutboxRow = {
+  id: string;
+  createdAt: number;
+  payload_ct: string;      // the sealed publish request
+  attempts: number;
+};
+
 // ---- envelope ledger ----
 //
 // One row per envelope the server has ever handed us, successful or
@@ -165,6 +212,9 @@ class AegentDB extends Dexie {
   agentTurns!: Table<AgentTurnRow, string>;
   envelopes!: Table<EnvelopeLedgerRow, string>;
   outbox!: Table<OutboxRow, string>;
+  diaryEntries!: Table<DiaryEntryRow, string>;
+  diaryAudience!: Table<DiaryAudienceRow, string>;
+  diaryOutbox!: Table<DiaryOutboxRow, string>;
   meta!: Table<{ k: string; v: string }, string>;
 
   constructor(userId: string) {
@@ -192,6 +242,14 @@ class AegentDB extends Dexie {
     this.version(4).stores({
       envelopes: "id, status, createdAt",
       outbox: "id, createdAt",
+    });
+    // v5: the diary. `expiresAt` is indexed and nullable on purpose —
+    // IndexedDB leaves null keys out of an index, so a range query over
+    // it sees exactly the borrowed entries and never our own.
+    this.version(5).stores({
+      diaryEntries: "id, authorId, createdAt, expiresAt, [authorId+createdAt], [authorId+dayKey]",
+      diaryAudience: "dayKey",
+      diaryOutbox: "id, createdAt",
     });
   }
 }
@@ -697,8 +755,10 @@ export async function repairTimestamps(): Promise<number> {
 // into it, and only once the table actually exists in the schema —
 // `db.table()` throws for a store the current version doesn't declare.
 const SEALED_TABLES: Array<{ table: string; fields: string[] }> = [
-  { table: "messages", fields: ["body_ct", "caption_ct", "editedBody_ct"] },
-  { table: "outbox",   fields: ["packed_ct"] },
+  { table: "messages",     fields: ["body_ct", "caption_ct", "editedBody_ct"] },
+  { table: "outbox",       fields: ["packed_ct"] },
+  { table: "diaryEntries", fields: ["text_ct", "caption_ct"] },
+  { table: "diaryOutbox",  fields: ["payload_ct"] },
 ];
 
 // Re-seal everything under a new local-store key.
@@ -847,6 +907,125 @@ export async function messageCount(): Promise<number> {
 export async function distinctThreadIds(): Promise<string[]> {
   const keys = await requireDb().messages.orderBy("peerId").uniqueKeys();
   return keys.map((k) => String(k));
+}
+
+// ---- diary ----
+
+export function openDiaryEntry(r: DiaryEntryRow): OpenedDiaryEntry {
+  const key = LOCAL_STORE_KEY!;
+  const dec = (ct: string | null): string | null => {
+    if (!ct) return null;
+    try { return new TextDecoder().decode(secretBoxOpen(key, ct)); }
+    catch { return "<corrupt>"; }
+  };
+  return { ...r, text: dec(r.text_ct), caption: dec(r.caption_ct) };
+}
+
+export async function saveDiaryEntry(input: {
+  id: string; authorId: string; dayKey: string; tzOffsetMin: number; seq: number;
+  kind: "text" | "media"; createdAt: number; expiresAt: number | null;
+  text?: string | null; caption?: string | null; media?: MediaRef | null;
+}): Promise<void> {
+  const existing = await requireDb().diaryEntries.get(input.id);
+  await requireDb().diaryEntries.put({
+    id: input.id,
+    authorId: input.authorId,
+    dayKey: input.dayKey,
+    tzOffsetMin: input.tzOffsetMin,
+    seq: input.seq,
+    kind: input.kind,
+    createdAt: input.createdAt,
+    expiresAt: input.expiresAt,
+    text_ct: input.text ? sealText(input.text) : null,
+    caption_ct: input.caption ? sealText(input.caption) : null,
+    media: input.media ?? null,
+    // Re-ingesting an entry must not un-see it or forget its view count.
+    seenAt: existing?.seenAt ?? null,
+    viewCount: existing?.viewCount ?? null,
+  });
+}
+
+export async function getDiaryEntry(id: string): Promise<OpenedDiaryEntry | undefined> {
+  const row = await requireDb().diaryEntries.get(id);
+  return row ? openDiaryEntry(row) : undefined;
+}
+
+// Everything still readable at `now`. Expiry is checked on read as well
+// as swept, so a stale sweep can never surface an entry that has lapsed.
+export async function liveDiaryEntries(now: number): Promise<OpenedDiaryEntry[]> {
+  const rows = await requireDb().diaryEntries.toArray();
+  return rows
+    .filter((r) => r.expiresAt === null || r.expiresAt > now)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map(openDiaryEntry);
+}
+
+export async function myDiaryEntries(authorId: string, dayKey?: string): Promise<OpenedDiaryEntry[]> {
+  const table = requireDb().diaryEntries;
+  const rows = dayKey
+    ? await table.where("[authorId+dayKey]").equals([authorId, dayKey]).toArray()
+    : await table.where("authorId").equals(authorId).toArray();
+  return rows.sort((a, b) => a.createdAt - b.createdAt).map(openDiaryEntry);
+}
+
+export async function diaryEntryCount(): Promise<number> {
+  return requireDb().diaryEntries.count();
+}
+
+export async function markDiarySeenLocal(ids: string[], at = Date.now()): Promise<void> {
+  for (const id of ids) {
+    await requireDb().diaryEntries.update(id, { seenAt: at }).catch(() => { /* gone */ });
+  }
+}
+
+export async function setDiaryViewCount(id: string, count: number): Promise<void> {
+  await requireDb().diaryEntries.update(id, { viewCount: count }).catch(() => { /* gone */ });
+}
+
+// Drop what we were only lent. Returns the blob ids that went with them
+// so the caller can release their decrypted object URLs — deleting the
+// row while the URL still resolves would be cleanup in name only.
+export async function gcDiaryEntries(now: number): Promise<{ removed: number; blobIds: string[] }> {
+  const doomed = await requireDb().diaryEntries
+    .where("expiresAt").below(now)
+    .toArray();
+  if (doomed.length === 0) return { removed: 0, blobIds: [] };
+  const blobIds = doomed.map((r) => r.media?.blobId).filter((b): b is string => !!b);
+  await requireDb().diaryEntries.bulkDelete(doomed.map((r) => r.id));
+  return { removed: doomed.length, blobIds };
+}
+
+export async function deleteDiaryEntry(id: string): Promise<void> {
+  await requireDb().diaryEntries.delete(id);
+}
+
+export async function getDiaryAudience(dayKey: string): Promise<DiaryAudienceRow | undefined> {
+  return requireDb().diaryAudience.get(dayKey);
+}
+export async function setDiaryAudience(row: DiaryAudienceRow): Promise<void> {
+  await requireDb().diaryAudience.put(row);
+}
+
+export async function enqueueDiaryPublish(id: string, payload: string): Promise<void> {
+  await requireDb().diaryOutbox.put({
+    id, createdAt: Date.now(), payload_ct: sealText(payload), attempts: 0,
+  });
+}
+export async function listDiaryPublishQueue(): Promise<Array<{ id: string; payload: string }>> {
+  const rows = await requireDb().diaryOutbox.orderBy("createdAt").toArray();
+  const out: Array<{ id: string; payload: string }> = [];
+  for (const r of rows) {
+    try {
+      out.push({ id: r.id, payload: new TextDecoder().decode(secretBoxOpen(LOCAL_STORE_KEY!, r.payload_ct)) });
+    } catch { /* unreadable queue row — drop on next flush */ }
+  }
+  return out;
+}
+export async function dequeueDiaryPublish(id: string): Promise<void> {
+  await requireDb().diaryOutbox.delete(id);
+}
+export async function diaryQueueCount(): Promise<number> {
+  return requireDb().diaryOutbox.count();
 }
 
 // ---- helpers ----
