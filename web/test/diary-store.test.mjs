@@ -64,6 +64,26 @@ describe("storing and opening entries", () => {
   });
 });
 
+describe("formatting", () => {
+  test("format and alignment survive a round trip", async () => {
+    const markup = ["## Market day", "It was **loud**."].join("\n");
+    await saveDiaryEntry(mine("f1", { text: markup, format: "md", align: "justify" }));
+    const row = await getDiaryEntry("f1");
+    assert.equal(row.format, "md");
+    assert.equal(row.align, "justify");
+    assert.equal(row.text, markup,
+      "markup is stored verbatim and rendered on display, never pre-rendered into the store");
+  });
+
+  test("entries written before formatting existed stay plain", async () => {
+    // No format/align supplied, as an older client would send.
+    await saveDiaryEntry(mine("f2", { text: "just words" }));
+    const row = await getDiaryEntry("f2");
+    assert.equal(row.format, "plain", "defaulting to md would reinterpret old text as markup");
+    assert.equal(row.align, "left");
+  });
+});
+
 describe("expiry", () => {
   test("a lapsed entry is dropped and its image released", async () => {
     await saveDiaryEntry(mine("keep"));

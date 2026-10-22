@@ -30,7 +30,10 @@ import {
 import { currentSession, ensureContact } from "./session.js";
 import { revokeObjectUrlFor } from "./media.js";
 import { dayKeyFor } from "./daybreaks.js";
-import { newEntryId, packDiaryBody, unpackDiaryBody, type DiaryBody } from "./diary-protocol.js";
+import {
+  newEntryId, packDiaryBody, unpackDiaryBody,
+  type DiaryAlign, type DiaryBody, type DiaryFormat,
+} from "./diary-protocol.js";
 
 const META_SKEW = "diary.clockSkew";
 const META_CURSOR = "diary.feedCursor";
@@ -60,8 +63,8 @@ export function diaryNow(): number {
 // ---- publishing ----
 
 export type PublishInput =
-  | { kind: "text"; body: string }
-  | { kind: "media"; media: MediaRef; caption?: string };
+  | { kind: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign }
+  | { kind: "media"; media: MediaRef; caption?: string; format?: DiaryFormat; align?: DiaryAlign };
 
 // Resolve today's audience on this device. The relay is handed an
 // explicit list of recipients and never the word "everyone": it has no
@@ -87,8 +90,8 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
   const id = newEntryId();
 
   const body: DiaryBody = input.kind === "text"
-    ? { v: 1, t: "text", body: input.body }
-    : { v: 1, t: "media", media: input.media, caption: input.caption };
+    ? { v: 1, t: "text", body: input.body, format: input.format, align: input.align }
+    : { v: 1, t: "media", media: input.media, caption: input.caption, format: input.format, align: input.align };
 
   // One key per entry: it is what a grant hands out, and what deleting a
   // grant takes away.
@@ -129,6 +132,7 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
     text: input.kind === "text" ? input.body : null,
     caption: input.kind === "media" ? input.caption ?? null : null,
     media: input.kind === "media" ? input.media : null,
+    format: input.format, align: input.align,
   });
 
   try {
@@ -197,6 +201,7 @@ async function ingest(entry: DiaryEntryApi, mine: boolean): Promise<boolean> {
     text: body.t === "text" ? body.body : null,
     caption: body.t === "media" ? body.caption ?? null : null,
     media: body.t === "media" ? body.media : null,
+    format: body.format, align: body.align,
   });
   return true;
 }

@@ -9,6 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Button, Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 import { publishDiaryEntry, resolveAudience } from "../lib/diary.js";
+import { DiaryToolbar } from "./DiaryToolbar.js";
+import type { DiaryAlign } from "../lib/diary-protocol.js";
 import { dayKeyFor } from "../lib/daybreaks.js";
 import { pickFile, uploadMedia } from "../lib/media.js";
 
@@ -20,7 +22,9 @@ export function DiaryComposer({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [audience, setAudience] = useState<number | null>(null);
+  const [align, setAlign] = useState<DiaryAlign>("left");
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Show how many people this reaches before it is written, not after.
   //
@@ -43,7 +47,7 @@ export function DiaryComposer({
     if (!body || busy) return;
     setBusy(true);
     try {
-      const r = await publishDiaryEntry({ kind: "text", body });
+      const r = await publishDiaryEntry({ kind: "text", body, format: "md", align });
       setText("");
       toast(r.queued ? "Saved — it'll post when you're back online" : "Added to today's page", "ok");
       onPosted();
@@ -65,7 +69,9 @@ export function DiaryComposer({
       const media = await uploadMedia(picked, (frac) => {
         toastUpdate(id, { text: `Uploading · ${Math.round(frac * 100)}%`, progress: frac });
       });
-      const r = await publishDiaryEntry({ kind: "media", media, caption: text.trim() || undefined });
+      const r = await publishDiaryEntry({
+        kind: "media", media, caption: text.trim() || undefined, format: "md", align,
+      });
       setText("");
       toastUpdate(id, {
         text: r.queued ? "Saved — it'll post when you're back online" : "Photo added to today's page",
@@ -118,7 +124,13 @@ export function DiaryComposer({
               </Button>
             </div>
 
+            <DiaryToolbar
+              textarea={textRef} value={text} onChange={setText}
+              align={align} onAlign={setAlign}
+            />
+
             <textarea
+              ref={textRef}
               autoFocus
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -127,6 +139,9 @@ export function DiaryComposer({
               style={{
                 width: "100%", boxSizing: "border-box", resize: "vertical",
                 minHeight: 140, fontSize: 15, lineHeight: 1.6,
+                // Shows the chosen alignment while writing, so the
+                // control is not a promise you only see after posting.
+                textAlign: align,
               }}
             />
 

@@ -34,10 +34,27 @@ export const b64 = {
 
 // Each test file gets its own port and its own database, so files can run
 // in any order and leave nothing behind.
-let nextPort = 8900 + Math.floor(Math.random() * 400);
+//
+// The port is taken from the OS rather than guessed. `node --test` runs
+// each file in its own process, so a per-process random base collides
+// across files often enough to matter — and the failure is confusing
+// rather than obvious: the loser's relay exits, the winner's answers
+// /healthz, and the second file quietly runs its assertions against the
+// first file's database.
+async function freePort() {
+  const { createServer } = await import("node:net");
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 export async function startRelay() {
-  const port = nextPort++;
+  const port = await freePort();
   const dir = mkdtempSync(join(tmpdir(), "aegent-test-"));
   const child = spawn(
     process.execPath,
@@ -73,8 +90,22 @@ export async function startRelay() {
     track: (s) => { sockets.push(s); return s; },
     async stop() {
       for (const s of sockets) { try { s.close(); } catch { /* already gone */ } }
-      child.kill();
-      await new Promise((r) => child.once("exit", r));
+      // Kill the TREE, not the child. `tsx` runs the server in a
+      // grandchild, so killing the wrapper leaves a live relay behind —
+      // and orphans accumulate across runs until they start interfering
+      // with each other, which surfaces as unrelated tests failing with
+      // ECONNRESET rather than as anything that points at the cause.
+      if (process.platform === "win32") {
+        const { spawnSync } = await import("node:child_process");
+        spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } else {
+        child.kill("SIGKILL");
+      }
+      await new Promise((r) => {
+        if (child.exitCode !== null) return r();
+        child.once("exit", r);
+        setTimeout(r, 3000);
+      });
       try { rmSync(dir, { recursive: true, force: true }); } catch { /* windows file locks */ }
     },
   };

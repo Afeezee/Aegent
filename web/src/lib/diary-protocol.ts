@@ -16,9 +16,21 @@ import type { MediaRef } from "./store.js";
 
 export const DIARY_VERSION = 1;
 
+// How an entry's text should read.
+//
+// `body` is Markdown when `format` says so — headings for a title, bold,
+// italics, quotes and lists. Alignment is not a Markdown concept, so it
+// rides as its own field rather than being smuggled into the text as
+// HTML, which would then have to be sanitised on the way out.
+//
+// Both are optional and both default to what the first version did, so
+// an entry written by an older client still renders correctly.
+export type DiaryFormat = "plain" | "md";
+export type DiaryAlign = "left" | "center" | "right" | "justify";
+
 export type DiaryBody =
-  | { v: 1; t: "text"; body: string }
-  | { v: 1; t: "media"; caption?: string; media: MediaRef };
+  | { v: 1; t: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign }
+  | { v: 1; t: "media"; caption?: string; media: MediaRef; format?: DiaryFormat; align?: DiaryAlign };
 
 export function packDiaryBody(b: DiaryBody): string {
   return JSON.stringify(b);

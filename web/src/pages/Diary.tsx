@@ -10,13 +10,17 @@
 // a plain invitation to continue to the next person.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Avatar, Button, Glass, Icon, toast } from "../components/ui.js";
 import { MediaView } from "../components/MediaView.js";
 import { DiaryComposer } from "../components/DiaryComposer.js";
 import { formatDay } from "../lib/daybreaks.js";
+import { objectUrlFor } from "../lib/media.js";
 import {
-  diaryNow, refreshViewCount, removeDiaryEntry, reportSeen, syncDiary,
+  diaryNow, reactToEntry, refreshViewCount, removeDiaryEntry, replyToEntry,
+  reportSeen, responsesFor, syncDiary, type EntryResponses,
 } from "../lib/diary.js";
 import { currentSession } from "../lib/session.js";
 import {
@@ -69,7 +73,7 @@ export function Diary({ refreshKey }: { refreshKey: number }) {
     });
     setPages(out);
     setLoading(false);
-  }, [me]);
+  }, [me?.id]);
 
   useEffect(() => { void load(); }, [load, refreshKey]);
   // One pull on open: arriving at the tab is the moment someone most
@@ -82,8 +86,7 @@ export function Diary({ refreshKey }: { refreshKey: number }) {
 
   return (
     <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
-      <AnimatePresence mode="wait">
-        {reading ? (
+      {reading ? (
           <motion.div key={`read-${reading.authorId}`}
             initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
@@ -124,20 +127,29 @@ export function Diary({ refreshKey }: { refreshKey: number }) {
               </div>
               {loading ? (
                 <div className="small" style={{ padding: "10px 4px" }}>Loading…</div>
-              ) : others.length === 0 ? (
-                <div className="small" style={{ padding: "10px 4px", lineHeight: 1.6 }}>
-                  Nobody you know has written today. When they do, their page
-                  appears here for a day.
-                </div>
               ) : (
-                others.map((p) => (
-                  <PageRow key={p.authorId} page={p} onClick={() => setOpenAuthor(p.authorId)} />
-                ))
+                <>
+                  {/* Your own page sits in the list like everyone else's,
+                      with the same preview — a status list that hides the
+                      owner's own entry makes you check twice whether it
+                      posted. */}
+                  {mine && (
+                    <PageRow key={mine.authorId} page={mine} onClick={() => setOpenAuthor(mine.authorId)} />
+                  )}
+                  {others.map((p) => (
+                    <PageRow key={p.authorId} page={p} onClick={() => setOpenAuthor(p.authorId)} />
+                  ))}
+                  {others.length === 0 && (
+                    <div className="small" style={{ padding: "10px 4px", lineHeight: 1.6 }}>
+                      Nobody you know has written today. When they do, their page
+                      appears here for a day.
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </motion.div>
         )}
-      </AnimatePresence>
 
       <DiaryComposer
         open={composing}
@@ -204,14 +216,7 @@ function PageRow({ page, onClick }: { page: Page; onClick: () => void }) {
         width: "100%", boxSizing: "border-box", padding: "10px 10px", borderRadius: 14,
         marginTop: 6,
       }}>
-      <span style={{
-        borderRadius: "50%", padding: 2,
-        background: page.unseen > 0
-          ? "linear-gradient(135deg, var(--violet), var(--aqua))"
-          : "transparent",
-      }}>
-        <Avatar name={page.authorName} size="md" />
-      </span>
+      <PagePreview page={page} />
       <span style={{ flex: 1, minWidth: 0 }}>
         <span style={{ display: "block", fontWeight: page.unseen > 0 ? 650 : 500 }}>
           {page.authorName}
@@ -221,6 +226,7 @@ function PageRow({ page, onClick }: { page: Page; onClick: () => void }) {
         }}>
           {page.entries.length} {page.entries.length === 1 ? "entry" : "entries"}
           {last && ` · ${timeOf(last.createdAt)}`}
+          {page.mine && " · only you keep this"}
         </span>
       </span>
       {page.unseen > 0 && (
@@ -367,11 +373,183 @@ function Entry({
           )}
         </>
       ) : (
-        <div style={{ fontSize: 15, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>
-          {entry.text}
+        <EntryText entry={entry} />
+      )}
+
+      <Responses entry={entry} mine={mine} />
+    </article>
+  );
+}
+
+// Markdown is rendered, never injected: react-markdown builds elements
+// rather than setting innerHTML, so a diary entry cannot smuggle markup
+// into someone else's page.
+function EntryText({ entry }: { entry: OpenedDiaryEntry }) {
+  const align = entry.align ?? "left";
+  if (entry.format !== "md") {
+    return (
+      <div style={{ fontSize: 15, lineHeight: 1.7, whiteSpace: "pre-wrap", textAlign: align }}>
+        {entry.text}
+      </div>
+    );
+  }
+  return (
+    <div className="agent-md" style={{ fontSize: 15, lineHeight: 1.7, textAlign: align }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.text ?? ""}</ReactMarkdown>
+    </div>
+  );
+}
+
+// A small picture of the last thing written, the way a status list shows
+// one. An image gets its own thumbnail; text gets a pen, so a glance
+// tells you which kind of day it was.
+function PagePreview({ page }: { page: Page }) {
+  const last = page.entries[page.entries.length - 1];
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    if (!last?.media) { setUrl(null); return; }
+    objectUrlFor(last.media).then((u) => { if (live) setUrl(u); }).catch(() => { /* leave the icon */ });
+    return () => { live = false; };
+  }, [last?.id, last?.media]);
+
+  const ring = page.unseen > 0 || (page.mine && page.entries.length > 0);
+  return (
+    <span style={{
+      position: "relative", display: "inline-grid", placeItems: "center",
+      borderRadius: "50%", padding: 2,
+      background: ring ? "linear-gradient(135deg, var(--violet), var(--aqua))" : "transparent",
+    }}>
+      {url ? (
+        <img src={url} alt="" width={40} height={40}
+          style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+      ) : (
+        <Avatar name={page.authorName} size="md" />
+      )}
+      <span aria-hidden style={{
+        position: "absolute", right: -2, bottom: -2,
+        width: 16, height: 16, borderRadius: "50%",
+        display: "grid", placeItems: "center",
+        background: "var(--ink-2)", border: "1px solid var(--line)",
+        fontSize: 9, color: "var(--text-dim)",
+      }}>
+        {last?.media ? "▣" : "✎"}
+      </span>
+    </span>
+  );
+}
+
+const QUICK = ["❤️", "😂", "🔥", "👏", "😮"];
+
+// Responding is one-directional: everything a reader sends goes to the
+// author alone, as an ordinary encrypted message in their normal chat.
+// Nobody else reading this page sees it — which is precisely why there
+// is nothing here to moderate.
+function Responses({ entry, mine }: { entry: OpenedDiaryEntry; mine: boolean }) {
+  const [state, setState] = useState<EntryResponses | null>(null);
+  const [replying, setReplying] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    responsesFor(entry.id).then(setState).catch(() => setState(null));
+  }, [entry.id]);
+  useEffect(load, [load]);
+
+  async function react(emoji: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await reactToEntry({ id: entry.id, authorId: entry.authorId }, emoji);
+      load();
+    } catch (e) {
+      toast(`Couldn't send that: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+
+  async function sendReply() {
+    const body = draft.trim();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      await replyToEntry({ id: entry.id, authorId: entry.authorId }, body);
+      setDraft(""); setReplying(false);
+      toast("Sent privately", "ok");
+      load();
+    } catch (e) {
+      toast(`Couldn't send that: ${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  }
+
+  const counts = state?.reactions ?? [];
+
+  // On your own entry this is a report, not a control panel.
+  if (mine) {
+    const replies = state?.replies ?? 0;
+    return (
+      <div style={{
+        marginTop: 10, display: "flex", gap: 10, alignItems: "center",
+        flexWrap: "wrap", fontSize: 12, color: "var(--text-dim)",
+      }}>
+        {counts.length === 0 && replies === 0 ? (
+          <span style={{ opacity: 0.7 }}>No reactions yet</span>
+        ) : (
+          <>
+            {counts.map((r) => (
+              <span key={r.emoji} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 15 }}>{r.emoji}</span> {r.from.length}
+              </span>
+            ))}
+            {replies > 0 && <span>{replies} {replies === 1 ? "reply" : "replies"}</span>}
+          </>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        {QUICK.map((emoji) => {
+          const picked = state?.mine === emoji;
+          const count = counts.find((r) => r.emoji === emoji)?.from.length ?? 0;
+          return (
+            <button key={emoji} type="button" disabled={busy} onClick={() => react(emoji)}
+              aria-label={`React ${emoji}`}
+              style={{
+                all: "unset", cursor: busy ? "default" : "pointer",
+                padding: "4px 9px", borderRadius: 999, fontSize: 15, lineHeight: 1,
+                border: `1px solid ${picked ? "var(--accent)" : "var(--line)"}`,
+                background: picked ? "rgba(138,125,255,0.18)" : "rgba(255,255,255,0.03)",
+              }}>
+              {emoji}
+              {count > 0 && (
+                <span style={{ fontSize: 11, marginLeft: 4, color: "var(--text-dim)" }}>{count}</span>
+              )}
+            </button>
+          );
+        })}
+        <button type="button" onClick={() => setReplying((v) => !v)}
+          style={{ all: "unset", cursor: "pointer", marginLeft: 4, fontSize: 12, color: "var(--accent-strong)" }}>
+          {replying ? "Cancel" : "Reply privately"}
+        </button>
+      </div>
+
+      {replying && (
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <input
+            autoFocus value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void sendReply(); }}
+            placeholder="Only they will see this"
+            style={{ flex: 1 }}
+          />
+          <Button size="small" variant="primary" disabled={busy || !draft.trim()} onClick={sendReply}>
+            Send
+          </Button>
         </div>
       )}
-    </article>
+    </div>
   );
 }
 

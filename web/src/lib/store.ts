@@ -14,6 +14,7 @@
 
 import Dexie, { type Table } from "dexie";
 import { sentTimeFromMsgId, type DiaryRef } from "./protocol.js";
+import type { DiaryAlign, DiaryFormat } from "./diary-protocol.js";
 import { secretBoxOpen, secretBoxSeal } from "./crypto.js";
 import { embed, tokenize } from "./embeddings.js";
 
@@ -116,6 +117,11 @@ export type DiaryEntryRow = {
   seenAt: number | null;
   // Author-side only: how many people have opened this entry.
   viewCount: number | null;
+  // Presentation. Not sealed — these describe how the text reads, not
+  // what it says, and keeping them in the clear means the list can show
+  // a preview without opening every entry.
+  format: DiaryFormat;
+  align: DiaryAlign;
 };
 
 export type OpenedDiaryEntry =
@@ -989,6 +995,7 @@ export async function saveDiaryEntry(input: {
   id: string; authorId: string; dayKey: string; tzOffsetMin: number; seq: number;
   kind: "text" | "media"; createdAt: number; expiresAt: number | null;
   text?: string | null; caption?: string | null; media?: MediaRef | null;
+  format?: DiaryFormat; align?: DiaryAlign;
 }): Promise<void> {
   const existing = await requireDb().diaryEntries.get(input.id);
   await requireDb().diaryEntries.put({
@@ -1006,6 +1013,8 @@ export async function saveDiaryEntry(input: {
     // Re-ingesting an entry must not un-see it or forget its view count.
     seenAt: existing?.seenAt ?? null,
     viewCount: existing?.viewCount ?? null,
+    format: input.format ?? "plain",
+    align: input.align ?? "left",
   });
 }
 
