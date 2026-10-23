@@ -95,10 +95,11 @@ export function sendCipher(
   recipientId: string,
   ciphertext: string,
   groupId?: string,
+  sentAt?: number,
 ): Promise<{ ok: true; envelope: Envelope } | { ok: false; error: string }> {
   return new Promise((resolve) => {
     if (!sock) return resolve({ ok: false, error: "not_connected" });
-    sock.emit("send", { recipientId, ciphertext, groupId }, resolve);
+    sock.emit("send", { recipientId, ciphertext, groupId, sentAt }, resolve);
   });
 }
 

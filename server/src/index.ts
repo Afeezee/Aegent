@@ -1065,6 +1065,13 @@ io.on("connection", (socket) => {
         recipientId: z.string(),
         ciphertext: z.string().min(1),
         groupId: z.string().optional(),
+        // The moment the sender actually composed this. Live sends pass
+        // "now"; a device-backfill re-uploading an old message passes its
+        // ORIGINAL time. Honouring it is what stops backfilled history
+        // from being re-dated to the upload moment and bunching every
+        // sent message together, out of conversation order. Clamped so a
+        // fast client clock can't post into the future.
+        sentAt: z.number().int().positive().optional(),
       }).parse(raw);
 
       const recipient = await getUserById(body.recipientId);
@@ -1088,7 +1095,7 @@ io.on("connection", (socket) => {
         recipient_id: body.recipientId,
         group_id: body.groupId ?? null,
         ciphertext: body.ciphertext,
-        created_at: Date.now(),
+        created_at: body.sentAt ? Math.min(body.sentAt, Date.now()) : Date.now(),
         delivered_at: null,
         read_at: null,
       };

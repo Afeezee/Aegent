@@ -505,7 +505,7 @@ export async function pushLocalHistoryToServer(opts: {
     if (!payload) { skipped++; continue; }
     try {
       const cipher = encryptForPeer(packPayload(payload), CURRENT.publicKey, CURRENT.privateKey);
-      const res = await sendCipher(selfId, cipher);
+      const res = await sendCipher(selfId, cipher, undefined, m.createdAt);
       if (res.ok) { pushed++; pushedSet.add(m.id); } else skipped++;
     } catch { skipped++; }
   }
@@ -603,7 +603,7 @@ export function replicateUnpushed(): Promise<{ pushed: number }> {
         if (!payload) continue;
         try {
           const cipher = encryptForPeer(packPayload(payload), CURRENT!.publicKey, CURRENT!.privateKey);
-          const res = await sendCipher(uid, cipher);
+          const res = await sendCipher(uid, cipher, undefined, m.createdAt);
           if (res.ok) { pushedSet.add(m.id); newly++; }
         } catch { /* retry next cycle */ }
       }
@@ -1009,7 +1009,8 @@ async function fanOut(
       peerPubKey = b64.decode(peer.publicKey);
     }
     const cipher = encryptForPeer(packed, peerPubKey, CURRENT.privateKey);
-    const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined);
+    const sentAt = (withThread as { _at?: number })._at;
+    const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined, sentAt);
     if (!res.ok) {
       // Abandoning here leaves earlier recipients holding a message that
       // later ones never get, and the retry re-sends to everyone. Carry
