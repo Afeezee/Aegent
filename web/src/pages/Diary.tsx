@@ -335,7 +335,10 @@ function Entry({
   }, [entry.id, mine]);
 
   return (
-    <article data-entry-id={entry.id} style={{ margin: "10px 0 18px" }}>
+    <article data-entry-id={entry.id} style={{
+      margin: "0 0 4px", padding: "14px 0",
+      borderTop: "1px solid var(--line)",
+    }}>
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
         fontSize: 11, color: "var(--text-mute)", marginBottom: 6,

@@ -62,9 +62,11 @@ export function diaryNow(): number {
 
 // ---- publishing ----
 
+export type DiaryVisibility = "contacts" | "private";
+
 export type PublishInput =
-  | { kind: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign }
-  | { kind: "media"; media: MediaRef; caption?: string; format?: DiaryFormat; align?: DiaryAlign };
+  | { kind: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility }
+  | { kind: "media"; media: MediaRef; caption?: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility };
 
 // Resolve today's audience on this device. The relay is handed an
 // explicit list of recipients and never the word "everyone": it has no
@@ -98,7 +100,10 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
   const entryKey = newEntryKey();
   const bodyCt = secretBoxSeal(entryKey, new TextEncoder().encode(packDiaryBody(body)));
 
-  const audience = await resolveAudience(dayKey);
+  // "private" keeps the entry off everyone's feed: no viewer grants are
+  // minted, so only the author's own never-expiring grant exists and the
+  // entry lives in the archive alone.
+  const audience = input.visibility === "private" ? [] : await resolveAudience(dayKey);
   const grants: Array<{ viewerId: string; wrappedKey: string }> = [];
   for (const viewerId of audience) {
     const contact = await ensureContact(viewerId);

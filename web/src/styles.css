@@ -444,3 +444,17 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 @supports (height: 100dvh) {
   :root { --app-h: 100dvh; }
 }
+
+/* WYSIWYG diary editor: show a placeholder when empty, render its
+   limited block set, and keep contrast high (WCAG AA). */
+.rich-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-mute);
+}
+.rich-editor h2 { font-size: 18px; font-weight: 700; margin: 8px 0 4px; }
+.rich-editor blockquote {
+  border-left: 3px solid var(--accent); padding-left: 10px;
+  margin: 6px 0; color: var(--text-dim);
+}
+.rich-editor ul { padding-left: 20px; margin: 4px 0; }
+.rich-editor div { min-height: 1.2em; }
