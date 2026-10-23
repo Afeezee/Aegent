@@ -43,3 +43,7 @@ web/android/.idea/
 *.aab
 *.keystore
 !aegent-release.keystore.example
+
+# Firebase service-account keys must never be committed — env var only.
+*firebase-adminsdk*.json
+aegent-*-firebase-*.json

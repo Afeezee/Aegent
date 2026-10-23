@@ -360,6 +360,14 @@ export const api = {
   },
   inboxStats: () => req<InboxStats>("/api/inbox/stats"),
 
+  // ---- push ----
+  pushRegister: (token: string, platform: string) => req<{ ok: true; enabled: boolean }>(
+    "/api/push/register", { method: "POST", body: JSON.stringify({ token, platform }) },
+  ),
+  pushUnregister: (token: string) => req<{ ok: true }>(
+    "/api/push/unregister", { method: "POST", body: JSON.stringify({ token }) },
+  ),
+
   // ---- diary ----
   diaryPublish: (body: {
     id: string; dayKey: string; tzOffsetMin: number; seq: number;

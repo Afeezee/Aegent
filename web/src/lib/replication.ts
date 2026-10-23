@@ -114,6 +114,9 @@ export function startReplication(): void {
   if (started) { void cycle("restart"); return; }
   started = true;
   consecutiveFailures = 0;
+  // Register for push wake-ups once a session is live. Native-only and
+  // idempotent; a no-op on web.
+  void import("./push.js").then((m) => m.initPush()).catch(() => { /* non-fatal */ });
 
   unsubscribers.push(onConnected(() => { void cycle("socket-connect"); }));
 

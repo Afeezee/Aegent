@@ -49,6 +49,7 @@ import {
 } from "./diary.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentTurn } from "./agent.js";
+import { pushEnabled, registerToken, unregisterToken, wake } from "./push.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -213,6 +214,27 @@ app.post("/api/password/reset", async (req, res) => {
     });
     const tokens = await issueTokens(u.id, body.deviceLabel);
     res.json({ user: toPublic(u, livePresence), ...tokens });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- push wake-ups ----
+
+app.post("/api/push/register", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      token: z.string().min(1).max(4096),
+      platform: z.string().max(20).optional(),
+    }).parse(req.body);
+    await registerToken((req as AuthedReq).userId, body.token, body.platform ?? "android");
+    res.json({ ok: true, enabled: pushEnabled });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/push/unregister", authed, async (req, res) => {
+  try {
+    const body = z.object({ token: z.string().min(1).max(4096) }).parse(req.body);
+    await unregisterToken(body.token);
+    res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });
 
@@ -1078,6 +1100,14 @@ io.on("connection", (socket) => {
       const envelope = envelopeOf(row);
       io.to(`u:${body.recipientId}`).emit("message", envelope);
       ack?.({ ok: true, envelope });
+
+      // A live socket means the app is open and already draining, so a
+      // push would only buzz a phone that's showing the message anyway.
+      // Wake only the ones that aren't connected — and never ourselves
+      // for the self-copy.
+      if (body.recipientId !== userId && !livePresence.has(body.recipientId)) {
+        void wake(body.recipientId);
+      }
     } catch (err) {
       ack?.({ ok: false, error: (err as Error).message });
     }

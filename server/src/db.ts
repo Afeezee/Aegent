@@ -482,6 +482,18 @@ const SCHEMA = `
     ON group_archive(group_id, created_at, id);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_garchive_msg
     ON group_archive(group_id, msg_id);
+
+  -- FCM device tokens, for waking a frozen app. A token is one device;
+  -- a user may have several. No message content is ever stored or sent
+  -- through here — only the fact that a device should sync.
+  CREATE TABLE IF NOT EXISTS device_tokens (
+    token        TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    platform     TEXT NOT NULL,
+    created_at   ${BIG} NOT NULL,
+    last_seen_at ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
 `;
 
 // Columns added after the first release. Both backends get the same

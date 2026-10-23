@@ -824,6 +824,7 @@ export async function tryRestoreSession(): Promise<Session | null> {
 
 export function logout() {
   SWEPT_THIS_SESSION = false;
+  void import("./push.js").then((m) => m.teardownPush()).catch(() => { /* ignore */ });
   stopReplication();
   disconnectSocket();
   closeStore();
