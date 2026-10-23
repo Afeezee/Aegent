@@ -255,7 +255,15 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   }, []);
 
   const openThread = async (peerId: string, isGroup: boolean) => {
-    if (isGroup) await ensureGroup(peerId);
+    if (isGroup) {
+      await ensureGroup(peerId);
+      // Pull whatever of this group's past we hold keys for. Cheap after
+      // the first time: the cursor makes it incremental.
+      void import("../lib/groupkeys.js")
+        .then((m) => m.syncGroupHistory(peerId))
+        .then((n) => { if (n > 0) setRefresh((k) => k + 1); })
+        .catch(() => { /* history is best-effort */ });
+    }
     else await ensureContact(peerId);
     const threads = await listThreads();
     const found = threads.find((t) => t.peerId === peerId) ?? await synthThread(peerId, isGroup);

@@ -36,10 +36,11 @@ import {
 } from "./recovery.js";
 import { db, initSchema, livePresence, type MessageRow, type UserRow } from "./db.js";
 import {
-  addMember, banMember, canPost, createGroup, eventsSince, groupById, groupsForUser,
+  addMember, archiveMessage, banMember, canPost, createGroup, currentEpoch,
+  epochsFor, eventsSince, grantEpochKeys, groupById, groupsForUser,
   isMember, listInvites, listRequests, membersOf, membersWithRoles, mintInvite,
-  redeemInvite, removeMember, requireRole, resolveRequest, revokeInvite, setMuted,
-  setRole, settingsOf, unbanMember, updateGroup,
+  groupArchiveFor, redeemInvite, removeMember, requireRole, resolveRequest, revokeInvite, rotateEpoch,
+  setHistoryFrom, setMuted, setRole, settingsOf, unbanMember, updateGroup,
 } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, readBlobFor, storeBlob } from "./blobs.js";
 import {
@@ -379,6 +380,11 @@ app.post("/api/groups/:id/members", authed, async (req, res) => {
     const uid = (req as AuthedReq).userId;
     await requireRole(req.params.id, uid, "admin");
     await addMember(req.params.id, body.userId, uid);
+    // Policy decides where their history starts. 'all' means from the
+    // beginning — but only for epochs somebody actually grants them, so
+    // this is a bound, not a promise the relay can keep on its own.
+    const { historyPolicy } = await settingsOf(req.params.id);
+    await setHistoryFrom(req.params.id, body.userId, historyPolicy === "all" ? 0 : Date.now());
     res.json({ ok: true, memberIds: await membersOf(req.params.id) });
   } catch (e) { handleError(res, e); }
 });
@@ -467,6 +473,11 @@ app.post("/api/groups/join", authed, async (req, res) => {
   try {
     const body = z.object({ token: z.string().min(1) }).parse(req.body);
     const out = await redeemInvite(body.token, (req as AuthedReq).userId);
+    if (out.state === "joined") {
+      const { historyPolicy } = await settingsOf(out.group.id);
+      await setHistoryFrom(out.group.id, (req as AuthedReq).userId,
+        historyPolicy === "all" ? 0 : Date.now());
+    }
     res.json({
       state: out.state,
       group: out.state === "joined"
@@ -489,7 +500,122 @@ app.post("/api/groups/:id/requests/:uid", authed, async (req, res) => {
     const me = (req as AuthedReq).userId;
     await requireRole(req.params.id, me, "admin");
     await resolveRequest(req.params.id, req.params.uid, body.approve, me);
+    if (body.approve) {
+      const { historyPolicy } = await settingsOf(req.params.id);
+      await setHistoryFrom(req.params.id, req.params.uid, historyPolicy === "all" ? 0 : Date.now());
+    }
     res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- group history ----
+//
+// The epoch key never reaches this process in the clear. Clients mint
+// it, wrap it per member, and hand over the wrappings; the relay decides
+// only who may fetch which rows.
+
+app.get("/api/groups/:id/epochs", authed, async (req, res) => {
+  try {
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "member");
+    res.json({
+      current: await currentEpoch(req.params.id),
+      mine: await epochsFor(req.params.id, uid),
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/groups/:id/epochs/keys", authed, async (req, res) => {
+  try {
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "member");
+    const rows = await db.prepare(
+      "SELECT epoch, wrapped_key, granted_by FROM group_epoch_keys WHERE group_id = ? AND member_id = ?",
+    ).all<{ epoch: number; wrapped_key: string; granted_by: string }>(req.params.id, uid);
+    res.json({
+      keys: rows.map((r) => ({
+        epoch: Number(r.epoch), wrappedKey: r.wrapped_key, grantedBy: r.granted_by,
+      })),
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/epochs/grant", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      grants: z.array(z.object({
+        memberId: z.string().min(1),
+        epoch: z.number().int().min(0),
+        wrappedKey: z.string().min(1),
+      })).max(1000),
+    }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "member");
+    // You can only hand over epochs you hold yourself — the relay cannot
+    // check the key material, but it can check that you had access to it.
+    const mine = new Set(await epochsFor(req.params.id, uid));
+    for (const g of body.grants) {
+      if (!mine.has(g.epoch)) throw new ForbiddenError("not_your_epoch", "You don't hold that key.");
+    }
+    await grantEpochKeys(req.params.id, uid, body.grants);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/epochs/rotate", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      grants: z.array(z.object({
+        memberId: z.string().min(1), wrappedKey: z.string().min(1),
+      })).max(1000),
+    }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "member");
+    res.json({ epoch: await rotateEpoch(req.params.id, uid, body.grants) });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/groups/:id/archive", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      epoch: z.number().int().min(0),
+      msgId: z.string().min(1),
+      ciphertext: z.string().min(1),
+      createdAt: z.number().int(),
+    }).parse(req.body);
+    const uid = (req as AuthedReq).userId;
+    if (!(await canPost(req.params.id, uid))) {
+      throw new ForbiddenError("not_allowed", "You can't post in that group.");
+    }
+    await archiveMessage({
+      groupId: req.params.id, epoch: body.epoch, senderId: uid,
+      msgId: body.msgId, ciphertext: body.ciphertext,
+      // The relay owns the clock for the same reason it does elsewhere.
+      createdAt: Math.min(body.createdAt, Date.now()),
+    });
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/groups/:id/archive", authed, async (req, res) => {
+  try {
+    const uid = (req as AuthedReq).userId;
+    await requireRole(req.params.id, uid, "member");
+    const limit = Number(req.query.limit ?? 200) || 200;
+    const rows = await groupArchiveFor(req.params.id, uid, {
+      since: Number(req.query.since ?? 0) || 0,
+      afterId: String(req.query.afterId ?? "") || undefined,
+      limit,
+    });
+    const last = rows[rows.length - 1];
+    res.json({
+      messages: rows.map((r) => ({
+        id: r.id, epoch: Number(r.epoch), senderId: r.sender_id,
+        msgId: r.msg_id, ciphertext: r.ciphertext, createdAt: Number(r.created_at),
+      })),
+      more: rows.length === limit,
+      cursor: last ? { since: Number(last.created_at), afterId: last.id } : null,
+    });
   } catch (e) { handleError(res, e); }
 });
 

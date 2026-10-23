@@ -11,6 +11,7 @@ import { api, siteUrl, type GroupDetail, type GroupMember } from "../lib/api.js"
 import { getContact } from "../lib/store.js";
 import { currentSession, ensureContact } from "../lib/session.js";
 import { shareInvite } from "../lib/contacts-integration.js";
+import { grantHistoryTo, rotateAfterDeparture } from "../lib/groupkeys.js";
 
 export function GroupInfo({
   open, groupId, onClose, onChanged,
@@ -84,7 +85,14 @@ export function GroupInfo({
               {requests.map((r) => (
                 <Row key={r.userId} name={names[r.userId] ?? r.userId.slice(0, 6)} sub="wants to join">
                   <Button size="small" variant="primary" disabled={busy}
-                    onClick={() => act(() => api.groupResolveRequest(groupId, r.userId, true), "Approved")}>
+                    onClick={() => act(async () => {
+                      await api.groupResolveRequest(groupId, r.userId, true);
+                      // Only a member device holds the epoch keys, so the
+                      // person approving is the one who can hand over
+                      // history. If this doesn't run they simply see
+                      // nothing older than their arrival.
+                      await grantHistoryTo(groupId, r.userId);
+                    }, "Approved")}>
                     Approve
                   </Button>
                   <Button size="small" disabled={busy}
@@ -103,8 +111,17 @@ export function GroupInfo({
                 isMe={m.id === me} isAdmin={!!isAdmin} isOwner={!!isOwner} busy={busy}
                 onPromote={() => act(() => api.groupSetRole(groupId, m.id, m.role === "admin" ? "member" : "admin"), "Role updated")}
                 onMute={() => act(() => api.groupMute(groupId, m.id, m.mutedUntil ? 0 : 60), m.mutedUntil ? "Unmuted" : "Muted for an hour")}
-                onRemove={() => act(() => api.groupRemoveMember(groupId, m.id), "Removed")}
-                onBan={() => act(() => api.groupBan(groupId, m.id), "Removed and banned")}
+                onRemove={() => act(async () => {
+                  await api.groupRemoveMember(groupId, m.id);
+                  // New key from here on, so what is said next is sealed
+                  // with one they do not hold. What they already read is
+                  // theirs — rotation looks forward only.
+                  await rotateAfterDeparture(groupId);
+                }, "Removed")}
+                onBan={() => act(async () => {
+                  await api.groupBan(groupId, m.id);
+                  await rotateAfterDeparture(groupId);
+                }, "Removed and banned")}
               />
             ))}
           </Section>
@@ -164,10 +181,16 @@ function Settings({
         options={[["closed", "Nobody"], ["invite", "Anyone with a link"], ["request", "Ask an admin"]]}
         onChange={(v) => act(() => api.updateGroup(groupId, { joinMode: v as "closed" | "invite" | "request" }), "Saved")}
       />
+      <Choice
+        label="What new members can read" value={s?.historyPolicy ?? "none"} disabled={busy}
+        options={[["none", "From when they join"], ["all", "Everything"]]}
+        onChange={(v) => act(() => api.updateGroup(groupId, { historyPolicy: v as "none" | "all" }), "Saved")}
+      />
       <div className="small" style={{ marginTop: 6, lineHeight: 1.5 }}>
-        New members see messages from the moment they join. Older messages
-        were encrypted to the people who were here then, so they cannot be
-        handed over by the relay.
+        History is handed over as keys by whoever admits someone, so it
+        needs a member's device — not the relay, which cannot read any of
+        it. If nobody is around to admit them, they still join and simply
+        see nothing older than their arrival.
       </div>
     </Section>
   );

@@ -413,6 +413,123 @@ export async function resolveRequest(
   if (approve) await addMember(groupId, userId, by);
 }
 
+// ---- epochs and archive ----
+//
+// The relay is a filing cabinet here: it stores wrapped keys it cannot
+// open and ciphertext it cannot read, and decides only WHO may fetch
+// which rows. Two gates, deliberately:
+//
+//   * cryptographic — a member without an epoch key cannot read that
+//     epoch even if they obtain the bytes;
+//   * server-side — rows from epochs you hold no key for are not served
+//     at all, so the first gate never has to be the only one.
+
+export async function currentEpoch(groupId: string): Promise<number> {
+  const r = await db.prepare("SELECT epoch FROM groups WHERE id = ?").get<{ epoch: number }>(groupId);
+  return Number(r?.epoch ?? 0);
+}
+
+// Which epochs this member may read. The history policy is expressed
+// entirely as key distribution, so there is no separate switch to keep
+// in sync with what people can actually decrypt.
+export async function epochsFor(groupId: string, memberId: string): Promise<number[]> {
+  const rows = await db.prepare(
+    "SELECT epoch FROM group_epoch_keys WHERE group_id = ? AND member_id = ?",
+  ).all<{ epoch: number }>(groupId, memberId);
+  return rows.map((r) => Number(r.epoch)).sort((a, b) => a - b);
+}
+
+export async function grantEpochKeys(groupId: string, by: string, grants: Array<{
+  memberId: string; epoch: number; wrappedKey: string;
+}>): Promise<void> {
+  const stmt = db.prepare(
+    `INSERT INTO group_epoch_keys (group_id, epoch, member_id, wrapped_key, granted_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const g of grants) {
+    await stmt.run(groupId, g.epoch, g.memberId, g.wrappedKey, by, Date.now()).catch(() => {
+      /* already granted — re-granting the same epoch is a no-op */
+    });
+  }
+}
+
+// Start a new epoch. Called when somebody leaves or is removed, so that
+// whatever is said next is sealed with a key they do not have.
+export async function rotateEpoch(groupId: string, by: string, grants: Array<{
+  memberId: string; wrappedKey: string;
+}>): Promise<number> {
+  const next = (await currentEpoch(groupId)) + 1;
+  await db.tx(async () => {
+    await db.prepare("UPDATE groups SET epoch = ? WHERE id = ?").run(next, groupId);
+    const stmt = db.prepare(
+      `INSERT INTO group_epoch_keys (group_id, epoch, member_id, wrapped_key, granted_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const g of grants) {
+      await stmt.run(groupId, next, g.memberId, g.wrappedKey, by, Date.now()).catch(() => { /* dupe */ });
+    }
+  });
+  await recordEvent({ groupId, kind: "epoch", actorId: by, data: { epoch: next } });
+  return next;
+}
+
+export async function archiveMessage(input: {
+  groupId: string; epoch: number; senderId: string; msgId: string;
+  ciphertext: string; createdAt: number;
+}): Promise<void> {
+  await db.prepare(
+    `INSERT INTO group_archive (id, group_id, epoch, sender_id, msg_id, ciphertext, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(), input.groupId, input.epoch, input.senderId,
+    input.msgId, input.ciphertext, input.createdAt,
+  ).catch(() => { /* already archived: msg_id is unique per group */ });
+}
+
+export type ArchiveRow = {
+  id: string; epoch: number; sender_id: string; msg_id: string;
+  ciphertext: string; created_at: number;
+};
+
+// Serve only what this member holds a key for, and only from the point
+// their history begins. `history_from` is set when they join: null means
+// everything they have keys for, a timestamp means from then on.
+export async function groupArchiveFor(groupId: string, memberId: string, page: {
+  since?: number; afterId?: string; limit?: number;
+}): Promise<ArchiveRow[]> {
+  const limit = Math.min(Math.max(page.limit ?? 200, 1), 500);
+  const tail: unknown[] = [];
+  let keyset = "";
+  if (page.afterId) {
+    keyset = " AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))";
+    tail.push(page.since ?? 0, page.since ?? 0, page.afterId);
+  } else if (page.since) {
+    keyset = " AND a.created_at >= ?";
+    tail.push(page.since);
+  }
+  return db.prepare(
+    `SELECT a.id, a.epoch, a.sender_id, a.msg_id, a.ciphertext, a.created_at
+       FROM group_archive a
+       JOIN group_epoch_keys k
+         ON k.group_id = a.group_id AND k.epoch = a.epoch AND k.member_id = ?
+       JOIN group_members m
+         ON m.group_id = a.group_id AND m.user_id = ? AND m.left_at IS NULL
+      WHERE a.group_id = ?
+        AND a.created_at >= COALESCE(m.history_from, 0)${keyset}
+      ORDER BY a.created_at ASC, a.id ASC
+      LIMIT ${limit}`,
+  ).all<ArchiveRow>(memberId, memberId, groupId, ...tail);
+}
+
+// Where this member's readable history starts. Set at join time from the
+// group's policy: 'all' means from the beginning, anything else means
+// from now.
+export async function setHistoryFrom(groupId: string, userId: string, from: number | null): Promise<void> {
+  await db.prepare(
+    "UPDATE group_members SET history_from = ? WHERE group_id = ? AND user_id = ?",
+  ).run(from, groupId, userId);
+}
+
 // ---- events ----
 
 export async function recordEvent(e: {

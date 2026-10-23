@@ -1033,6 +1033,17 @@ async function fanOut(
   // background replicator doesn't upload a second one.
   const msgId = (payload as { msgId?: string }).msgId;
   if (selfCopyLanded && msgId) markPushed(selfId, msgId);
+
+  // One archive copy per group message, sealed with the epoch key, so
+  // someone who joins later can be given the history. Fire-and-forget:
+  // delivery already happened on the rail above, and a missing archive
+  // row costs a future member some history, never a current member a
+  // message.
+  if (isGroup && firstEnvelopeId) {
+    void import("./groupkeys.js")
+      .then((m) => m.archiveGroupMessage(targetPeerId, withThread, Date.now()))
+      .catch(() => { /* best effort */ });
+  }
   return { ok: true, envelopeId: firstEnvelopeId ?? "", unreachable };
 }
 

@@ -315,6 +315,27 @@ export const api = {
   groupRedeemInvite: (token: string) => req<{
     state: "joined" | "requested"; group: { id: string; name: string; memberIds?: string[] };
   }>("/api/groups/join", { method: "POST", body: JSON.stringify({ token }) }),
+  groupEpochs: (id: string) => req<{ current: number; mine: number[] }>(`/api/groups/${id}/epochs`),
+  groupEpochKeys: (id: string) => req<{
+    keys: Array<{ epoch: number; wrappedKey: string; grantedBy: string }>;
+  }>(`/api/groups/${id}/epochs/keys`),
+  groupGrantEpochKeys: (id: string, grants: Array<{ memberId: string; epoch: number; wrappedKey: string }>) =>
+    req<{ ok: true }>(`/api/groups/${id}/epochs/grant`, { method: "POST", body: JSON.stringify({ grants }) }),
+  groupRotateEpoch: (id: string, grants: Array<{ memberId: string; wrappedKey: string }>) =>
+    req<{ epoch: number }>(`/api/groups/${id}/epochs/rotate`, { method: "POST", body: JSON.stringify({ grants }) }),
+  groupArchivePut: (id: string, body: { epoch: number; msgId: string; ciphertext: string; createdAt: number }) =>
+    req<{ ok: true }>(`/api/groups/${id}/archive`, { method: "POST", body: JSON.stringify(body) }),
+  groupArchive: (id: string, opts: { since?: number; afterId?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.since) q.set("since", String(opts.since));
+    if (opts.afterId) q.set("afterId", opts.afterId);
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const s = q.toString();
+    return req<{
+      messages: Array<{ id: string; epoch: number; senderId: string; msgId: string; ciphertext: string; createdAt: number }>;
+      more: boolean; cursor: { since: number; afterId: string } | null;
+    }>(`/api/groups/${id}/archive${s ? `?${s}` : ""}`);
+  },
   groupRequests: (id: string) => req<Array<{ userId: string; requestedAt: number }>>(
     `/api/groups/${id}/requests`,
   ),

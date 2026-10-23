@@ -443,6 +443,45 @@ const SCHEMA = `
     created_at ${BIG} NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_group_events_seq ON group_events(group_id, seq);
+
+  -- Group history for people who weren't there yet.
+  --
+  -- The live rail is per-recipient: one nacl.box envelope per member.
+  -- That is why a new member structurally cannot see older messages —
+  -- no envelope addressed to them exists, and the relay cannot make one
+  -- because it has no key. It is left exactly as it is; it carries the
+  -- availability guarantee and is not worth disturbing.
+  --
+  -- Alongside it, each group send also writes ONE archive row, sealed
+  -- with a symmetric epoch key. The epoch key is wrapped per member in
+  -- group_epoch_keys, which the relay stores and cannot open. Granting
+  -- history to a joiner is then handing them old epoch keys — a few
+  -- rows — rather than re-encrypting thousands of messages, and removing
+  -- someone rotates the epoch so they cannot read what comes next.
+  CREATE TABLE IF NOT EXISTS group_epoch_keys (
+    group_id    TEXT NOT NULL REFERENCES groups(id),
+    epoch       INTEGER NOT NULL,
+    member_id   TEXT NOT NULL REFERENCES users(id),
+    wrapped_key TEXT NOT NULL,
+    granted_by  TEXT NOT NULL,
+    created_at  ${BIG} NOT NULL,
+    PRIMARY KEY (group_id, epoch, member_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_gek_member ON group_epoch_keys(member_id, group_id);
+
+  CREATE TABLE IF NOT EXISTS group_archive (
+    id          TEXT PRIMARY KEY,
+    group_id    TEXT NOT NULL REFERENCES groups(id),
+    epoch       INTEGER NOT NULL,
+    sender_id   TEXT NOT NULL,
+    msg_id      TEXT NOT NULL,
+    ciphertext  TEXT NOT NULL,
+    created_at  ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_garchive_drain
+    ON group_archive(group_id, created_at, id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_garchive_msg
+    ON group_archive(group_id, msg_id);
 `;
 
 // Columns added after the first release. Both backends get the same
@@ -462,6 +501,8 @@ const ADDED_COLUMNS: AddedColumn[] = [
   { table: "groups", name: "post_policy", ddl: "ALTER TABLE groups ADD COLUMN post_policy TEXT NOT NULL DEFAULT 'all'" },
   { table: "groups", name: "history_policy", ddl: "ALTER TABLE groups ADD COLUMN history_policy TEXT NOT NULL DEFAULT 'none'" },
   { table: "groups", name: "agent_policy", ddl: "ALTER TABLE groups ADD COLUMN agent_policy TEXT NOT NULL DEFAULT 'off'" },
+  { table: "groups", name: "epoch", ddl: "ALTER TABLE groups ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0" },
+  { table: "group_members", name: "history_from", ddl: "ALTER TABLE group_members ADD COLUMN history_from BIGINT" },
   { table: "group_members", name: "role", ddl: "ALTER TABLE group_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member'" },
   { table: "group_members", name: "added_by", ddl: "ALTER TABLE group_members ADD COLUMN added_by TEXT" },
   { table: "group_members", name: "muted_until", ddl: "ALTER TABLE group_members ADD COLUMN muted_until BIGINT" },
