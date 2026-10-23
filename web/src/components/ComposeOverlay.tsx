@@ -138,9 +138,13 @@ export function ComposeOverlay({
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search by name, @handle, email, or phone number"
+            placeholder="@handle, exact email, or phone number"
             autoFocus
           />
+          <div className="small" style={{ marginTop: 6, color: "var(--text-dim)" }}>
+            People are found only by what they share with you — their exact
+            @handle, email, or number. Nobody can be found by name.
+          </div>
           {canPickContacts && (
             <div style={{ marginTop: 10 }}>
               <Button size="small" onClick={importPhoneContacts} disabled={picking}>

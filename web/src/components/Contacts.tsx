@@ -60,7 +60,7 @@ export function ContactsSheet({
       <input
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="Search by name, @handle, email, or phone"
+        placeholder="@handle, exact email, or phone"
         autoFocus
       />
 

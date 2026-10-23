@@ -324,8 +324,25 @@ export async function findUserByPhone(rawPhone: string): Promise<UserRow | undef
   } catch { return undefined; }
 }
 
+// Discovery is deliberate, not browsable.
+//
+// You find someone by an identifier they chose to share: their exact
+// phone number, their exact email, or their @handle. What you CANNOT do
+// is type a name or a fragment of an email and enumerate strangers —
+// the old substring match over display_name and email turned the
+// directory into a people-search engine, which is the opposite of
+// private. Names are never a search key.
+//
+// Handle is matched by prefix, because a handle is a public,
+// self-chosen address (the thing you put on a card or in a bio) and
+// prefix completion is how people actually type an @mention. Email and
+// phone must be exact: knowing a fragment of someone's email should
+// never surface them.
 export async function searchUsers(q: string, excludeId: string): Promise<PublicUser[]> {
   const trimmed = q.trim();
+  if (!trimmed) return [];
+
+  // A phone number: exact match only.
   if (/^\+?\d[\d\s()\-.]{5,}$/.test(trimmed)) {
     try {
       const phone = normalizePhone(trimmed);
@@ -335,14 +352,26 @@ export async function searchUsers(q: string, excludeId: string): Promise<PublicU
       return row ? [toPublic(row)] : [];
     } catch { return []; }
   }
-  const like = `%${trimmed.toLowerCase().replace(/^@/, "")}%`;
-  const rows = await db.prepare(
-    `SELECT * FROM users
-       WHERE id != ?
-         AND (lower(email) LIKE ? OR lower(display_name) LIKE ? OR lower(handle) LIKE ?)
-       ORDER BY display_name LIMIT 20`,
-  ).all<UserRow>(excludeId, like, like, like);
-  return rows.map((u) => toPublic(u));
+
+  // A full email address: exact match only.
+  if (trimmed.includes("@") && /\.[a-z]{2,}$/i.test(trimmed)) {
+    const row = await db.prepare(
+      "SELECT * FROM users WHERE lower(email) = ? AND id != ?",
+    ).get<UserRow>(trimmed.toLowerCase(), excludeId);
+    return row ? [toPublic(row)] : [];
+  }
+
+  // Otherwise treat it as a handle and match it EXACTLY. A handle is a
+  // public, self-chosen address, but it is auto-derived from the display
+  // name, so prefix matching would quietly turn it back into name search
+  // — type "jon" and surface every Jonathan. Exact-only means you have
+  // to know the identifier someone chose to share.
+  const handle = trimmed.toLowerCase().replace(/^@/, "");
+  if (!/^[a-z0-9_.]{1,30}$/.test(handle)) return [];
+  const row = await db.prepare(
+    "SELECT * FROM users WHERE lower(handle) = ? AND id != ?",
+  ).get<UserRow>(handle, excludeId);
+  return row ? [toPublic(row)] : [];
 }
 
 // ---- privacy toggles ----

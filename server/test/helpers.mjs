@@ -142,10 +142,11 @@ export async function register(relay, name) {
   const wrapped = new Uint8Array(nonce.length + ct.length);
   wrapped.set(nonce); wrapped.set(ct, nonce.length);
 
+  const email = `${name}-${Date.now().toString(36)}@test.local`;
   const r = await http(relay, "/api/register", {
     method: "POST",
     body: {
-      email: `${name}-${Date.now().toString(36)}@test.local`,
+      email,
       displayName: name, password,
       publicKey: b64.encode(id.publicKey),
       wrappedPriv: b64.encode(wrapped),
@@ -155,8 +156,9 @@ export async function register(relay, name) {
   });
   if (!r.ok) throw new Error(`register ${name} failed: ${r.text}`);
   return {
-    name, password,
+    name, password, email,
     id: r.body.user.id,
+    handle: r.body.handle ?? r.body.user.handle,
     token: r.body.token,
     pub: id.publicKey,
     priv: id.secretKey,
