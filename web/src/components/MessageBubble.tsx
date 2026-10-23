@@ -35,6 +35,11 @@ export function MessageBubble(p: BubbleProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
   const isNarrow = typeof window !== "undefined" && window.innerWidth < 720;
+  const longPress = useRef<number | null>(null);
+  function openMenuAt(x: number, y: number) {
+    setMenuPos({ x: isMine ? Math.max(12, x - 190) : x, y: y + 6 });
+    setMenuOpen(true);
+  }
   const rowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -89,7 +94,18 @@ export function MessageBubble(p: BubbleProps) {
       {!isMine && p.showAvatar && <Avatar name={p.senderName} size="sm" />}
       {!isMine && !p.showAvatar && <div style={{ width: 30 }} />}
 
-      <div style={{ maxWidth: "min(72%, 560px)", position: "relative" }}>
+      <div
+        className="bubble-row"
+        style={{ maxWidth: "min(72%, 560px)", position: "relative" }}
+        onContextMenu={(e) => { if (deleted) return; e.preventDefault(); openMenuAt(e.clientX, e.clientY); }}
+        onTouchStart={(e) => {
+          if (deleted) return;
+          const t = e.touches[0];
+          longPress.current = window.setTimeout(() => openMenuAt(t.clientX, t.clientY), 450);
+        }}
+        onTouchEnd={() => { if (longPress.current) { clearTimeout(longPress.current); longPress.current = null; } }}
+        onTouchMove={() => { if (longPress.current) { clearTimeout(longPress.current); longPress.current = null; } }}
+      >
         {p.isGroup && !isMine && p.showAvatar && (
           <div style={{ fontSize: 11, color: "var(--text-dim)", padding: "0 12px 4px" }}>
             {p.senderName}
@@ -195,8 +211,7 @@ export function MessageBubble(p: BubbleProps) {
                 display: "grid", placeItems: "center",
                 background: menuOpen ? "var(--glass-bg-hi)" : "transparent",
                 color: "var(--text-dim)",
-                opacity: menuOpen ? 1 : 0.65,
-                transition: "opacity .12s, background .12s",
+                transition: "background .12s",
               } as React.CSSProperties}
               onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
               onMouseLeave={(e) => (e.currentTarget.style.opacity = menuOpen ? "1" : "0.65")}

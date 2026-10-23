@@ -310,6 +310,35 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const showSidebar = bp !== "sm" || !thread;
   const showChat = bp !== "sm" || !!thread;
 
+  const chatPane = (
+    <AnimatePresence mode="wait">
+      {thread ? (
+        <motion.div key={thread.peerId}
+          initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          style={{ height: "100%", display: "flex", flexDirection: "column" }}
+        >
+          <ErrorBoundary label="Chat">
+            <Chat
+              thread={thread}
+              refreshKey={refresh}
+              onOpenForward={(m) => setForwardMsg(m)}
+              onBack={bp === "sm" ? () => setThread(null) : undefined}
+              onSent={() => setRefresh((k) => k + 1)}
+              highlightMsgId={highlight?.peerId === thread.peerId ? highlight.msgId : null}
+              fromAgent={cameFromAgent}
+              onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
+              onInvokeAgent={(q) => { setPendingAgentQuery(q); setAgentOpen(true); }}
+              onOpenGroupInfo={() => setGroupInfoFor(thread.peerId)}
+            />
+          </ErrorBoundary>
+        </motion.div>
+      ) : (
+        <EmptyRight onCompose={() => setCompose(true)} />
+      )}
+    </AnimatePresence>
+  );
+
   return (
     <div style={{
       display: "grid",
@@ -317,14 +346,20 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         : dest === "diary" ? "64px 1fr"
         : "64px 320px 1fr",
       height: "var(--app-h)",
-      // Reserve space around the OS chrome (Android nav bar at the
-      // bottom, notch at the top). On desktop / web these insets are 0
-      // so nothing changes.
-      paddingTop: "calc(12px + var(--safe-top))",
-      paddingBottom: "calc(12px + var(--tabbar-h) + var(--safe-bottom))",
-      paddingLeft: "calc(12px + var(--safe-left))",
-      paddingRight: "calc(12px + var(--safe-right))",
-      gap: 12, position: "relative",
+      // On a phone with a chat open the conversation goes full-bleed —
+      // no card gutter — which is what every messenger does; safe-area
+      // insets stay. Everywhere else keeps the 12px frame.
+      ...(bp === "sm" && !!thread ? {
+        padding: "var(--safe-top) var(--safe-right) calc(var(--tabbar-h) + var(--safe-bottom)) var(--safe-left)",
+        gap: 0,
+      } : {
+        paddingTop: "calc(12px + var(--safe-top))",
+        paddingBottom: "calc(12px + var(--tabbar-h) + var(--safe-bottom))",
+        paddingLeft: "calc(12px + var(--safe-left))",
+        paddingRight: "calc(12px + var(--safe-right))",
+        gap: 12,
+      }),
+      position: "relative",
     }}>
       {bp !== "sm" && <NavRail dest={dest} onSelect={setDest} unread={{ diary: diaryUnread }} />}
 
@@ -407,35 +442,9 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         </Glass>
       )}
 
-      {showChat && (
-        <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
-          <AnimatePresence mode="wait">
-            {thread ? (
-              <motion.div key={thread.peerId}
-                initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0 }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                style={{ height: "100%", display: "flex", flexDirection: "column" }}
-              >
-                <ErrorBoundary label="Chat">
-                  <Chat
-                    thread={thread}
-                    refreshKey={refresh}
-                    onOpenForward={(m) => setForwardMsg(m)}
-                    onBack={bp === "sm" ? () => setThread(null) : undefined}
-                    onSent={() => setRefresh((k) => k + 1)}
-                    highlightMsgId={highlight?.peerId === thread.peerId ? highlight.msgId : null}
-                    fromAgent={cameFromAgent}
-                    onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
-                    onInvokeAgent={(q) => { setPendingAgentQuery(q); setAgentOpen(true); }}
-                    onOpenGroupInfo={() => setGroupInfoFor(thread.peerId)}
-                  />
-                </ErrorBoundary>
-              </motion.div>
-            ) : (
-              <EmptyRight onCompose={() => setCompose(true)} />
-            )}
-          </AnimatePresence>
-        </Glass>
+      {showChat && (bp === "sm"
+        ? <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", height: "100%" }}>{chatPane}</div>
+        : <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>{chatPane}</Glass>
       )}
 
       </>

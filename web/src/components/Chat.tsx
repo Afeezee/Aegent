@@ -44,6 +44,8 @@ export function Chat({
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [unseenNew, setUnseenNew] = useState(0);
+  const prevLen = useRef(0);
   const streamRef = useRef<HTMLDivElement>(null);
   const me = myId();
 
@@ -151,6 +153,16 @@ export function Chat({
       .catch(() => { if (live) setAgentOn(false); });
     return () => { live = false; };
   }, [thread.peerId, thread.isGroup]);
+
+
+  // Count messages that arrive while the user is scrolled up, so the
+  // jump button can show how many they haven't seen. Resets on reaching
+  // the bottom.
+  useEffect(() => {
+    const grew = msgs.length - prevLen.current;
+    prevLen.current = msgs.length;
+    if (grew > 0 && showJumpLatest) setUnseenNew((n) => n + grew);
+  }, [msgs.length, showJumpLatest]);
 
   const subtitle = useMemo(() => {
     if (typing.size > 0) {
@@ -291,7 +303,9 @@ export function Chat({
           }
           // Jump-to-latest FAB: show when the user is >400px from the bottom.
           const distFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-          setShowJumpLatest(distFromBottom > 400);
+          const up = distFromBottom > 400;
+          setShowJumpLatest(up);
+          if (!up) setUnseenNew(0);
         }}
         style={{
           flex: 1, overflowY: "auto", padding: "20px 22px", display: "flex", flexDirection: "column", gap: 10,
@@ -365,18 +379,21 @@ export function Chat({
             type="button"
             initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
             transition={{ duration: 0.18 }}
-            onClick={() => streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" })}
-            aria-label="Jump to latest message"
+            onClick={() => { setUnseenNew(0); streamRef.current?.scrollTo({ top: streamRef.current.scrollHeight, behavior: "smooth" }); }}
+            aria-label={unseenNew > 0 ? `${unseenNew} new message${unseenNew === 1 ? "" : "s"}, jump to latest` : "Jump to latest message"}
             style={{
               position: "absolute",
               right: 18, bottom: "calc(96px + var(--safe-bottom))",
-              zIndex: 40, width: 44, height: 44, minWidth: 44, minHeight: 44,
+              zIndex: 40, minWidth: 44, minHeight: 44,
+              height: 44, padding: unseenNew > 0 ? "0 14px" : 0, width: unseenNew > 0 ? "auto" : 44,
               borderRadius: 999, border: "1px solid var(--glass-border-hi)",
-              background: "var(--glass-bg-hi)", color: "var(--text)",
-              cursor: "pointer", display: "grid", placeItems: "center",
+              background: unseenNew > 0 ? "var(--accent)" : "var(--menu-bg)",
+              color: unseenNew > 0 ? "#10132a" : "var(--text)",
+              cursor: "pointer", display: "flex", alignItems: "center", gap: 6, justifyContent: "center",
               boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
             }}
           >
+            {unseenNew > 0 && <span style={{ fontSize: 13, fontWeight: 700 }}>{unseenNew}</span>}
             <span style={{ display: "inline-block", transform: "rotate(90deg)" }}><Icon.chevron /></span>
           </motion.button>
         )}

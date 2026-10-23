@@ -458,3 +458,15 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 }
 .rich-editor ul { padding-left: 20px; margin: 4px 0; }
 .rich-editor div { min-height: 1.2em; }
+
+/* Message action affordance: a quiet kebab that appears only on hover
+   on desktop, and is hidden entirely on touch, where a long-press (or
+   right-click) opens the same menu. Keeps the chat uncluttered. */
+.bubble-kebab { opacity: 0; transition: opacity .12s; }
+@media (hover: hover) {
+  .bubble-row:hover .bubble-kebab { opacity: 0.6; }
+  .bubble-kebab:hover { opacity: 1; }
+}
+@media (hover: none) {
+  .bubble-kebab { display: none; }
+}
