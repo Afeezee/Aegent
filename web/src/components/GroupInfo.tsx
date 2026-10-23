@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api, siteUrl, type GroupDetail, type GroupMember } from "../lib/api.js";
-import { getContact } from "../lib/store.js";
+import { getContact, listContacts, type ContactRow } from "../lib/store.js";
 import { currentSession, ensureContact } from "../lib/session.js";
 import { shareInvite } from "../lib/contacts-integration.js";
 import { grantHistoryTo, rotateAfterDeparture } from "../lib/groupkeys.js";
@@ -26,6 +26,8 @@ export function GroupInfo({
   const [names, setNames] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [requests, setRequests] = useState<Array<{ userId: string; requestedAt: number }>>([]);
+  const [adding, setAdding] = useState(false);
+  const [candidates, setCandidates] = useState<ContactRow[]>([]);
 
   const load = useCallback(async () => {
     if (!groupId) return;
@@ -102,6 +104,43 @@ export function GroupInfo({
                 </Row>
               ))}
             </Section>
+          )}
+
+          {isAdmin && (
+            <div style={{ margin: "4px 0 10px" }}>
+              <Button size="small" disabled={busy} onClick={async () => {
+                if (adding) { setAdding(false); return; }
+                // Only contacts who aren't already in the group.
+                const here = new Set((detail.members ?? []).map((m) => m.id));
+                setCandidates((await listContacts()).filter((c) => !here.has(c.id)));
+                setAdding(true);
+              }}>
+                <Icon.plus /> Add member
+              </Button>
+              {adding && (
+                <div className="glass" style={{ marginTop: 8, padding: 8, borderRadius: 12, maxHeight: 220, overflowY: "auto" }}>
+                  {candidates.length === 0 ? (
+                    <div className="small" style={{ padding: 6 }}>
+                      Everyone in your contacts is already here.
+                    </div>
+                  ) : candidates.map((c) => (
+                    <Row key={c.id} name={c.displayName} sub={`@${c.handle}`}>
+                      <Button size="small" variant="primary" disabled={busy}
+                        onClick={() => act(async () => {
+                          await api.groupAddMember(groupId, c.id);
+                          // Hand over whatever history the policy allows,
+                          // which only this device can do — the relay holds
+                          // no keys. Harmless if the policy is "from join".
+                          await grantHistoryTo(groupId, c.id);
+                          setAdding(false);
+                        }, `Added ${c.displayName}`)}>
+                        Add
+                      </Button>
+                    </Row>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           <Section title="MEMBERS">

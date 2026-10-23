@@ -26,7 +26,7 @@ import { b64, boxOpenBytes, boxSealBytes, newEntryKey, secretBoxOpen, secretBoxS
 import { api } from "./api.js";
 import { getGroup, getMeta, setMeta } from "./store.js";
 import { currentSession, ensureContact } from "./session.js";
-import { packPayload, unpackPayload, type Payload } from "./protocol.js";
+import { attributionOk, packPayload, unpackPayload, type Payload } from "./protocol.js";
 
 // Epoch keys live in `meta`, which is small, already per-user, and
 // already opened with the local-store key — the same place the sync
@@ -130,7 +130,10 @@ export async function archiveGroupMessage(
   if (!msgId) return;
   const k = await keyForSending(groupId);
   if (!k) return;
-  const sealed = secretBoxSeal(k.key, new TextEncoder().encode(packPayload(payload)));
+  // Bind the sender to the ciphertext, so the archive's attribution does
+  // not rest on a database column the relay could rewrite.
+  const stamped = { ...payload, _from: currentSession()?.user.id } as Payload;
+  const sealed = secretBoxSeal(k.key, new TextEncoder().encode(packPayload(stamped)));
   await api.groupArchivePut(groupId, {
     epoch: k.epoch, msgId, ciphertext: sealed, createdAt,
   }).catch(() => { /* history is a nicety; delivery already happened */ });
@@ -213,10 +216,9 @@ export async function syncGroupHistory(groupId: string): Promise<number> {
         payload = unpackPayload(new TextDecoder().decode(secretBoxOpen(key, row.ciphertext)));
       } catch { continue; }
 
-      // Attribution here is the relay's word, so the sender inside the
-      // payload must agree with the sender it recorded.
-      const claimed = (payload as { _from?: string })._from;
-      if (claimed && claimed !== row.senderId) continue;
+      // Attribution: the sender sealed inside the payload must agree with
+      // the sender the relay recorded, or we don't know who said this.
+      if (!attributionOk(payload, row.senderId)) continue;
 
       const at = Number(row.createdAt);
       const direction = row.senderId === session.user.id ? "out" : "in";

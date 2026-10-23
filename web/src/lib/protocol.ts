@@ -68,6 +68,13 @@ export type Payload =
       diaryRef?: DiaryRef;
       _thread?: string;
       _at?: number;
+      // Who sealed this. Only meaningful in the group archive, where a
+      // shared symmetric key means the relay's sender_id column is the
+      // only other attribution — and a relay could rewrite that column.
+      // Stamping the sender INSIDE the sealed payload binds it to the
+      // ciphertext the relay cannot alter. Still forgeable by another
+      // member (they hold the key), never by the relay.
+      _from?: string;
     }
   | {
       v: 1;
@@ -92,10 +99,22 @@ export type Payload =
       replyTo?: { id: string; preview: string; author: string };
       _thread?: string;
       _at?: number;
+      _from?: string;
     }
-  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string; _at?: number }
-  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string; _at?: number }
-  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number };
+  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string; _at?: number; _from?: string }
+  | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string; _at?: number; _from?: string }
+  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number; _from?: string };
+
+// Does the sender the relay recorded agree with the one sealed inside?
+//
+// A disagreement means the relay (or whoever handed us the row) is
+// claiming a different author than the one bound to the ciphertext, so
+// the message is dropped rather than shown under the wrong name. A
+// payload with no `_from` predates this and is accepted on the relay's
+// word alone, which is the old behaviour — no worse than before.
+export function attributionOk(payload: { _from?: string }, recordedSenderId: string): boolean {
+  return !payload._from || payload._from === recordedSenderId;
+}
 
 export function packPayload(p: Payload): string {
   return JSON.stringify(p);
