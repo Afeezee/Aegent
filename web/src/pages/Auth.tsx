@@ -73,7 +73,7 @@ export function AuthScreen({ onDone }: { onDone: () => void }) {
     <div style={{
       // Scroll container: centre when it fits, top-align when it overflows
       // (so the tall registration form stays fully reachable on short viewports).
-      height: "100vh", overflowY: "auto", overflowX: "hidden", padding: 24,
+      height: "var(--app-h)", overflowY: "auto", overflowX: "hidden", padding: 24,
       display: "flex", justifyContent: "center", alignItems: "safe center",
       WebkitOverflowScrolling: "touch",
     }}>

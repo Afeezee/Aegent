@@ -316,7 +316,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       gridTemplateColumns: bp === "sm" ? "1fr"
         : dest === "diary" ? "64px 1fr"
         : "64px 320px 1fr",
-      height: "100vh",
+      height: "var(--app-h)",
       // Reserve space around the OS chrome (Android nav bar at the
       // bottom, notch at the top). On desktop / web these insets are 0
       // so nothing changes.

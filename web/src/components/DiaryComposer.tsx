@@ -102,9 +102,9 @@ export function DiaryComposer({
             initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 40, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             onClick={(e) => e.stopPropagation()}
-            className="glass glass-hi"
             style={{
               width: "min(640px, 100%)", borderRadius: "20px 20px 0 0",
+              background: "var(--sheet-bg)", border: "1px solid var(--line-strong)",
               padding: 18,
               paddingBottom: "calc(18px + var(--safe-bottom))",
               maxHeight: "86vh", display: "flex", flexDirection: "column",

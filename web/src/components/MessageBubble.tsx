@@ -33,6 +33,8 @@ const QUICK_EMOJI = ["❤️", "😂", "👍", "😮", "😢", "🙏"];
 export function MessageBubble(p: BubbleProps) {
   const { msg, isMine } = p;
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
+  const isNarrow = typeof window !== "undefined" && window.innerWidth < 720;
   const rowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -177,7 +179,12 @@ export function MessageBubble(p: BubbleProps) {
           {!deleted && (
             <button
               className="bubble-kebab"
-              onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setMenuPos({ x: isMine ? r.left - 170 : r.right, y: r.bottom + 6 });
+                setMenuOpen((o) => !o);
+              }}
               aria-label="Message actions"
               style={{
                 position: "absolute",
@@ -216,28 +223,40 @@ export function MessageBubble(p: BubbleProps) {
           </div>
         )}
 
-        {/* Floating action menu — absolute-positioned so it appears
-            over other content instead of pushing the bubble. */}
+        {/* Action menu. A dimmed backdrop plus a solid surface: on a
+            phone a bottom sheet that is always fully on screen; on
+            desktop a popover near the bubble, clamped inside the
+            viewport. Solid, so nothing bleeds through. */}
         <AnimatePresence>
           {menuOpen && !deleted && (
-            <motion.div
-              initial={{ opacity: 0, y: -4, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.96 }}
-              transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-              className="glass glass-hi"
-              style={{
-                position: "absolute",
-                top: 34,
-                [isMine ? "left" : "right"]: -32,
-                zIndex: 40,
-                padding: 6,
-                display: "flex", flexDirection: "column", gap: 2,
-                borderRadius: 12, boxShadow: "var(--shadow-md)",
-                minWidth: 170,
-              } as React.CSSProperties}
-              onClick={(e) => e.stopPropagation()}
-            >
+            <>
+              <motion.div
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }}
+                style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(4,6,16,0.45)" }}
+              />
+              <motion.div
+                role="menu"
+                initial={{ opacity: 0, y: isNarrow ? 24 : -4, scale: isNarrow ? 1 : 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: isNarrow ? 24 : -4, scale: isNarrow ? 1 : 0.96 }}
+                transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                style={(isNarrow ? {
+                  position: "fixed", left: 12, right: 12,
+                  bottom: "calc(12px + var(--tabbar-h) + var(--safe-bottom))",
+                  zIndex: 1101, padding: 8, display: "flex", flexDirection: "column", gap: 2,
+                  borderRadius: 16, boxShadow: "var(--shadow-md)",
+                  background: "var(--menu-bg)", border: "1px solid var(--line-strong)",
+                } : {
+                  position: "fixed", zIndex: 1101,
+                  top: Math.min(menuPos.y, window.innerHeight - 320),
+                  left: Math.max(12, Math.min(menuPos.x, window.innerWidth - 212)),
+                  padding: 6, display: "flex", flexDirection: "column", gap: 2,
+                  borderRadius: 12, boxShadow: "var(--shadow-md)", minWidth: 190,
+                  background: "var(--menu-bg)", border: "1px solid var(--line-strong)",
+                }) as React.CSSProperties}
+                onClick={(e) => e.stopPropagation()}
+              >
               {/* Quick emoji strip — inside the menu, never floats up. */}
               <div style={{
                 display: "flex", gap: 2, padding: 4,
@@ -268,7 +287,8 @@ export function MessageBubble(p: BubbleProps) {
                 <MenuItem icon={<Icon.trash />} label="Delete" danger
                   onClick={() => { p.onDelete(); setMenuOpen(false); }} />
               )}
-            </motion.div>
+              </motion.div>
+            </>
           )}
         </AnimatePresence>
       </div>

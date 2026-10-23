@@ -103,7 +103,7 @@ export default function App() {
 
 function Splash() {
   return (
-    <div className="aegent-root" style={{ display: "grid", placeItems: "center", height: "100vh" }}>
+    <div className="aegent-root" style={{ display: "grid", placeItems: "center", height: "var(--app-h)" }}>
       <div style={{
         width: 56, height: 56, borderRadius: 16,
         background: "linear-gradient(135deg, var(--violet), var(--aqua))",

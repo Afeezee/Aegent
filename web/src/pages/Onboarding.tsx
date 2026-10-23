@@ -43,7 +43,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <div style={{
-      height: "100vh", overflowY: "auto", overflowX: "hidden", padding: 24,
+      height: "var(--app-h)", overflowY: "auto", overflowX: "hidden", padding: 24,
       display: "flex", justifyContent: "center", alignItems: "safe center",
       WebkitOverflowScrolling: "touch",
     }}>

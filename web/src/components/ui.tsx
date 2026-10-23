@@ -166,7 +166,7 @@ export function Modal({
               width: "100%", maxWidth: width, borderRadius: 20,
               // Fit inside the viewport with safe-area on both sides.
               // Body scrolls when it would overflow; header + footer stay put.
-              maxHeight: "calc(100vh - 40px - var(--safe-top) - var(--safe-bottom))",
+              maxHeight: "calc(var(--app-h) - 40px - var(--safe-top) - var(--safe-bottom))",
               display: "flex", flexDirection: "column",
               overflow: "hidden",
               // Never scroll sideways — every child wraps or scrolls-its-own.
