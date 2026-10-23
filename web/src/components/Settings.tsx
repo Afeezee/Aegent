@@ -105,13 +105,17 @@ export function Settings({
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>PRIVACY</div>
         <Toggle
           label="Send read receipts"
-          hint="Off by default. When off, others see 'delivered' but never that you opened it."
+          hint={readReceipts
+            ? "On: contacts can see when you've opened their messages."
+            : "Off: contacts see 'delivered' but never that you've read a message."}
           checked={readReceipts} disabled={busy}
           onChange={(v) => toggle("readReceipts", v)}
         />
         <Toggle
           label="Share online / last-seen"
-          hint="Off by default. When off, no one sees when you were last active."
+          hint={presence
+            ? "On: contacts can see when you're active and your last-seen time."
+            : "Off: no one sees when you were last active."}
           checked={presence} disabled={busy}
           onChange={(v) => toggle("presence", v)}
         />

@@ -14,20 +14,32 @@ const STEPS: Array<{ title: string; body: string; art: string }> = [
   {
     title: "Private by construction",
     body:
-      "Every message is end-to-end encrypted before it leaves your device. Not encrypted at rest — encrypted in transit and at rest, with a key only you hold. Aegent's servers relay ciphertext they cannot read.",
+      "Every message is end-to-end encrypted before it leaves your device — in transit and at rest, with a key only you hold. Aegent's servers relay ciphertext they cannot read.",
     art: "🛡️",
+  },
+  {
+    title: "Always there, every device",
+    body:
+      "Your whole history follows you. Sign in on a new phone and everything comes back — nothing to export, nothing lost. Forget your password and a recovery key brings it all back without losing a message.",
+    art: "♾️",
+  },
+  {
+    title: "Diary",
+    body:
+      "Write about your day — long text, formatted, or a set of photos. Your contacts can read each entry for 24 hours; you keep it forever. Or mark an entry just for you.",
+    art: "📔",
+  },
+  {
+    title: "Groups you can run",
+    body:
+      "Invite by link, set who can post, mute or remove anyone, and choose how much history a new member can see. Admins are real admins.",
+    art: "👥",
   },
   {
     title: "Meet your agent",
     body:
-      "Ask in natural language: find that chat about the invoice, send Ada that the file is coming, remind me to call the studio tomorrow. Every action shows a draft first and waits for you to confirm.",
+      "Ask in plain words: find that chat about the invoice, remind me to call the studio tomorrow. It picks only the messages it needs, shows you exactly what it used, and confirms before it ever acts.",
     art: "✨",
-  },
-  {
-    title: "Search that understands",
-    body:
-      "Not just keywords. Search across every conversation by what you meant — 'the pricing chat with the design team' finds it, even if you never used those exact words.",
-    art: "🔎",
   },
 ];
 

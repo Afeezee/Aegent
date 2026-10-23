@@ -1,6 +1,6 @@
 # Aegent
 
-A private messenger where every conversation is genuinely end-to-end encrypted, with an on-device AI agent that can search, retrieve, and act on your own message history — always with your confirmation before anything is sent, forwarded, or shared.
+A private messenger where every conversation is genuinely end-to-end encrypted — with a long-form **Diary** your contacts see for a day and you keep forever, real **groups** with admin control, an always-there history that follows you to any device, and an on-device AI agent that searches and acts on your own messages, always with your confirmation and never without your consent.
 
 **Live at:** [aegent.onrender.com](https://aegent.onrender.com)
 **Repo:** [Afeezee/Aegent](https://github.com/Afeezee/Aegent)
@@ -18,7 +18,8 @@ A private messenger where every conversation is genuinely end-to-end encrypted, 
 - **Contact management** — add by @handle / email / phone / QR / invite link; native phone-contact import on Android via Contact Picker; **save Aegent contact card back to phone** as a vCard.
 - **Invites** — QR code, shareable link, native **SMS invite** that prefills your phone's Messages app.
 - **Voice notes** — record with waveform + timer, send, play back with scrub. Optional **on-device Whisper transcription** rides along inside the E2E payload (see below).
-- **Push notifications** via `@capacitor/local-notifications` for scheduled reminders and backup fires — announces new content without exposing it.
+- **Push wake-ups** via FCM: a frozen, backgrounded app is woken by a content-free notification ("New encrypted message") that carries no plaintext — it only tells the app to sync. Local notifications still drive scheduled reminders. (FCM is active only when the relay has `FCM_SERVICE_ACCOUNT` set.)
+- **Messages always read in true time order** — the relay stores each message's authored time (clamped, never re-dated by backfill), so sent and received interleave correctly across reloads, re-sync and device change.
 - **Semantic + keyword search across every conversation** (⌘K) with hybrid rerank, chunked embeddings for long messages, and metadata-decorated hits.
 - **Dedicated Contacts view** with search + three sort orders (A→Z, recently active, recently added).
 - **Onboarding flow**, thoughtful empty states, glassmorphic UI with framer-motion transitions, dark-by-default with light-mode aware.
@@ -26,6 +27,8 @@ A private messenger where every conversation is genuinely end-to-end encrypted, 
 
 ### AI Agent
 Reachable from anywhere via **⌘/Ctrl-J**, the sidebar icon, or the floating button on mobile. Runs entirely on-device by default; when the server has `ANTHROPIC_API_KEY` set, it also drives a real Claude tool-use loop (`/api/agent/turn` is a thin proxy, so the key never enters the client bundle).
+
+**Consent and transparency.** The first time you tap the agent it explains, in plain language, that asking it sends only the messages it needs to the AI — and waits for you to turn it on. Every reply carries a "Used N messages ▸" line that expands to exactly what left your phone. Its retrieval is **scope-enforced**, not prompted: it can't read a group whose assistant is switched off, filtered at the data layer rather than trusted to the model. Agent transcripts are sealed at rest like messages.
 
 **Voice input** — mic button in the agent composer uses the Web Speech API for live-transcribed input (Chrome/Edge/Safari; falls back to typing on Firefox).
 
@@ -55,12 +58,30 @@ Reachable from anywhere via **⌘/Ctrl-J**, the sidebar icon, or the floating bu
 - `backup_thread` (whole-thread email backup; media referenced by type only, keys stay on device).
 - `schedule_backup` (fires the backup at a chosen time via a local scheduled-backup queue).
 
-### Encrypted backup + multi-device sync
-- **Automatic**, throttled to ~1× per hour after messages you send.
-- **Server stores only opaque bytes.** The key is derived on the client from the identity private key with a distinct KDF context — the same key deterministically re-appears anywhere you log in with your account password.
-- **Restore = login.** Signing into the same account on a new device silently pulls the ciphertext blob, decrypts locally with the freshly re-derived key, and rehydrates the local store. No separate recovery-code prompt needed.
-- **Manual snapshot** available in Settings → Encrypted Backup → "Back up now".
-- **Agent-driven email backup** stays available via `backup_thread` and `schedule_backup` for out-of-band copies to a user-provided email address (that path leaves E2E — the confirm card warns you).
+### Diary
+A long-form daily page — an upgrade on disappearing "status".
+- **You keep it forever; your contacts read each entry for 24 hours.** Expiry is cryptographic, not a flag: each entry is sealed once with a per-entry key, and every viewer holds that key sealed to them with a 24h grant. At expiry the relay deletes the *grant*, so the ciphertext — and diary images, which are ACL-gated the same way — can't be served to them again.
+- **Genuine formatting, no markup characters** — a WYSIWYG editor (heading, bold, italics, quote, list, alignment) that stores Markdown and renders it; you never see raw `**stars**`.
+- **Multiple images per entry** — a swipeable, zoomable carousel (side-by-side on wide screens), up to 8 photos.
+- **Per-entry visibility** — share with contacts, or keep an entry just for yourself.
+- **Reactions and private replies** ride the normal message rail straight to the author (nothing a viewer writes is visible to another viewer, so there's nothing to moderate), plus view counts — names only for viewers who send read receipts.
+- **Your own archive is searchable by the agent** and restores on a new device from a bare login.
+
+### Groups
+Real groups, enforced at the relay — not just in the UI.
+- **Roles** (owner / admin / member); the owner can't be removed, demoted, muted or banned.
+- **Invite links** (hashed tokens, with expiry and use limits), **join requests**, and join modes: closed / invite / request.
+- **Moderation** — mute (time-boxed), remove, ban; posting policy (everyone / admins only) enforced on the socket path.
+- **History on join** — admins choose whether a new member sees everything or only messages from when they joined. Implemented as key distribution over a per-epoch archive rail (removing someone rotates the epoch), so "show history" is a real cryptographic grant, not a server flag.
+- **In-group agent, off by default** — switch it on per group and every member sees a "🤖 assistant on" badge; the agent's retrieval is scoped so it can only read groups where it's enabled.
+
+### Always-there history (backup + multi-device sync)
+- **Nothing is ever lost.** Every message is replicated to the relay as ciphertext as it's sent; the server's message log — not local storage — is the source of truth. A continuous replication loop drains, reconciles and re-uploads on a timer and on every reconnect.
+- **Reconciliation by id.** The client compares the exact set of envelope ids the relay holds against its own ledger and fetches precisely what's missing, so a new or wiped device rebuilds the entire account — and "N messages still syncing" means exactly N, never a phantom.
+- **Restore = login.** Sign into the same account anywhere and your whole history comes back; the encryption key is re-derived from the password, so there's nothing to carry.
+- **Recovery key.** Your password is your key; an optional recovery key (opt-in from Settings) resets a forgotten password **without losing a single message** — the identity key is wrapped under both, so re-wrapping one never orphans your history.
+- **Server stores only opaque bytes** throughout.
+- **Agent-driven email backup** stays available via `backup_thread` and `schedule_backup` for out-of-band copies (that path leaves E2E — the confirm card warns you).
 
 ### On-device voice-note transcription
 - Opt-in in Settings → Voice Notes → "Transcribe voice notes on this device".
@@ -71,10 +92,11 @@ Reachable from anywhere via **⌘/Ctrl-J**, the sidebar icon, or the floating bu
 - Agent tool `transcribe_voice(messageId)` for on-demand transcription of voice notes sent before the sender opted in.
 
 ### Privacy toggles (Settings)
-Every one is off by default:
+Off by default; each description reflects the toggle's current state ("On: contacts can see when you've opened their messages", etc.):
 - Send read receipts.
 - Share online / last-seen.
 - Transcribe voice notes on this device.
+- **Account keys** — view/rotate your recovery key, change your password (re-wraps the identity key without re-encrypting anything).
 
 ---
 
@@ -214,5 +236,9 @@ Every content column is opaque bytes. No key that opens any of them ever transit
 
 - **MLS / OpenMLS** — swap when a leaked device shouldn't expose message history. Localized to `web/src/lib/crypto.ts`.
 - **Play Store release AAB** — the `assembleRelease` path signs with the debug keystore for sideloadable release APKs, but a real Play submission needs a genuine keystore in CI secrets.
-- **Password-forgotten recovery** — currently "lost password = lost account, re-register". Recovery-phrase-based challenge/response is possible but not wired.
+- **Forgotten-password recovery** — done: an opt-in recovery key resets the password without losing history. Lose both the password *and* the recovery key and history is still unrecoverable by design (the relay never holds a key).
+- **Rate limiting** — only the agent proxy is throttled; registration, sends and the recovery-challenge endpoint are not yet.
+- **Blob GC / quota** — no TTL or reference counting on media blobs yet; storage grows unbounded.
+- **iOS** — Capacitor is wired for Android only.
+- **Signing keys** — group-archive attribution is server-attested (the live rail's is cryptographic); admin message-delete and cryptographic archive authorship wait on an identity signing key.
 - **Whisper accuracy on your specific voice-note traffic** — the pipeline is real and on-device; but only physical-device testing tells you whether `whisper-tiny.en` is good enough or you need to bump to `whisper-base.en` (~140 MB).
