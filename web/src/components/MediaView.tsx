@@ -3,6 +3,7 @@
 // the right element (img / video / audio / file card / voice player).
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { objectUrlFor } from "../lib/media.js";
 import type { MediaRef } from "../lib/store.js";
 import { updateMessageMedia } from "../lib/store.js";
@@ -128,12 +129,17 @@ export function Lightbox({ url, alt, onClose }: { url: string; alt: string; onCl
     if (e.touches.length < 2) pinch.current = null;
   }
 
-  return (
+  // Portal to body: the message bubble is wrapped in framer-motion
+  // divs that apply transforms, and any ancestor with a transform
+  // turns position:fixed into position:fixed-relative-to-that-ancestor
+  // (containing-block rule). Without the portal the lightbox stays
+  // inside its tiny bubble and the user sees nothing happen.
+  return createPortal((
     <div
       role="dialog" aria-modal="true" aria-label={alt || "Image"}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: "fixed", inset: 0, zIndex: 1000,
+        position: "fixed", inset: 0, zIndex: 1200,
         background: "rgba(0,0,0,0.92)",
         display: "grid", placeItems: "center",
         padding: "calc(16px + var(--safe-top)) 16px calc(16px + var(--safe-bottom))",
@@ -173,7 +179,7 @@ export function Lightbox({ url, alt, onClose }: { url: string; alt: string; onCl
         }}
       />
     </div>
-  );
+  ), document.body);
 }
 
 function MediaSkeleton({ kind }: { kind: MediaRef["kind"] }) {

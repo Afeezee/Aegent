@@ -10,6 +10,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Avatar, Icon } from "./ui.js";
 import type { OpenedMessage } from "../lib/store.js";
 import { MediaView } from "./MediaView.js";
@@ -59,11 +60,19 @@ export function MessageBubble(p: BubbleProps) {
     setMenuOpen(true);
   }
   const rowRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
     const onDoc = (e: MouseEvent | TouchEvent) => {
-      if (!rowRef.current?.contains(e.target as Node)) setMenuOpen(false);
+      // The menu now lives on document.body (portal), so it's no longer
+      // inside rowRef — check both. Without this, mousedown on a menu
+      // item is treated as "outside" and closes the menu before the
+      // button's click handler ever fires.
+      const target = e.target as Node;
+      if (rowRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setMenuOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("touchstart", onDoc, { passive: true });
@@ -270,15 +279,29 @@ export function MessageBubble(p: BubbleProps) {
             phone a bottom sheet that is always fully on screen; on
             desktop a popover near the bubble, clamped inside the
             viewport. Solid, so nothing bleeds through. */}
-        <AnimatePresence>
-          {menuOpen && !deleted && (
+        {/* Portal to body — the whole bubble is wrapped in framer-motion
+            divs that apply transforms, and a transformed ancestor turns
+            position:fixed into "fixed relative to that ancestor" (the
+            containing-block rule). Without the portal the menu renders
+            hundreds of pixels off-screen, which looked like "the menu
+            doesn't open on click" because the backdrop was visible but
+            the panel wasn't. AnimatePresence lives INSIDE the portal
+            because it only tracks motion children in its direct render
+            output — wrapping it around the Portal makes it see no
+            children and render nothing. */}
+        {createPortal((
+          <AnimatePresence>
+            {menuOpen && !deleted && (
             <>
               <motion.div
+                key="menu-backdrop"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }}
                 style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(4,6,16,0.45)" }}
               />
               <motion.div
+                key="menu-panel"
+                ref={menuRef}
                 role="menu"
                 initial={{ opacity: 0, y: isNarrow ? 24 : -4, scale: isNarrow ? 1 : 0.96 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -340,8 +363,9 @@ export function MessageBubble(p: BubbleProps) {
               )}
               </motion.div>
             </>
-          )}
-        </AnimatePresence>
+            )}
+          </AnimatePresence>
+        ), document.body)}
       </div>
     </motion.div>
   );

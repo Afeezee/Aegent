@@ -1223,9 +1223,18 @@ function envelopeOf(m: MessageRow) {
 function handleError(res: express.Response, e: unknown) {
   if (e instanceof ForbiddenError) return res.status(403).json({ error: e.code, message: e.message });
   if (e instanceof AuthError) return res.status(400).json({ error: e.code, message: e.message });
-  if (e instanceof z.ZodError) return res.status(400).json({ error: "bad_request", issues: e.issues });
+  if (e instanceof z.ZodError) {
+    // Build a friendly single-line message from the first issue instead
+    // of handing the client a JSON array it has to parse itself. Prior
+    // behaviour showed the raw payload on-screen when something simple
+    // like a short password tripped the schema, which looked alarming.
+    const first = e.issues[0];
+    const field = first?.path?.filter((p) => typeof p === "string").join(".") || "input";
+    const message = first ? `${field}: ${first.message}` : "Invalid input";
+    return res.status(400).json({ error: "bad_request", message, issues: e.issues });
+  }
   console.error(e);
-  res.status(500).json({ error: "internal" });
+  res.status(500).json({ error: "internal", message: "Something went wrong on our end. Try again." });
 }
 
 // keep TS happy — referenced elsewhere

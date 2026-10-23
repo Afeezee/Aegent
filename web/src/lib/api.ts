@@ -140,12 +140,18 @@ async function req<T>(path: string, init: RequestInit = {}, retried = false): Pr
     if (ok) return req<T>(path, init, true);
   }
   if (!r.ok) {
+    // Prefer a human-readable message if the server sent one; fall back
+    // to the error code; last resort is the status. Everything is
+    // String()-coerced so a non-string field (e.g. an object someone
+    // forgot to serialize) never ends up printed verbatim as a JSON
+    // blob in the auth error box.
     let msg = `${r.status}`;
     try {
       const body = await r.json();
-      msg = body.message || body.error || msg;
-    } catch { /* ignore */ }
-    throw new Error(msg);
+      if (typeof body?.message === "string") msg = body.message;
+      else if (typeof body?.error === "string") msg = body.error;
+    } catch { /* non-JSON body — keep the status */ }
+    throw new Error(String(msg));
   }
   return r.json() as Promise<T>;
 }

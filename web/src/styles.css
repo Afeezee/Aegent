@@ -131,6 +131,13 @@
     --glass-border: rgba(20, 30, 60, 0.08);
     --glass-border-hi: rgba(20, 30, 60, 0.16);
 
+    /* Without these, --sheet-bg and --menu-bg stay at their dark-mode
+       values and sheets render as dark navy under light-mode text,
+       which looks invisible — most noticeable on the bubble action
+       menu once it portals to document.body outside any theme scope. */
+    --sheet-bg: #f6f8fc;
+    --menu-bg: #ffffff;
+
     --shadow-sm: 0 2px 6px rgba(10, 14, 26, 0.06);
     --shadow-md: 0 14px 34px rgba(10, 14, 26, 0.10);
     --shadow-lg: 0 24px 60px rgba(10, 14, 26, 0.14);
@@ -464,9 +471,12 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
    right-click) opens the same menu. Keeps the chat uncluttered. */
 .bubble-kebab {
   /* Keep the hit target clickable even while the opacity is 0.6, so a
-     slow mouse travelling toward the icon can grab it. */
+     slow mouse travelling toward the icon can grab it. z-index puts
+     the icon ABOVE the ::after bridge below, which overlaps it and
+     would otherwise swallow every click. */
   opacity: 0; transition: opacity .12s;
   pointer-events: auto;
+  z-index: 2;
 }
 /* The kebab sits 32px OUTSIDE the bubble, so a hover trigger on
    .bubble-row alone leaves a dead zone between the bubble and the
@@ -477,12 +487,13 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
    fix is a bridge pseudo-element on the bubble-row itself: invisible,
    its own row only, just wide enough to cover the kebab gap. */
 .bubble-row::after {
-  /* 32px — exactly the gap between the bubble and the kebab. A wider
-     bridge paints ON TOP of the kebab (pseudo-elements render after
-     their host's children) and silently eats the click, which looks
-     like "the menu stopped opening". Keep it in the gap only. */
+  /* Invisible hover bridge from the bubble edge to the kebab icon so
+     the mouse travelling to the icon never crosses a dead zone. The
+     bridge spans the full icon area; z-index: 1 puts it BELOW the
+     kebab (z-index: 2) so the icon still receives the click. */
   content: ""; position: absolute; top: 0; bottom: 0;
   width: 32px; pointer-events: auto;
+  z-index: 1;
 }
 .bubble-row--theirs::after { right: -32px; }
 .bubble-row--mine::after   { left:  -32px; }
