@@ -477,11 +477,15 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
    fix is a bridge pseudo-element on the bubble-row itself: invisible,
    its own row only, just wide enough to cover the kebab gap. */
 .bubble-row::after {
+  /* 32px — exactly the gap between the bubble and the kebab. A wider
+     bridge paints ON TOP of the kebab (pseudo-elements render after
+     their host's children) and silently eats the click, which looks
+     like "the menu stopped opening". Keep it in the gap only. */
   content: ""; position: absolute; top: 0; bottom: 0;
-  width: 40px; pointer-events: auto;
+  width: 32px; pointer-events: auto;
 }
-.bubble-row--theirs::after { right: -40px; }
-.bubble-row--mine::after   { left:  -40px; }
+.bubble-row--theirs::after { right: -32px; }
+.bubble-row--mine::after   { left:  -32px; }
 
 @media (hover: hover) {
   .bubble-row:hover .bubble-kebab,
