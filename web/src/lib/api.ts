@@ -285,7 +285,7 @@ export const api = {
 
   createGroup: (name: string, memberIds: string[]) =>
     req<GroupApi>("/api/groups", { method: "POST", body: JSON.stringify({ name, memberIds }) }),
-  listGroups: () => req<GroupApi[]>("/api/groups"),
+  listGroups: () => req<GroupDetail[]>("/api/groups"),
   getGroup: (id: string) => req<GroupDetail>(`/api/groups/${id}`),
   updateGroup: (id: string, patch: Partial<GroupSettings> & { name?: string }) =>
     req<{ ok: true; settings: GroupSettings }>(`/api/groups/${id}`, {

@@ -33,6 +33,7 @@ import {
 } from "../lib/store.js";
 import { backup_thread } from "../agent/tools.js";
 import { setActiveThread } from "../agent/llm.js";
+import { setAgentPolicy } from "../agent/policy.js";
 import { toast } from "../components/ui.js";
 import { siteUrl } from "../lib/api.js";
 import { shareInvite } from "../lib/contacts-integration.js";
@@ -126,6 +127,15 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     (async () => {
       try {
         const gs = await api.listGroups();
+        // Groups whose owners have not switched the assistant on are
+        // off-limits to it — enforced in the agent's retrieval layer,
+        // not merely hidden in its prompt.
+        setAgentPolicy({
+          scope: { kind: "all" },
+          denied: new Set(gs.filter((g) => g.settings?.agentPolicy !== "members").map((g) => g.id)),
+          maxRows: 300,
+          maxBodyChars: 4000,
+        });
         for (const g of gs) {
           await upsertGroup({
             id: g.id, name: g.name, memberIds: g.memberIds,

@@ -28,6 +28,29 @@ import {
 } from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 
+import {
+  assertInScope, budget, filterInScope, inScope,
+} from "./policy.js";
+
+// Every retrieval in this file reads through these two, never through
+// the store directly. The model chooses what to ask for; it does not get
+// to choose what it is allowed to see.
+async function scopedEveryMessage(): Promise<OpenedMessage[]> {
+  return filterInScope(await everyMessage());
+}
+
+async function scopedThreadWith(peerId: string, limit: number): Promise<OpenedMessage[]> {
+  assertInScope(peerId);
+  return threadWith(peerId, limit);
+}
+
+// Everything the model is shown passes through the turn's budget. Row
+// counts were already capped per tool; message bodies never were, so a
+// single summarise could ship hundreds of complete messages off-device.
+const decorate = (async (rows: OpenedMessage[], ...rest: unknown[]) =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (decorateRaw as any)(budget(rows), ...rest)) as typeof decorateRaw;
+
 // ---- types ----
 
 export type PendingAction =
@@ -65,7 +88,7 @@ async function scoreAllMessages(
 ): Promise<Array<OpenedMessage & { score: number }>> {
   const qv = embed(query);
   const qToks = new Set(tokenize(query));
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const scored: Array<OpenedMessage & { score: number }> = [];
   for (const m of rows) {
     if (m.deletedAt) continue;
@@ -88,7 +111,7 @@ async function scoreAllMessages(
 
 // Adds thread-context metadata (peer name, whether it's a group) to
 // hits so the agent gets useful strings back rather than raw ids.
-async function decorate(rows: Array<OpenedMessage & { score?: number }>) {
+async function decorateRaw(rows: Array<OpenedMessage & { score?: number }>) {
   const cache = new Map<string, { name: string; isGroup: boolean }>();
   const out = [];
   for (const m of rows) {
@@ -146,7 +169,7 @@ export async function search_messages(args: {
 export async function search_exact(args: { needle: string; peerId?: string; limit?: number }): Promise<ToolResult> {
   const n = args.needle.trim().toLowerCase();
   if (!n) return { ok: true, kind: "data", value: [] };
-  const rows = (await everyMessage()).filter((m) => {
+  const rows = (await scopedEveryMessage()).filter((m) => {
     if (m.deletedAt) return false;
     if (args.peerId && m.peerId !== args.peerId) return false;
     const text = (m.editedBody ?? m.body ?? m.caption ?? "").toLowerCase();
@@ -166,7 +189,7 @@ export async function search_by_date_range(args: {
     && (!args.peerId || m.peerId === args.peerId);
   const rows = args.query
     ? (await scoreAllMessages(args.query, filter))
-    : (await everyMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+    : (await scopedEveryMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
   return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
 }
 
@@ -174,14 +197,14 @@ export async function search_by_sender(args: { senderId: string; query?: string;
   const filter = (m: OpenedMessage) => m.senderId === args.senderId;
   const rows = args.query
     ? await scoreAllMessages(args.query, filter)
-    : (await everyMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
+    : (await scopedEveryMessage()).filter(filter).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
   return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
 }
 
 export async function search_by_media_type(args: {
   kind: "image" | "video" | "audio" | "voice" | "file"; peerId?: string; limit?: number;
 }): Promise<ToolResult> {
-  const rows = (await everyMessage()).filter((m) =>
+  const rows = (await scopedEveryMessage()).filter((m) =>
     !m.deletedAt && m.media?.kind === args.kind && (!args.peerId || m.peerId === args.peerId),
   ).sort((a, b) => b.createdAt - a.createdAt).map((m) => ({ ...m, score: 1 }));
   return { ok: true, kind: "data", value: await decorate(rows.slice(0, args.limit ?? 30)) };
@@ -192,7 +215,7 @@ export async function search_links_and_patterns(args: { pattern: "link" | "phone
   const re = args.pattern === "link" ? /https?:\/\/\S+/i
     : args.pattern === "email" ? /[\w.+-]+@[\w-]+\.[\w.-]+/i
     : /(\+?\d[\d\s()\-.]{6,}\d)/;
-  const rows = (await everyMessage()).filter((m) => {
+  const rows = (await scopedEveryMessage()).filter((m) => {
     if (m.deletedAt) return false;
     if (args.peerId && m.peerId !== args.peerId) return false;
     const text = m.editedBody ?? m.body ?? m.caption ?? "";
@@ -202,14 +225,14 @@ export async function search_links_and_patterns(args: { pattern: "link" | "phone
 }
 
 export async function get_thread(args: { peerId: string; limit?: number }): Promise<ToolResult> {
-  const rows = await threadWith(args.peerId, args.limit ?? 40);
+  const rows = await scopedThreadWith(args.peerId, args.limit ?? 40);
   return { ok: true, kind: "data", value: await decorate(rows.map((m) => ({ ...m }))) };
 }
 
 // N messages surrounding a specific match, useful for follow-up
 // questions like "what did they say right after that?".
 export async function get_context_around(args: { messageId: string; before?: number; after?: number }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const idx = rows.findIndex((m) => m.id === args.messageId);
   if (idx < 0) return { ok: false, error: "message_not_found" };
   const before = args.before ?? 3, after = args.after ?? 3;
@@ -221,7 +244,7 @@ export async function get_context_around(args: { messageId: string; before?: num
 }
 
 export async function get_message_metadata(args: { messageId: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const m = rows.find((x) => x.id === args.messageId);
   if (!m) return { ok: false, error: "message_not_found" };
   const decorated = (await decorate([{ ...m }]))[0];
@@ -229,14 +252,14 @@ export async function get_message_metadata(args: { messageId: string }): Promise
 }
 
 export async function get_last_message(args: { peerId: string }): Promise<ToolResult> {
-  const rows = await threadWith(args.peerId, 1000);
+  const rows = await scopedThreadWith(args.peerId, 1000);
   const last = rows[rows.length - 1];
   if (!last) return { ok: true, kind: "data", value: null };
   return { ok: true, kind: "data", value: (await decorate([{ ...last }]))[0] };
 }
 
 export async function get_unread_count(args: { peerId?: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   let count = 0;
   const perPeer: Record<string, number> = {};
   for (const m of rows) {
@@ -251,7 +274,7 @@ export async function get_unread_count(args: { peerId?: string }): Promise<ToolR
 export async function get_shared_media(args: {
   peerId: string; kind?: "image" | "video" | "audio" | "voice" | "file"; limit?: number;
 }): Promise<ToolResult> {
-  const rows = (await threadWith(args.peerId, 5000)).filter(
+  const rows = (await scopedThreadWith(args.peerId, 5000)).filter(
     (m) => !m.deletedAt && m.media && (!args.kind || m.media.kind === args.kind),
   ).sort((a, b) => b.createdAt - a.createdAt).slice(0, args.limit ?? 30);
   return { ok: true, kind: "data", value: rows.map((m) => ({
@@ -274,9 +297,9 @@ export async function summarize_thread(args: {
 }): Promise<ToolResult> {
   let rows: OpenedMessage[];
   if (args.peerId) {
-    rows = await threadWith(args.peerId, args.maxMessages ?? 300);
+    rows = await scopedThreadWith(args.peerId, args.maxMessages ?? 300);
   } else {
-    rows = await everyMessage();
+    rows = await scopedEveryMessage();
     if (args.fromIso) rows = rows.filter((m) => m.createdAt >= Date.parse(args.fromIso!));
     if (args.toIso) rows = rows.filter((m) => m.createdAt <= Date.parse(args.toIso!));
     rows.sort((a, b) => a.createdAt - b.createdAt);
@@ -319,7 +342,7 @@ export async function draft_message(args: {
   if (!label) return { ok: false, error: "unknown_target" };
   let replyTo: { id: string; preview: string; author: string } | undefined;
   if (args.replyToMessageId) {
-    const rows = await everyMessage();
+    const rows = await scopedEveryMessage();
     const src = rows.find((m) => m.id === args.replyToMessageId);
     if (src) {
       replyTo = {
@@ -339,7 +362,7 @@ export async function draft_message(args: {
 }
 
 export async function reply_to_message(args: { targetMessageId: string; body: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const src = rows.find((m) => m.id === args.targetMessageId);
   if (!src) return { ok: false, error: "message_not_found" };
   const isGroup = !!(await getGroup(src.peerId));
@@ -352,7 +375,7 @@ export async function reply_to_message(args: { targetMessageId: string; body: st
 export async function forward_message(args: {
   messageId: string; toPeerId: string; toIsGroup: boolean; note?: string;
 }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const src = rows.find((m) => m.id === args.messageId);
   if (!src) return { ok: false, error: "message_not_found" };
   const from = (await getContact(src.senderId))?.displayName ?? "someone";
@@ -399,7 +422,7 @@ export async function set_reminder(args: {
   if (Number.isNaN(when.getTime())) return { ok: false, error: "bad_time" };
   let hint = "";
   if (args.tiedToMessageId) {
-    const rows = await everyMessage();
+    const rows = await scopedEveryMessage();
     const src = rows.find((m) => m.id === args.tiedToMessageId);
     if (src) {
       const from = (await getContact(src.senderId))?.displayName ?? "you";
@@ -439,7 +462,7 @@ export async function mark_thread_read(args: { peerId: string }): Promise<ToolRe
 }
 
 export async function delete_message_tool(args: { messageId: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const src = rows.find((m) => m.id === args.messageId);
   if (!src) return { ok: false, error: "message_not_found" };
   if (src.senderId !== currentSession()?.user.id) {
@@ -514,7 +537,7 @@ export async function save_contact_to_phone(args: { peerId: string }): Promise<T
 export async function export_to_email(args: {
   messageIds: string[]; recipientEmail: string; note?: string;
 }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const chosen = rows.filter((m) => args.messageIds.includes(m.id));
   if (chosen.length === 0) return { ok: false, error: "no_matching_messages" };
   chosen.sort((a, b) => a.createdAt - b.createdAt);
@@ -731,7 +754,7 @@ export async function backup_thread(args: {
   if (!label) return { ok: false, error: "unknown_thread" };
   const isGroup = !!(await getGroup(args.peerId));
   const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
-  const rows = (await threadWith(args.peerId, 5000))
+  const rows = (await scopedThreadWith(args.peerId, 5000))
     .filter((m) => !m.deletedAt && m.createdAt >= since);
   if (rows.length === 0) return { ok: false, error: "empty_thread" };
 
@@ -846,7 +869,7 @@ export async function schedule_backup(args: {
 // outbound message — so no confirm gate needed.
 
 export async function transcribe_voice(args: { messageId: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const msg = rows.find((m) => m.id === args.messageId);
   if (!msg) return { ok: false, error: "message_not_found" };
   if (!msg.media || msg.media.kind !== "voice") return { ok: false, error: "not_a_voice_note" };
@@ -898,7 +921,7 @@ const MAX_INLINE_IMAGE_MB = 4.5;   // Anthropic vision cap
 const MAX_INLINE_TEXT_CHARS = 200_000;
 
 export async function read_media(args: { messageId: string; question?: string }): Promise<ToolResult> {
-  const rows = await everyMessage();
+  const rows = await scopedEveryMessage();
   const msg = rows.find((m) => m.id === args.messageId);
   if (!msg) return { ok: false, error: "message_not_found" };
   if (!msg.media) return { ok: false, error: "message_has_no_media" };

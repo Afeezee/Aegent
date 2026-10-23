@@ -332,7 +332,9 @@ app.get("/api/groups", authed, async (req, res) => {
   try {
     const gs = await groupsForUser((req as AuthedReq).userId);
     const out = [];
-    for (const g of gs) out.push({ ...g, memberIds: await membersOf(g.id) });
+    for (const g of gs) {
+      out.push({ ...g, memberIds: await membersOf(g.id), settings: await settingsOf(g.id) });
+    }
     res.json(out);
   } catch (e) { handleError(res, e); }
 });

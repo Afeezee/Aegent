@@ -211,7 +211,11 @@ export type AgentTurnRow = {
   id: string;
   createdAt: number;
   kind: "you" | "thought" | "reply" | "error" | "confirm_placeholder";
-  text: string;
+  // Sealed like message bodies. Agent replies quote the conversations
+  // they were asked about, so leaving this in the clear made the
+  // transcript the one unencrypted copy of other people's words — and
+  // with groups in scope those words are not even the reader's own.
+  text_ct: string;
 };
 
 class AegentDB extends Dexie {
@@ -662,18 +666,29 @@ export async function deleteReminder(id: string) {
 
 // ---- agent conversation history ----
 
-export async function appendAgentTurn(row: Omit<AgentTurnRow, "id" | "createdAt">): Promise<AgentTurnRow> {
-  const stored: AgentTurnRow = { ...row, id: crypto.randomUUID(), createdAt: Date.now() };
+export type OpenedAgentTurn = Omit<AgentTurnRow, "text_ct"> & { text: string };
+
+export async function appendAgentTurn(row: { kind: AgentTurnRow["kind"]; text: string }): Promise<OpenedAgentTurn> {
+  const stored: AgentTurnRow = {
+    id: crypto.randomUUID(), createdAt: Date.now(),
+    kind: row.kind, text_ct: sealText(row.text),
+  };
   await requireDb().agentTurns.put(stored);
-  return stored;
+  return { id: stored.id, createdAt: stored.createdAt, kind: stored.kind, text: row.text };
 }
-export async function listAgentTurns(limit = 400): Promise<AgentTurnRow[]> {
+export async function listAgentTurns(limit = 400): Promise<OpenedAgentTurn[]> {
   const rows = await requireDb().agentTurns
     .orderBy("createdAt")
     .reverse()
     .limit(limit)
     .toArray();
-  return rows.reverse(); // oldest → newest for display
+  const key = LOCAL_STORE_KEY!;
+  return rows.reverse().map((r) => {
+    let text = "";
+    try { text = new TextDecoder().decode(secretBoxOpen(key, r.text_ct)); }
+    catch { text = "<corrupt>"; }
+    return { id: r.id, createdAt: r.createdAt, kind: r.kind, text };
+  });
 }
 export async function clearAgentTurns(): Promise<void> {
   await requireDb().agentTurns.clear();
@@ -817,6 +832,7 @@ const SEALED_TABLES: Array<{ table: string; fields: string[] }> = [
   { table: "outbox",       fields: ["packed_ct"] },
   { table: "diaryEntries", fields: ["text_ct", "caption_ct"] },
   { table: "diaryOutbox",  fields: ["payload_ct"] },
+  { table: "agentTurns",   fields: ["text_ct"] },
 ];
 
 // Re-seal everything under a new local-store key.

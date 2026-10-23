@@ -186,6 +186,19 @@ function Settings({
         options={[["none", "From when they join"], ["all", "Everything"]]}
         onChange={(v) => act(() => api.updateGroup(groupId, { historyPolicy: v as "none" | "all" }), "Saved")}
       />
+      <Choice
+        label="Assistant" value={s?.agentPolicy ?? "off"} disabled={busy}
+        options={[["off", "Off"], ["members", "Members can ask about this group"]]}
+        onChange={(v) => act(() => api.updateGroup(groupId, { agentPolicy: v as "off" | "members" }), "Saved")}
+      />
+      {s?.agentPolicy === "members" && (
+        <div className="small" style={{ marginTop: 4, lineHeight: 1.5, color: "var(--warn, var(--text-dim))" }}>
+          When someone asks the assistant about this group, excerpts of
+          these messages are sent to Anthropic to answer. Everyone here
+          should know that. Turning it off stops this app from doing it —
+          it cannot stop someone copying out what they can already read.
+        </div>
+      )}
       <div className="small" style={{ marginTop: 6, lineHeight: 1.5 }}>
         History is handed over as keys by whoever admits someone, so it
         needs a member's device — not the relay, which cannot read any of
