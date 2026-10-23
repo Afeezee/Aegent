@@ -37,6 +37,7 @@ export function Chat({
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
   const [peerMeta, setPeerMeta] = useState<{ contact?: ContactRow; group?: GroupRow }>({});
+  const [agentOn, setAgentOn] = useState(false);
   const [typing, setTyping] = useState<Set<string>>(new Set());
   const [reply, setReply] = useState<ReplyTarget | null>(null);
   const [editing, setEditing] = useState<{ id: string; body: string } | null>(null);
@@ -141,6 +142,16 @@ export function Chat({
     });
   }, [thread.peerId, thread.isGroup]);
 
+  useEffect(() => {
+    if (!thread.isGroup) { setAgentOn(false); return; }
+    let live = true;
+    import("../lib/api.js")
+      .then((m) => m.api.getGroup(thread.peerId))
+      .then((g) => { if (live) setAgentOn(g.settings?.agentPolicy === "members"); })
+      .catch(() => { if (live) setAgentOn(false); });
+    return () => { live = false; };
+  }, [thread.peerId, thread.isGroup]);
+
   const subtitle = useMemo(() => {
     if (typing.size > 0) {
       const names = Array.from(typing).map((u) => peers.get(u) ?? "someone");
@@ -203,7 +214,16 @@ export function Chat({
           <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {thread.title}
           </div>
-          <div className="small">{subtitle}</div>
+          <div className="small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span>{subtitle}</span>
+            {agentOn && (
+              <span title="The assistant is on for this group" style={{
+                fontSize: 10, padding: "1px 6px", borderRadius: 999,
+                background: "rgba(138,125,255,0.18)", color: "var(--accent-strong)",
+                border: "1px solid var(--line)",
+              }}>🤖 assistant on</span>
+            )}
+          </div>
         </div>
         {onInvokeAgent && (
           <button

@@ -359,6 +359,8 @@ function normalizeHistory(prior: Array<{ role: "user" | "assistant"; content: st
   return out;
 }
 
+import { resetAgentUsage } from "./usage.js";
+
 export async function* runLlm(
   userInput: string,
   history: Array<{ role: "user" | "assistant"; content: string }> = [],
@@ -372,6 +374,7 @@ export async function* runLlm(
   // stops asking obvious "which chat?" questions when the answer is
   // "the only one".
   const contextSuffix = await buildContextSuffix();
+  resetAgentUsage();
   const systemForThisAsk = BASE_PROMPT + contextSuffix;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {

@@ -27,6 +27,7 @@ import {
   currentSession, sendDelete, sendMedia, sendText,
 } from "../lib/session.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
+import { noteAgentUse } from "./usage.js";
 
 import {
   assertInScope, budget, filterInScope, inScope,
@@ -139,6 +140,12 @@ async function decorateRaw(rows: Array<OpenedMessage & { score?: number }>) {
       edited: !!m.editedBody, hasReplyTo: !!m.replyTo,
     });
   }
+  // Record exactly what is about to be shown to the model this turn, so
+  // the UI can tell the person afterwards.
+  noteAgentUse(out.map((r) => ({
+    id: r.id, peerName: r.senderName === "You" ? `${r.peerName} (you)` : r.peerName,
+    when: new Date(r.when).toLocaleString(), body: r.body,
+  })));
   return out;
 }
 

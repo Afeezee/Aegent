@@ -2,6 +2,8 @@
 // or the ⌘J shortcut. Slides in from the right as a glass sheet.
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AgentConsent, hasAgentConsent } from "./AgentConsent.js";
+import { agentUsageCount, agentUsageMessages } from "../agent/usage.js";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -28,7 +30,7 @@ export type ResultItem = {
 type UiMsg =
   | { id: string; kind: "you"; text: string }
   | { id: string; kind: "thought"; text: string }
-  | { id: string; kind: "reply"; text: string }
+  | { id: string; kind: "reply"; text: string; used?: number; usedItems?: import("../agent/usage.js").UsedMessage[] }
   | { id: string; kind: "error"; text: string }
   | { id: string; kind: "results"; items: ResultItem[] }
   | { id: string; kind: "confirm"; action: PendingAction; explain: string; resolved?: "sent" | "cancelled" };
@@ -58,6 +60,8 @@ export function AgentSheet({
 }) {
   const reduce = useReducedMotion();
   const [input, setInput] = useState("");
+  const [consented, setConsented] = useState(hasAgentConsent);
+  useEffect(() => { if (open) setConsented(hasAgentConsent()); }, [open]);
   const [busy, setBusy] = useState(false);
   // Start empty; the persisted-history effect below fills this in on
   // first open, appending the greeting only if the transcript is
@@ -179,6 +183,13 @@ export function AgentSheet({
     try {
       for await (const ev of runAgent(text, { history })) {
         const m = uiFor(ev);
+        // Attach what the agent read to the reply, so the person can see
+        // it afterwards. Captured here because retrieval finished by the
+        // time a reply exists.
+        if (m.kind === "reply") {
+          const used = agentUsageCount();
+          if (used > 0) { m.used = used; m.usedItems = agentUsageMessages(); }
+        }
         setMsgs((xs) => [...xs, m]);
         persistTurn(m);
       }
@@ -249,6 +260,10 @@ export function AgentSheet({
               display: "flex", flexDirection: "column", borderRadius: 20, overflow: "hidden",
             }}
           >
+            {!consented ? (
+              <AgentConsent onAccept={() => setConsented(true)} onDecline={onClose} />
+            ) : (
+            <>
             <header style={{
               display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
               borderBottom: "1px solid var(--line)",
@@ -333,6 +348,8 @@ export function AgentSheet({
                 ))}
               </div>
             )}
+            </>
+            )}
           </motion.aside>
         </motion.div>
       )}
@@ -369,6 +386,7 @@ function renderMsg(
             }}
           >{m.text}</ReactMarkdown>
         </div>
+        {m.used && m.used > 0 && <UsedMessages count={m.used} items={m.usedItems ?? []} />}
       </div>
     );
     case "error": return (
@@ -600,6 +618,33 @@ function ResultCard({
         {body}
       </div>
     </button>
+  );
+}
+
+function UsedMessages({ count, items }: { count: number; items: import("../agent/usage.js").UsedMessage[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{ all: "unset", cursor: "pointer", fontSize: 12, color: "var(--text-mute)" }}>
+        Used {count} message{count === 1 ? "" : "s"} {open ? "▾" : "▸"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((m, i) => (
+            <div key={i} style={{
+              fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.4,
+              padding: "6px 8px", borderRadius: 8, background: "rgba(255,255,255,0.03)",
+              border: "1px solid var(--line)",
+            }}>
+              <div style={{ color: "var(--text-mute)" }}>{m.peer} · {m.when}</div>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.snippet}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
