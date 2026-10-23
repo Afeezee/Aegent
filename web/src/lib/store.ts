@@ -114,6 +114,9 @@ export type DiaryEntryRow = {
   text_ct: string | null;
   caption_ct: string | null;
   media: MediaRef | null;
+  // When an entry is a set of images, the full list (cover first). One
+  // image leaves this null and `media` is the single picture.
+  album: MediaRef[] | null;
   seenAt: number | null;
   // Author-side only: how many people have opened this entry.
   viewCount: number | null;
@@ -1011,6 +1014,7 @@ export async function saveDiaryEntry(input: {
   id: string; authorId: string; dayKey: string; tzOffsetMin: number; seq: number;
   kind: "text" | "media"; createdAt: number; expiresAt: number | null;
   text?: string | null; caption?: string | null; media?: MediaRef | null;
+  album?: MediaRef[] | null;
   format?: DiaryFormat; align?: DiaryAlign;
 }): Promise<void> {
   const existing = await requireDb().diaryEntries.get(input.id);
@@ -1026,6 +1030,7 @@ export async function saveDiaryEntry(input: {
     text_ct: input.text ? sealText(input.text) : null,
     caption_ct: input.caption ? sealText(input.caption) : null,
     media: input.media ?? null,
+    album: input.album ?? null,
     // Re-ingesting an entry must not un-see it or forget its view count.
     seenAt: existing?.seenAt ?? null,
     viewCount: existing?.viewCount ?? null,

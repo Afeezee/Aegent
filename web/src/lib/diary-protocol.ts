@@ -30,7 +30,12 @@ export type DiaryAlign = "left" | "center" | "right" | "justify";
 
 export type DiaryBody =
   | { v: 1; t: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign }
-  | { v: 1; t: "media"; caption?: string; media: MediaRef; format?: DiaryFormat; align?: DiaryAlign };
+  | {
+      v: 1; t: "media"; caption?: string;
+      media: MediaRef;              // the cover — also the whole thing when there's one image
+      album?: MediaRef[];           // every image, cover included, when there's more than one
+      format?: DiaryFormat; align?: DiaryAlign;
+    };
 
 export function packDiaryBody(b: DiaryBody): string {
   return JSON.stringify(b);

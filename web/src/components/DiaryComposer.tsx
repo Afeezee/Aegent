@@ -13,6 +13,7 @@ import { RichEditor, applyRich, type RichCommand } from "./RichEditor.js";
 import type { DiaryAlign } from "../lib/diary-protocol.js";
 import { dayKeyFor } from "../lib/daybreaks.js";
 import { pickFile, uploadMedia } from "../lib/media.js";
+import type { MediaRef } from "../lib/store.js";
 
 const MAX_ATTACH_MB = 19;   // server cap minus a safety margin
 const isNarrow = () => typeof window !== "undefined" && window.innerWidth < 720;
@@ -55,25 +56,32 @@ export function DiaryComposer({
     } finally { setBusy(false); }
   }
 
-  async function attach(file: File) {
-    if (file.size > MAX_ATTACH_MB * 1024 * 1024) {
-      toast(`That image is over ${MAX_ATTACH_MB} MB`, "warn");
+  async function attach(files: File[]) {
+    const chosen = files.slice(0, 8);   // server binds at most 8 blobs per entry
+    if (chosen.some((f) => f.size > MAX_ATTACH_MB * 1024 * 1024)) {
+      toast(`Each image must be under ${MAX_ATTACH_MB} MB`, "warn");
       return;
     }
     setBusy(true);
-    const id = toast("Encrypting photo…", "info", { sticky: true });
+    const id = toast(chosen.length > 1 ? `Encrypting ${chosen.length} photos…` : "Encrypting photo…", "info", { sticky: true });
     try {
-      const picked = await pickFile(file);
-      toastUpdate(id, { text: "Uploading · 0%", progress: 0 });
-      const media = await uploadMedia(picked, (frac) => {
-        toastUpdate(id, { text: `Uploading · ${Math.round(frac * 100)}%`, progress: frac });
-      });
+      const album: MediaRef[] = [];
+      for (let k = 0; k < chosen.length; k++) {
+        const picked = await pickFile(chosen[k]);
+        const base = k / chosen.length;
+        const media = await uploadMedia(picked, (frac) => {
+          const overall = Math.round((base + frac / chosen.length) * 100);
+          toastUpdate(id, { text: `Uploading · ${overall}%`, progress: base + frac / chosen.length });
+        });
+        album.push(media);
+      }
       const r = await publishDiaryEntry({
-        kind: "media", media, caption: text.trim() || undefined, format: "md", align, visibility,
+        kind: "media", media: album[0], album, caption: text.trim() || undefined, format: "md", align, visibility,
       });
       setText("");
       toastUpdate(id, {
-        text: r.queued ? "Saved — it'll post when you're back online" : "Photo added to today's page",
+        text: r.queued ? "Saved — it'll post when you're back online"
+          : chosen.length > 1 ? `${chosen.length} photos added to today's page` : "Photo added to today's page",
         kind: "ok", sticky: false, progress: undefined,
       });
       onPosted();
@@ -179,10 +187,10 @@ export function DiaryComposer({
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 14, alignItems: "center" }}>
-              <input ref={fileRef} type="file" accept="image/*" hidden
-                onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void attach(f); }} />
-              <Button onClick={() => fileRef.current?.click()} disabled={busy} aria-label="Add a photo">
-                <Icon.photo /> Photo
+              <input ref={fileRef} type="file" accept="image/*" multiple hidden
+                onChange={(e) => { const fs = [...(e.target.files ?? [])]; e.target.value = ""; if (fs.length) void attach(fs); }} />
+              <Button onClick={() => fileRef.current?.click()} disabled={busy} aria-label="Add photos">
+                <Icon.photo /> Photos
               </Button>
               <Button variant="primary" style={{ marginLeft: "auto" }}
                 onClick={postText} disabled={busy || !text.trim()}>

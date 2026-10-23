@@ -15,6 +15,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Avatar, Button, Glass, Icon, toast } from "../components/ui.js";
 import { MediaView } from "../components/MediaView.js";
+import { DiaryCarousel } from "../components/DiaryCarousel.js";
 import { DiaryComposer } from "../components/DiaryComposer.js";
 import { formatDay } from "../lib/daybreaks.js";
 import { objectUrlFor } from "../lib/media.js";
@@ -368,7 +369,9 @@ function Entry({
 
       {entry.media ? (
         <>
-          <MediaView media={entry.media} caption={entry.caption ?? undefined} />
+          {entry.album && entry.album.length > 1
+            ? <DiaryCarousel images={entry.album} caption={entry.caption ?? undefined} />
+            : <MediaView media={entry.media} caption={entry.caption ?? undefined} />}
           {entry.caption && (
             <div style={{ marginTop: 8, fontSize: 15, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
               {entry.caption}

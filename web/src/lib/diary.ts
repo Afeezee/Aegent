@@ -66,7 +66,7 @@ export type DiaryVisibility = "contacts" | "private";
 
 export type PublishInput =
   | { kind: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility }
-  | { kind: "media"; media: MediaRef; caption?: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility };
+  | { kind: "media"; media: MediaRef; album?: MediaRef[]; caption?: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility };
 
 // Resolve today's audience on this device. The relay is handed an
 // explicit list of recipients and never the word "everyone": it has no
@@ -93,7 +93,11 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
 
   const body: DiaryBody = input.kind === "text"
     ? { v: 1, t: "text", body: input.body, format: input.format, align: input.align }
-    : { v: 1, t: "media", media: input.media, caption: input.caption, format: input.format, align: input.align };
+    : {
+        v: 1, t: "media", media: input.media,
+        album: input.album && input.album.length > 1 ? input.album : undefined,
+        caption: input.caption, format: input.format, align: input.align,
+      };
 
   // One key per entry: it is what a grant hands out, and what deleting a
   // grant takes away.
@@ -126,7 +130,9 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
     // archive from a bare login with nothing but the password.
     authorKey: boxSealBytes(entryKey, session.publicKey, session.privateKey),
     grants,
-    blobIds: input.kind === "media" ? [input.media.blobId] : [],
+    blobIds: input.kind === "media"
+      ? (input.album && input.album.length > 1 ? input.album : [input.media]).map((m) => m.blobId)
+      : [],
   };
 
   // Save locally first. A publish that fails must never cost the user
@@ -137,6 +143,7 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
     text: input.kind === "text" ? input.body : null,
     caption: input.kind === "media" ? input.caption ?? null : null,
     media: input.kind === "media" ? input.media : null,
+    album: input.kind === "media" ? input.album ?? null : null,
     format: input.format, align: input.align,
   });
 
@@ -206,6 +213,7 @@ async function ingest(entry: DiaryEntryApi, mine: boolean): Promise<boolean> {
     text: body.t === "text" ? body.body : null,
     caption: body.t === "media" ? body.caption ?? null : null,
     media: body.t === "media" ? body.media : null,
+    album: body.t === "media" ? body.album ?? null : null,
     format: body.format, align: body.align,
   });
   return true;

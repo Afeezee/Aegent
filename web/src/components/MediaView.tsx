@@ -70,7 +70,7 @@ function ImageWithLightbox({ url, alt }: { url: string; alt: string }) {
   );
 }
 
-function Lightbox({ url, alt, onClose }: { url: string; alt: string; onClose: () => void }) {
+export function Lightbox({ url, alt, onClose }: { url: string; alt: string; onClose: () => void }) {
   const [scale, setScale] = useState(1);
   const [tx, setTx] = useState(0);
   const [ty, setTy] = useState(0);
@@ -363,3 +363,78 @@ function formatSize(b: number): string {
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
+
+// A swipeable, zoomable viewer for a set of images. Reuses the single
+// Lightbox for the heavy lifting (pinch, pan, double-tap zoom) and adds
+// index navigation on top — arrows on desktop, a horizontal swipe on
+// touch. Keyed by index so each image opens at 1x.
+export function AlbumLightbox({
+  images, index, onClose,
+}: { images: MediaRef[]; index: number; onClose: () => void }) {
+  const [i, setI] = useState(index);
+  const [url, setUrl] = useState<string | null>(null);
+  const touch = useRef<number | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setUrl(null);
+    objectUrlFor(images[i]).then((u) => { if (live) setUrl(u); }).catch(() => { /* blank */ });
+    return () => { live = false; };
+  }, [i, images]);
+
+  const go = (d: number) => setI((n) => Math.max(0, Math.min(images.length - 1, n + d)));
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight") go(1);
+      if (e.key === "ArrowLeft") go(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [images.length]);
+
+  if (!url) return null;
+  return (
+    <div
+      onTouchStart={(e) => { touch.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => {
+        if (touch.current === null) return;
+        const dx = e.changedTouches[0].clientX - touch.current;
+        if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+        touch.current = null;
+      }}
+    >
+      <Lightbox key={i} url={url} alt={`Image ${i + 1} of ${images.length}`} onClose={onClose} />
+      {images.length > 1 && (
+        <div style={{
+          position: "fixed", bottom: "calc(24px + var(--safe-bottom))", left: 0, right: 0,
+          zIndex: 1100, display: "flex", gap: 14, justifyContent: "center", alignItems: "center",
+          pointerEvents: "none",
+        }}>
+          <NavBtn dir="prev" disabled={i === 0} onClick={() => go(-1)} />
+          <span style={{
+            fontSize: 13, color: "#fff", background: "rgba(0,0,0,0.5)",
+            padding: "4px 10px", borderRadius: 999, pointerEvents: "none",
+          }}>{i + 1} / {images.length}</span>
+          <NavBtn dir="next" disabled={i === images.length - 1} onClick={() => go(1)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NavBtn({ dir, disabled, onClick }: { dir: "prev" | "next"; disabled: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled}
+      aria-label={dir === "prev" ? "Previous image" : "Next image"}
+      style={{
+        all: "unset", cursor: disabled ? "default" : "pointer", pointerEvents: "auto",
+        width: 44, height: 44, borderRadius: 999, display: "grid", placeItems: "center",
+        background: "rgba(0,0,0,0.5)", color: "#fff", opacity: disabled ? 0.35 : 1,
+        fontSize: 22,
+      }}>
+      {dir === "prev" ? "‹" : "›"}
+    </button>
+  );
+}
+
