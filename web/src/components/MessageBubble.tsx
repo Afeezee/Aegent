@@ -43,7 +43,7 @@ export function MessageBubble(p: BubbleProps) {
     if (!text) return;
     if (!translationConsentGranted()) {
       const ok = window.confirm(
-        "Translation uses an outside service. The text of this message will be sent to it to be translated — your end-to-end encryption does not cover that trip. Continue?",
+        "Translation uses Google Translate. The text of this message will be sent to Google — your end-to-end encryption does not cover that trip. Continue?",
       );
       if (!ok) return;
       grantTranslationConsent();
@@ -103,7 +103,6 @@ export function MessageBubble(p: BubbleProps) {
       initial={{ opacity: 0, y: 8, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 380, damping: 30 }}
-      className="bubble-outer-row"
       style={{
         display: "flex", gap: 8,
         justifyContent: isMine ? "flex-end" : "flex-start",
@@ -114,7 +113,7 @@ export function MessageBubble(p: BubbleProps) {
       {!isMine && !p.showAvatar && <div style={{ width: 30 }} />}
 
       <div
-        className="bubble-row"
+        className={`bubble-row ${isMine ? "bubble-row--mine" : "bubble-row--theirs"}`}
         style={{ maxWidth: "min(72%, 560px)", position: "relative" }}
         onContextMenu={(e) => { if (deleted) return; e.preventDefault(); openMenuAt(e.clientX, e.clientY); }}
         onTouchStart={(e) => {

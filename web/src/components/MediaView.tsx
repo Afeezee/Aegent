@@ -440,7 +440,7 @@ function TranscriptWithTranslate({ text, isMine }: { text: string; isMine?: bool
   async function doIt() {
     if (!translationConsentGranted()) {
       const ok = window.confirm(
-        "Translation uses an outside service. The transcript will be sent to it — your end-to-end encryption does not cover that trip. Continue?",
+        "Translation uses Google Translate. The transcript will be sent to Google — your end-to-end encryption does not cover that trip. Continue?",
       );
       if (!ok) return;
       grantTranslationConsent();

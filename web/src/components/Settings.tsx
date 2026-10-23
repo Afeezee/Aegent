@@ -16,8 +16,8 @@ import {
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
 import {
-  revokeTranslationConsent, setTargetLanguage, setTranslationEndpoint,
-  targetLanguage, translationConsentGranted, translationEndpoint, TRANSLATION_TARGETS,
+  revokeTranslationConsent, setTargetLanguage,
+  targetLanguage, translationConsentGranted, TRANSLATION_TARGETS,
 } from "../lib/translate.js";
 
 export function Settings({
@@ -510,27 +510,18 @@ function VoiceTranscribeToggle() {
   );
 }
 
-// Translation runs against an outside service (LibreTranslate by
-// default) — the one place in the app that leaves the end-to-end
-// envelope, and only when the person explicitly taps "Translate" on a
-// message. Settings expose the knobs: which language to translate TO,
-// which server to send to, and a way to withdraw consent.
+// Translation runs against Google Translate's public endpoint — the one
+// place in the app that leaves the end-to-end envelope, and only when
+// the person explicitly taps "Translate" on a message. Settings expose
+// the knobs: which language to translate TO, and a way to withdraw
+// consent so the service name is shown again on next use.
 function TranslationPanel() {
   const [target, setTarget] = useState(() => targetLanguage());
-  const [endpoint, setEndpoint] = useState(() => translationEndpoint());
-  const [draft, setDraft] = useState(() => translationEndpoint());
   const [consented, setConsented] = useState(() => translationConsentGranted());
 
   function pickTarget(code: string) {
     setTarget(code);
     setTargetLanguage(code);
-  }
-  function saveEndpoint() {
-    const trimmed = draft.trim().replace(/\/+$/, "");
-    setTranslationEndpoint(trimmed);
-    setEndpoint(trimmed || "https://translate.disroot.org");
-    setDraft(trimmed || "https://translate.disroot.org");
-    toast("Translation server saved", "ok");
   }
   function forget() {
     revokeTranslationConsent();
@@ -557,23 +548,10 @@ function TranslationPanel() {
           ))}
         </select>
       </div>
-      <div>
-        <div style={{ fontSize: 13, marginBottom: 6 }}>LibreTranslate server</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            type="url" inputMode="url" autoComplete="off" spellCheck={false}
-            value={draft} onChange={(e) => setDraft(e.target.value)}
-            placeholder="https://translate.disroot.org"
-          />
-          <Button variant="primary" onClick={saveEndpoint} disabled={draft.trim().replace(/\/+$/, "") === endpoint}>
-            Save
-          </Button>
-        </div>
-        <div className="small" style={{ marginTop: 6 }}>
-          Point this at your own LibreTranslate instance to keep every
-          translation inside systems you trust. Default is Disroot's
-          public endpoint — it rate-limits and may be slow.
-        </div>
+      <div className="small">
+        Powered by Google Translate. Tapping Translate on a message sends
+        just that message's text to Google — Aegent's servers never see
+        it, and nothing is translated automatically.
       </div>
       {consented && (
         <div>

@@ -468,15 +468,29 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   opacity: 0; transition: opacity .12s;
   pointer-events: auto;
 }
+/* The kebab sits 32px OUTSIDE the bubble, so a hover trigger on
+   .bubble-row alone leaves a dead zone between the bubble and the
+   icon: the cursor crosses it, :hover drops, and the icon vanishes
+   under the mouse. Extending the trigger to the FULL outer row broke
+   worse — hovering any row surfaced its own kebab, and the mouse
+   trail between messages could end up clicking the wrong one. The
+   fix is a bridge pseudo-element on the bubble-row itself: invisible,
+   its own row only, just wide enough to cover the kebab gap. */
+.bubble-row::after {
+  content: ""; position: absolute; top: 0; bottom: 0;
+  width: 40px; pointer-events: auto;
+}
+.bubble-row--theirs::after { right: -40px; }
+.bubble-row--mine::after   { left:  -40px; }
+
 @media (hover: hover) {
-  /* The hover trigger is the whole row, not just .bubble-row — the
-     kebab sits 32px OUTSIDE the bubble, so if the mouse leaves the
-     bubble on the way to the kebab the hover is lost and the icon
-     vanishes under the cursor. The outer row includes that gap. */
-  .bubble-outer-row:hover .bubble-kebab,
+  .bubble-row:hover .bubble-kebab,
   .bubble-kebab:focus-visible { opacity: 0.7; }
   .bubble-kebab:hover { opacity: 1; }
 }
 @media (hover: none) {
   .bubble-kebab { display: none; }
+  /* The bridge is only there to carry desktop hover; keep it out of
+     the touch hit-tree so a long-press on empty space never fires. */
+  .bubble-row::after { display: none; }
 }
