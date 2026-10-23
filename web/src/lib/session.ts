@@ -47,7 +47,7 @@ import {
   applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
-  markRead, openStore, outboxCount, rekeyLocalStore, repairSentTimes, repairTimestamps,
+  markRead, openStore, outboxCount, rekeyLocalStore, repairAgentTurns, repairSentTimes, repairTimestamps,
   saveMediaMessage,
   saveTextMessage, setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
@@ -154,7 +154,6 @@ function clearPersistedKeys() {
 // converted yet, re-seals the existing rows in place.
 const META_STOREKEY_VERSION = "storeKeyVersion";
 const META_TS_REPAIR = "timestampRepair";
-const META_SENT_TIME_REPAIR = "sentTimeRepair";
 
 async function openLocalStore(
   userId: string, privateKey: Uint8Array, legacyKey?: Uint8Array | null,
@@ -179,12 +178,19 @@ async function openLocalStore(
       await setMeta(META_TS_REPAIR, "1");
     }
     // Undo the re-dating caused by self-copies that carried no authored
-    // time — see repairSentTimes.
-    if (await getMeta(META_SENT_TIME_REPAIR) !== "1") {
-      const moved = await repairSentTimes();
-      if (moved > 0) console.log(`[session] restored the original time of ${moved} sent message(s)`);
-      await setMeta(META_SENT_TIME_REPAIR, "1");
-    }
+    // time — see repairSentTimes. The one-shot guard that used to live
+    // here left behind devices where new history arrived after the guard
+    // had already fired, so the old backfilled messages stayed clustered
+    // at the upload moment. The walk is cheap and idempotent, so it runs
+    // every session instead: it touches only outbound rows whose stored
+    // time disagrees with their id-encoded authored time by more than a
+    // minute, and does nothing on a device with nothing to fix.
+    const moved = await repairSentTimes();
+    if (moved > 0) console.log(`[session] restored the original time of ${moved} sent message(s)`);
+    // Migrate any surviving legacy agentTurns rows into the sealed shape,
+    // so old agent replies stop reading as blank or "<corrupt>".
+    const agentFixed = await repairAgentTurns().catch(() => 0);
+    if (agentFixed > 0) console.log(`[session] migrated ${agentFixed} legacy agent turn(s)`);
   } catch (e) {
     console.warn("[session] store migration skipped:", (e as Error).message);
   }

@@ -8,6 +8,7 @@
 // never floats up above the bubble and gets clipped.
 
 import { AnimatePresence, motion } from "framer-motion";
+import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
 import { useEffect, useRef, useState } from "react";
 import { Avatar, Icon } from "./ui.js";
 import type { OpenedMessage } from "../lib/store.js";
@@ -35,6 +36,23 @@ export function MessageBubble(p: BubbleProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
   const isNarrow = typeof window !== "undefined" && window.innerWidth < 720;
+  const [translated, setTranslated] = useState<string | null>(null);
+  const [translating, setTranslating] = useState(false);
+  async function doTranslate() {
+    const text = (msg.editedBody ?? msg.body ?? msg.caption ?? "").trim();
+    if (!text) return;
+    if (!translationConsentGranted()) {
+      const ok = window.confirm(
+        "Translation uses an outside service. The text of this message will be sent to it to be translated — your end-to-end encryption does not cover that trip. Continue?",
+      );
+      if (!ok) return;
+      grantTranslationConsent();
+    }
+    setTranslating(true);
+    try { setTranslated(await translateText(text)); }
+    catch (e) { setTranslated(`(couldn't translate: ${(e as Error).message})`); }
+    finally { setTranslating(false); }
+  }
   const longPress = useRef<number | null>(null);
   function openMenuAt(x: number, y: number) {
     setMenuPos({ x: isMine ? Math.max(12, x - 190) : x, y: y + 6 });
@@ -85,6 +103,7 @@ export function MessageBubble(p: BubbleProps) {
       initial={{ opacity: 0, y: 8, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: "spring", stiffness: 380, damping: 30 }}
+      className="bubble-outer-row"
       style={{
         display: "flex", gap: 8,
         justifyContent: isMine ? "flex-end" : "flex-start",
@@ -164,6 +183,16 @@ export function MessageBubble(p: BubbleProps) {
               {body && !msg.media && <span>{body}</span>}
               {body && msg.media && (
                 <div style={{ padding: "8px 8px 4px", fontSize: 14 }}>{body}</div>
+              )}
+              {(translating || translated) && (
+                <div style={{
+                  marginTop: 6, padding: "6px 8px", borderRadius: 8,
+                  background: "rgba(255,255,255,0.08)", fontSize: 13, lineHeight: 1.45,
+                  color: isMine ? "rgba(16,19,42,0.9)" : "var(--text-dim)",
+                  borderLeft: "2px solid var(--aqua)",
+                }}>
+                  {translating ? "Translating…" : translated}
+                </div>
               )}
             </>
           )}
@@ -298,6 +327,14 @@ export function MessageBubble(p: BubbleProps) {
                 onClick={() => { p.onForward(); setMenuOpen(false); }} />
               <MenuItem icon={<Icon.copy />} label="Copy"
                 onClick={() => { p.onCopy(); setMenuOpen(false); }} />
+              {(msg.body || msg.editedBody || msg.caption) && (
+                <MenuItem icon={<Icon.chevron />} label={translated ? "Hide translation" : "Translate"}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    if (translated) setTranslated(null);
+                    else void doTranslate();
+                  }} />
+              )}
               {isMine && (
                 <MenuItem icon={<Icon.trash />} label="Delete" danger
                   onClick={() => { p.onDelete(); setMenuOpen(false); }} />

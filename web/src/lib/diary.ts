@@ -360,6 +360,43 @@ export async function refreshViewCount(entryId: string): Promise<number | null> 
 
 // ---- author actions ----
 
+// Edit a text entry's body on the day it was posted.
+//
+// The entry key does NOT change — contacts who already hold their 24h
+// grant keep seeing the live text — so re-encrypting with the same key
+// and shipping fresh ciphertext is all the server needs. If the window
+// has closed the server refuses, and the UI hides the control, so this
+// never silently fails.
+export async function editDiaryText(id: string, newBody: string, opts: { format?: DiaryFormat; align?: DiaryAlign } = {}): Promise<void> {
+  const session = currentSession();
+  if (!session) throw new Error("no_session");
+  const { getDiaryEntry, saveDiaryEntry } = await import("./store.js");
+  const row = await getDiaryEntry(id);
+  if (!row) throw new Error("unknown_entry");
+  if (row.authorId !== session.user.id) throw new Error("not_yours");
+  if (row.media) throw new Error("only_text_entries_can_be_edited");
+
+  // We need the entry key to re-seal. For OUR OWN entries the never-
+  // expiring self-grant on the relay carries it; opening our own copy of
+  // our own wrapped key gives us the same `K_e` the entry was sealed with
+  // originally.
+  const mine = await api.diaryMine({ since: row.createdAt, afterId: undefined, limit: 50 });
+  const match = mine.entries.find((e) => e.id === id);
+  if (!match) throw new Error("entry_not_on_server");
+  const entryKey = boxOpenBytes(match.wrappedKey, session.publicKey, session.privateKey);
+
+  const body: DiaryBody = { v: 1, t: "text", body: newBody, format: opts.format ?? row.format, align: opts.align ?? row.align };
+  const bodyCt = secretBoxSeal(entryKey, new TextEncoder().encode(packDiaryBody(body)));
+  await api.diaryEdit(id, { bodyCt, kind: "text" });
+
+  // Mirror into the local row so the author sees the update right away.
+  await saveDiaryEntry({
+    id: row.id, authorId: row.authorId, dayKey: row.dayKey, tzOffsetMin: row.tzOffsetMin,
+    seq: row.seq, kind: "text", createdAt: row.createdAt, expiresAt: row.expiresAt,
+    text: newBody, caption: null, media: null, format: opts.format ?? row.format, align: opts.align ?? row.align,
+  });
+}
+
 export async function removeDiaryEntry(id: string): Promise<void> {
   await api.diaryDelete(id).catch(() => { /* may already be gone */ });
   const { getDiaryEntry } = await import("./store.js");

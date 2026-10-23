@@ -687,12 +687,38 @@ export async function listAgentTurns(limit = 400): Promise<OpenedAgentTurn[]> {
     .toArray();
   const key = LOCAL_STORE_KEY!;
   return rows.reverse().map((r) => {
+    // The row shape used to be {text}, then changed to {text_ct}. Rows
+    // written before the change have no text_ct — fall back to the
+    // legacy field instead of reporting corruption. The migration below
+    // moves them over on next write.
+    const legacy = (r as unknown as { text?: string }).text;
     let text = "";
-    try { text = new TextDecoder().decode(secretBoxOpen(key, r.text_ct)); }
-    catch { text = "<corrupt>"; }
+    if (r.text_ct) {
+      try { text = new TextDecoder().decode(secretBoxOpen(key, r.text_ct)); }
+      catch { text = legacy ?? "<corrupt>"; }
+    } else {
+      text = legacy ?? "";
+    }
     return { id: r.id, createdAt: r.createdAt, kind: r.kind, text };
   });
 }
+// One-time migration: old agentTurns rows had a cleartext `text` field
+// that was replaced by `text_ct`. Promote any surviving legacy rows so
+// they stop reading as blank or corrupt. Safe to run repeatedly.
+export async function repairAgentTurns(): Promise<number> {
+  const db = requireDb();
+  const rows = await db.agentTurns.toArray();
+  let moved = 0;
+  for (const r of rows) {
+    const legacy = (r as unknown as { text?: string }).text;
+    if (!r.text_ct && typeof legacy === "string") {
+      await db.agentTurns.update(r.id, { text_ct: sealText(legacy), text: undefined } as never);
+      moved++;
+    }
+  }
+  return moved;
+}
+
 export async function clearAgentTurns(): Promise<void> {
   await requireDb().agentTurns.clear();
 }

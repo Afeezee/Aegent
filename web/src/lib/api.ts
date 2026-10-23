@@ -394,6 +394,10 @@ export const api = {
   diaryDelete: (entryId: string) => req<{ ok: true }>(
     `/api/diary/entries/${encodeURIComponent(entryId)}`, { method: "DELETE" },
   ),
+  diaryEdit: (entryId: string, body: { bodyCt: string; kind?: "text" | "media" }) =>
+    req<{ ok: true }>(`/api/diary/entries/${encodeURIComponent(entryId)}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
   // Exact reconciliation pair: every envelope id the relay holds for us,
   // and retrieval of specific envelopes by id.
   inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),

@@ -44,7 +44,7 @@ import {
 } from "./groups.js";
 import { MAX_BLOB_BYTES, readBlob, readBlobFor, storeBlob } from "./blobs.js";
 import {
-  MAX_AUDIENCE, archiveFor, deleteEntry, feedFor, granteesOf, markSeen,
+  MAX_AUDIENCE, archiveFor, deleteEntry, editEntryBody, feedFor, granteesOf, markSeen,
   publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
 } from "./diary.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
@@ -983,6 +983,17 @@ app.post("/api/diary/seen", authed, async (req, res) => {
 app.get("/api/diary/entries/:id/views", authed, async (req, res) => {
   try { res.json(await viewsOf((req as AuthedReq).userId, req.params.id)); }
   catch (e) { handleError(res, e); }
+});
+
+app.patch("/api/diary/entries/:id", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      bodyCt: z.string().min(1),
+      kind: z.enum(["text", "media"]).optional(),
+    }).parse(req.body);
+    await editEntryBody((req as AuthedReq).userId, req.params.id, body);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
 });
 
 app.patch("/api/diary/entries/:id/grants", authed, async (req, res) => {

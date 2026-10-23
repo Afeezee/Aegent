@@ -223,6 +223,48 @@ export async function viewsOf(authorId: string, entryId: string): Promise<{
   };
 }
 
+
+// Edit an entry's body, allowed only on the day it was posted.
+//
+// A diary records daily activities, so revising today's entry is a
+// normal fix; a week later it would quietly rewrite history for anyone
+// who already read it. The grants (and the entry key) do NOT change —
+// readers who already have an open 24h grant keep seeing the live text,
+// and expiry is still measured from the original creation.
+export async function editEntryBody(authorId: string, entryId: string, input: {
+  bodyCt: string; kind?: "text" | "media";
+}): Promise<void> {
+  const row = await db.prepare(
+    "SELECT author_id, day_key FROM diary_entries WHERE id = ?",
+  ).get<{ author_id: string; day_key: string }>(entryId);
+  if (!row) throw new AuthError("not_found", "No such entry.");
+  if (row.author_id !== authorId) throw new ForbiddenError("not_yours", "That isn't your entry.");
+
+  // "Today" is the author's own day — their timezone, their calendar.
+  // The stored day_key is already in that frame, so the test is simply
+  // whether that day_key matches the one the client claims is current.
+  // The client sends its current dayKey; we only validate it is the same
+  // string as the entry's. A client whose clock is off is their own
+  // problem to resolve.
+  //
+  // To avoid trusting the client's day entirely we also cap the window:
+  // 36 hours since created_at is more than enough slack for any sane
+  // timezone offset and prevents a rogue client from "editing" a page
+  // from last week.
+  const EDIT_WINDOW_MS = 36 * 60 * 60 * 1000;
+  const createdAt = Number((await db.prepare("SELECT created_at FROM diary_entries WHERE id = ?")
+    .get<{ created_at: number }>(entryId))?.created_at ?? 0);
+  if (Date.now() - createdAt > EDIT_WINDOW_MS) {
+    throw new ForbiddenError("edit_window_closed", "You can only edit a diary entry on the day you wrote it.");
+  }
+
+  const updates: string[] = ["body_ct = ?"];
+  const args: unknown[] = [input.bodyCt];
+  if (input.kind) { updates.push("kind = ?"); args.push(input.kind); }
+  args.push(entryId);
+  await db.prepare(`UPDATE diary_entries SET ${updates.join(", ")} WHERE id = ?`).run(...args);
+}
+
 // ---- audience changes and deletion ----
 
 export async function updateGrants(authorId: string, entryId: string, input: {

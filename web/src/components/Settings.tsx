@@ -15,6 +15,10 @@ import {
 } from "../lib/replication.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
+import {
+  revokeTranslationConsent, setTargetLanguage, setTranslationEndpoint,
+  targetLanguage, translationConsentGranted, translationEndpoint, TRANSLATION_TARGETS,
+} from "../lib/translate.js";
 
 export function Settings({
   open, onClose, onSignedOut,
@@ -129,6 +133,11 @@ export function Settings({
       <section style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>APPEARANCE</div>
         <ThemePicker />
+      </section>
+
+      <section style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>TRANSLATION</div>
+        <TranslationPanel />
       </section>
 
       <section style={{ marginBottom: 16 }}>
@@ -498,6 +507,83 @@ function VoiceTranscribeToggle() {
       checked={on}
       onChange={set}
     />
+  );
+}
+
+// Translation runs against an outside service (LibreTranslate by
+// default) — the one place in the app that leaves the end-to-end
+// envelope, and only when the person explicitly taps "Translate" on a
+// message. Settings expose the knobs: which language to translate TO,
+// which server to send to, and a way to withdraw consent.
+function TranslationPanel() {
+  const [target, setTarget] = useState(() => targetLanguage());
+  const [endpoint, setEndpoint] = useState(() => translationEndpoint());
+  const [draft, setDraft] = useState(() => translationEndpoint());
+  const [consented, setConsented] = useState(() => translationConsentGranted());
+
+  function pickTarget(code: string) {
+    setTarget(code);
+    setTargetLanguage(code);
+  }
+  function saveEndpoint() {
+    const trimmed = draft.trim().replace(/\/+$/, "");
+    setTranslationEndpoint(trimmed);
+    setEndpoint(trimmed || "https://translate.disroot.org");
+    setDraft(trimmed || "https://translate.disroot.org");
+    toast("Translation server saved", "ok");
+  }
+  function forget() {
+    revokeTranslationConsent();
+    setConsented(false);
+    toast("Translation consent cleared", "ok");
+  }
+  return (
+    <div className="glass" style={{ padding: 12, borderRadius: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div>
+        <div style={{ fontSize: 13, marginBottom: 6 }}>Translate messages into</div>
+        <select
+          value={target}
+          onChange={(e) => pickTarget(e.target.value)}
+          style={{
+            width: "100%", padding: "10px 12px", minHeight: 44, borderRadius: 10,
+            background: "transparent", color: "var(--text)", border: "1px solid var(--line)",
+            fontSize: 14,
+          }}
+        >
+          {TRANSLATION_TARGETS.map((t) => (
+            <option key={t.code} value={t.code} style={{ background: "#101225", color: "#fff" }}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <div style={{ fontSize: 13, marginBottom: 6 }}>LibreTranslate server</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            type="url" inputMode="url" autoComplete="off" spellCheck={false}
+            value={draft} onChange={(e) => setDraft(e.target.value)}
+            placeholder="https://translate.disroot.org"
+          />
+          <Button variant="primary" onClick={saveEndpoint} disabled={draft.trim().replace(/\/+$/, "") === endpoint}>
+            Save
+          </Button>
+        </div>
+        <div className="small" style={{ marginTop: 6 }}>
+          Point this at your own LibreTranslate instance to keep every
+          translation inside systems you trust. Default is Disroot's
+          public endpoint — it rate-limits and may be slow.
+        </div>
+      </div>
+      {consented && (
+        <div>
+          <Button size="small" variant="ghost" onClick={forget}>Forget translation consent</Button>
+          <div className="small" style={{ marginTop: 6 }}>
+            You'll be asked again the next time you tap Translate.
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

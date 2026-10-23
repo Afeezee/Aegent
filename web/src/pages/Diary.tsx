@@ -20,9 +20,10 @@ import { DiaryComposer } from "../components/DiaryComposer.js";
 import { formatDay } from "../lib/daybreaks.js";
 import { objectUrlFor } from "../lib/media.js";
 import {
-  diaryNow, reactToEntry, refreshViewCount, removeDiaryEntry, replyToEntry,
+  diaryNow, editDiaryText, reactToEntry, refreshViewCount, removeDiaryEntry, replyToEntry,
   reportSeen, responsesFor, syncDiary, type EntryResponses,
 } from "../lib/diary.js";
+import { dayKeyFor } from "../lib/daybreaks.js";
 import { currentSession } from "../lib/session.js";
 import {
   getContact, liveDiaryEntries, type OpenedDiaryEntry,
@@ -329,6 +330,15 @@ function Entry({
   entry, mine, onDeleted,
 }: { entry: OpenedDiaryEntry; mine: boolean; onDeleted: () => void }) {
   const [views, setViews] = useState<number | null>(entry.viewCount);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  // Editable only on the day the entry was posted. After that it is
+  // history, not a scratch pad. Only text entries can be edited — a
+  // photo swap is a different operation and would need re-uploading the
+  // blob.
+  const today = dayKeyFor(diaryNow(), entry.tzOffsetMin);
+  const canEdit = mine && !entry.media && entry.dayKey === today;
 
   useEffect(() => {
     if (!mine) return;
@@ -350,6 +360,13 @@ function Entry({
             · {views} {views === 1 ? "view" : "views"}
           </span>
         )}
+        {canEdit && !editing && (
+          <button type="button"
+            onClick={() => { setDraft(entry.text ?? ""); setEditing(true); }}
+            style={{ all: "unset", cursor: "pointer", marginLeft: "auto", color: "var(--text-mute)", fontSize: 11 }}>
+            Edit
+          </button>
+        )}
         {mine && (
           <button type="button"
             onClick={async () => {
@@ -359,7 +376,7 @@ function Entry({
               onDeleted();
             }}
             style={{
-              all: "unset", cursor: "pointer", marginLeft: "auto",
+              all: "unset", cursor: "pointer", marginLeft: canEdit ? 10 : "auto",
               color: "var(--text-mute)", fontSize: 11,
             }}>
             Delete
@@ -378,11 +395,49 @@ function Entry({
             </div>
           )}
         </>
+      ) : editing ? (
+        <div>
+          <textarea
+            value={draft} onChange={(e) => setDraft(e.target.value)}
+            autoFocus rows={6}
+            style={{
+              width: "100%", boxSizing: "border-box", resize: "vertical",
+              minHeight: 100, fontSize: 15, lineHeight: 1.6, textAlign: entry.align,
+            }}
+          />
+          <div style={{ display: "flex", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
+            <button type="button" onClick={() => setEditing(false)}
+              style={{ all: "unset", cursor: "pointer", padding: "6px 12px", fontSize: 13, color: "var(--text-dim)" }}>
+              Cancel
+            </button>
+            <button type="button"
+              onClick={async () => {
+                const next = draft.trim();
+                if (!next || next === entry.text) { setEditing(false); return; }
+                try {
+                  await editDiaryText(entry.id, next);
+                  toast("Entry updated", "ok");
+                  setEditing(false);
+                  onDeleted();   // triggers reload
+                } catch (e) {
+                  toast((e as Error).message === "edit_window_closed"
+                    ? "You can only edit today's entries"
+                    : `Couldn't save: ${(e as Error).message}`, "error");
+                }
+              }}
+              style={{
+                all: "unset", cursor: "pointer", padding: "6px 14px", fontSize: 13,
+                borderRadius: 999, background: "var(--accent)", color: "#10132a", fontWeight: 600,
+              }}>
+              Save
+            </button>
+          </div>
+        </div>
       ) : (
         <EntryText entry={entry} />
       )}
 
-      <Responses entry={entry} mine={mine} />
+      {!editing && <Responses entry={entry} mine={mine} />}
     </article>
   );
 }

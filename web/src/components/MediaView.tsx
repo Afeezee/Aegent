@@ -9,6 +9,7 @@ import { updateMessageMedia } from "../lib/store.js";
 import { api } from "../lib/api.js";
 import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
+import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
 
 // NOTE: prop is deliberately named `media`, NOT `ref` — React
 // intercepts a prop literally named `ref` as a forwarded-ref and
@@ -274,13 +275,7 @@ function VoiceCell({
       <VoicePlayer url={url} durationMs={media.durationMs} isMine={isMine} />
       {transcript
         ? (
-          <div style={{
-            padding: "2px 8px 6px", fontSize: 12, fontStyle: "italic",
-            color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
-            lineHeight: 1.4,
-          }} title="On-device transcript">
-            “{transcript}”
-          </div>
+          <TranscriptWithTranslate text={transcript} isMine={isMine} />
         ) : messageId ? (
           <button onClick={runTranscribe} disabled={busy}
             style={{
@@ -438,3 +433,45 @@ function NavBtn({ dir, disabled, onClick }: { dir: "prev" | "next"; disabled: bo
   );
 }
 
+
+function TranscriptWithTranslate({ text, isMine }: { text: string; isMine?: boolean }) {
+  const [translated, setTranslated] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function doIt() {
+    if (!translationConsentGranted()) {
+      const ok = window.confirm(
+        "Translation uses an outside service. The transcript will be sent to it — your end-to-end encryption does not cover that trip. Continue?",
+      );
+      if (!ok) return;
+      grantTranslationConsent();
+    }
+    setBusy(true);
+    try { setTranslated(await translateText(text)); }
+    catch (e) { setTranslated(`(couldn't translate: ${(e as Error).message})`); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div style={{ padding: "2px 8px 6px" }}>
+      <div title="On-device transcript" style={{
+        fontSize: 12, fontStyle: "italic", lineHeight: 1.4,
+        color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
+      }}>
+        “{text}”
+      </div>
+      <button type="button" onClick={translated ? () => setTranslated(null) : doIt}
+        style={{
+          all: "unset", cursor: "pointer", marginTop: 4, fontSize: 11,
+          color: "var(--accent-strong)",
+        }}>
+        {busy ? "Translating…" : translated ? "Hide translation" : "Translate"}
+      </button>
+      {translated && (
+        <div style={{
+          marginTop: 4, padding: "6px 8px", borderRadius: 8,
+          background: "rgba(255,255,255,0.08)", borderLeft: "2px solid var(--aqua)",
+          fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.4,
+        }}>{translated}</div>
+      )}
+    </div>
+  );
+}

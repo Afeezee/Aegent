@@ -462,9 +462,19 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 /* Message action affordance: a quiet kebab that appears only on hover
    on desktop, and is hidden entirely on touch, where a long-press (or
    right-click) opens the same menu. Keeps the chat uncluttered. */
-.bubble-kebab { opacity: 0; transition: opacity .12s; }
+.bubble-kebab {
+  /* Keep the hit target clickable even while the opacity is 0.6, so a
+     slow mouse travelling toward the icon can grab it. */
+  opacity: 0; transition: opacity .12s;
+  pointer-events: auto;
+}
 @media (hover: hover) {
-  .bubble-row:hover .bubble-kebab { opacity: 0.6; }
+  /* The hover trigger is the whole row, not just .bubble-row — the
+     kebab sits 32px OUTSIDE the bubble, so if the mouse leaves the
+     bubble on the way to the kebab the hover is lost and the icon
+     vanishes under the cursor. The outer row includes that gap. */
+  .bubble-outer-row:hover .bubble-kebab,
+  .bubble-kebab:focus-visible { opacity: 0.7; }
   .bubble-kebab:hover { opacity: 1; }
 }
 @media (hover: none) {
