@@ -28,6 +28,8 @@ import {
   search_by_date_range, search_by_media_type, search_by_sender,
   search_exact, search_links_and_patterns, search_messages,
   set_reminder, summarize_thread, tone_adjust, transcribe_voice, read_media,
+  // Diary agent surface — read-only, metadata + consented body text.
+  diary_stats, get_diary_entry, list_diary_recent, search_diary,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -110,6 +112,36 @@ const TOOLS = [
   {
     name: "list_reminders",
     description: "List every reminder the user currently has scheduled.",
+    input_schema: { type: "object", properties: {} },
+  },
+  // ---- Diary (read-only). Diary is a separate rail from chats:
+  // one author posts an entry for a day, grants read access to some
+  // viewers, entries can expire. The user asking "what did I write
+  // on Monday" / "what did Ada share this week" lives here, not in
+  // search_messages. ----
+  {
+    name: "search_diary",
+    description: "Hybrid semantic + keyword search across diary entries the user can currently see (their own + any granted + unexpired). Returns id, authorName, dayKey ('YYYY-MM-DD'), kind, ISO timestamp, snippet, score. Use this instead of search_messages when the user asks about their diary, journal, daily notes, or an entry someone else shared with them.",
+    input_schema: { type: "object", properties: {
+      query: { type: "string" },
+      authorId: { type: "string" }, sinceDaysAgo: { type: "number" }, limit: { type: "number" },
+    }, required: ["query"] },
+  },
+  {
+    name: "list_diary_recent",
+    description: "List the most recent diary entries the user can see (own + granted). Returns the same shape as search_diary, chronological rather than scored. Use when the user says 'show me the latest' or 'what did Alice share lately'.",
+    input_schema: { type: "object", properties: {
+      limit: { type: "number" }, authorId: { type: "string" },
+    } },
+  },
+  {
+    name: "get_diary_entry",
+    description: "Fetch a single diary entry by id, with its full (bounded) body + metadata (author, dayKey, media kind, viewCount, expiresAt). Call this when the user asks for the contents of a specific entry you already have an id for.",
+    input_schema: { type: "object", properties: { entryId: { type: "string" } }, required: ["entryId"] },
+  },
+  {
+    name: "diary_stats",
+    description: "Aggregate counters for the diary: total entries visible, how many are the user's own, distinct authors, entries created today / this week, newest timestamp. Use for 'how many entries do I have', 'am I keeping up with my diary'.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -244,6 +276,7 @@ Every write tool (draft_message, reply_to_message, forward_message, set_reminder
 Read-then-write pattern:
 Prefer resolve_target before drafting/forwarding/scheduling to get a stable id from a fuzzy name.
 Prefer search_messages, search_exact, search_by_date_range, search_by_sender, or get_last_message before forward_message/export_to_email/reply_to_message so you have a specific message id.
+Diary vs chats: when the user asks about their diary / journal / daily notes, or an entry someone shared with them, use search_diary / list_diary_recent / get_diary_entry / diary_stats — NOT search_messages. Diary entries are a separate rail; search_messages won't find them. When presenting a diary answer, include author, dayKey (the day the entry is for) and when it was created.
 For "what did they say next" style follow-ups, use get_context_around with a message id you already have.
 For anything referencing an attachment ('the receipt Ada sent', 'that PDF', 'this photo', 'the voice note', 'the doc') — resolve the message first (search_by_sender + search_by_media_type is a good shape) then call read_media(messageId) so you can actually see the contents.
 When emailing or backing up: any attachment referenced by messageId (image, PDF, doc, spreadsheet, presentation, voice note, video, arbitrary file) is decrypted and rides along on the email as a real file — not a text placeholder. So if the user says "email that receipt to X" or "send Ada that voice note by email", ALWAYS include the media message's id in messageIds. Do this for every attachment kind, not just photos.
@@ -512,6 +545,10 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "get_shared_media")    return dataOnly(await get_shared_media(args as never));
     if (name === "summarize_thread")    return dataOnly(await summarize_thread(args as never));
     if (name === "list_reminders")      return dataOnly(await list_reminders_tool());
+    if (name === "search_diary")        return dataOnly(await search_diary(args as never));
+    if (name === "list_diary_recent")   return dataOnly(await list_diary_recent(args as never));
+    if (name === "get_diary_entry")     return dataOnly(await get_diary_entry(args as never));
+    if (name === "diary_stats")         return dataOnly(await diary_stats());
     if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));

@@ -20,8 +20,10 @@ import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { cosine, embed, tokenize } from "../lib/embeddings.js";
 import {
   addScheduledBackup, deleteReminder, everyMessage, getContact, getGroup,
-  listContacts, listGroups, listReminders, markThreadRead, saveReminder,
-  threadWith, updateMessageMedia, upsertContact, type OpenedMessage,
+  getDiaryEntry, liveDiaryEntries, listContacts, listGroups, listReminders,
+  markThreadRead, myDiaryEntries, saveReminder,
+  threadWith, updateMessageMedia, upsertContact,
+  type OpenedDiaryEntry, type OpenedMessage,
 } from "../lib/store.js";
 import {
   currentSession, sendDelete, sendMedia, sendText,
@@ -336,6 +338,182 @@ export async function contact_profile(args: { peerId?: string; handle?: string; 
   }
   return { ok: false, error: "no_identifier" };
 }
+
+// ---- diary tools (read-only; author scope is enforced by the local
+// store — anything in local Dexie is either the user's own entry or
+// one explicitly granted to them by the author via the diary's
+// capability model) ----
+//
+// Diary entries are a different rail from messages. The agent sees
+// only metadata (author, dayKey, created_at, kind, snippet) plus the
+// decrypted text/caption when the entry is open in local store.
+// Media bodies are referenced by MediaRef — the agent uses read_media
+// to actually open an image or document attached to a diary entry,
+// same as for a chat attachment.
+
+// How many entries we hold in RAM for scoring in a single query.
+// Beyond this we start truncating older entries — the diary is
+// typically small (one-a-day shape), so this is comfortable.
+const DIARY_SCORE_CAP = 1000;
+
+async function allVisibleDiaryEntries(): Promise<OpenedDiaryEntry[]> {
+  // Everything the viewer currently has local access to: their own
+  // entries + any entries granted to them that haven't expired yet.
+  // The relay already enforced the capability model when it chose
+  // to deliver these to us.
+  const rows = await liveDiaryEntries(Date.now());
+  return rows.slice(0, DIARY_SCORE_CAP);
+}
+
+function diaryText(e: OpenedDiaryEntry): string {
+  return (e.text ?? e.caption ?? "").trim();
+}
+
+async function decorateDiary(
+  rows: Array<OpenedDiaryEntry & { score?: number }>,
+) {
+  const selfId = currentSession()?.user.id;
+  const nameCache = new Map<string, string>();
+  async function nameOf(uid: string): Promise<string> {
+    if (uid === selfId) return "You";
+    const hit = nameCache.get(uid);
+    if (hit) return hit;
+    const c = await getContact(uid);
+    const n = c?.displayName ?? "Unknown";
+    nameCache.set(uid, n);
+    return n;
+  }
+  const out: Array<Record<string, unknown>> = [];
+  for (const e of rows) {
+    const text = diaryText(e);
+    // Trim per-entry text to keep what leaves the device bounded.
+    const snippet = text.length > 400 ? `${text.slice(0, 400)}…` : text;
+    out.push({
+      id: e.id,
+      authorId: e.authorId,
+      authorName: await nameOf(e.authorId),
+      dayKey: e.dayKey,
+      kind: e.kind,
+      when: e.createdAt,
+      whenISO: new Date(e.createdAt).toISOString(),
+      snippet,
+      mediaKind: e.media?.kind ?? null,
+      hasAlbum: !!e.album && e.album.length > 1,
+      expiresAt: e.expiresAt,
+      format: e.format,
+      viewCount: e.viewCount,
+      score: e.score,
+    });
+  }
+  return out;
+}
+
+// Hybrid semantic + keyword scoring, same shape as scoreAllMessages but
+// over diary entries. Entries have no stored embedding (unlike messages
+// which pre-embed on save), so we embed on the fly — fine for diary's
+// much smaller row count.
+export async function search_diary(args: {
+  query: string;
+  authorId?: string;
+  sinceDaysAgo?: number;
+  limit?: number;
+}): Promise<ToolResult> {
+  const rows = await allVisibleDiaryEntries();
+  const qv = embed(args.query);
+  const qToks = new Set(tokenize(args.query));
+  const since = args.sinceDaysAgo ? Date.now() - args.sinceDaysAgo * 86400_000 : 0;
+
+  const scored: Array<OpenedDiaryEntry & { score: number }> = [];
+  for (const e of rows) {
+    if (args.authorId && e.authorId !== args.authorId) continue;
+    if (since && e.createdAt < since) continue;
+    const text = diaryText(e);
+    if (!text) continue;
+    const semantic = cosine(qv, embed(text));
+    const eToks = new Set(tokenize(text));
+    let overlap = 0; qToks.forEach((t) => eToks.has(t) && overlap++);
+    const keyword = qToks.size ? overlap / qToks.size : 0;
+    const recencyBonus = Math.max(0, 1 - (Date.now() - e.createdAt) / (365 * 86400_000)) * 0.05;
+    const score = semantic * 0.7 + keyword * 0.25 + recencyBonus;
+    if (score < 0.06) continue;
+    scored.push({ ...e, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const limit = Math.min(20, Math.max(1, args.limit ?? 8));
+  return { ok: true, kind: "data", value: await decorateDiary(scored.slice(0, limit)) };
+}
+
+// Fetch a single entry by id with the full (bounded) body. Used when
+// the user asks "what did I write on <date>" and the agent has the
+// id from search_diary / list_diary_recent.
+export async function get_diary_entry(args: { entryId: string }): Promise<ToolResult> {
+  const e = await getDiaryEntry(args.entryId);
+  if (!e) return { ok: false, error: "diary_entry_not_found" };
+  const text = diaryText(e);
+  const bodyCap = 4000;
+  const bodyOut = text.length > bodyCap ? `${text.slice(0, bodyCap)}…[truncated]` : text;
+  const selfId = currentSession()?.user.id;
+  const authorName = e.authorId === selfId ? "You" : ((await getContact(e.authorId))?.displayName ?? "Unknown");
+  return {
+    ok: true, kind: "data",
+    value: {
+      id: e.id,
+      authorId: e.authorId,
+      authorName,
+      dayKey: e.dayKey,
+      tzOffsetMin: e.tzOffsetMin,
+      kind: e.kind,
+      when: e.createdAt,
+      whenISO: new Date(e.createdAt).toISOString(),
+      body: bodyOut,
+      mediaKind: e.media?.kind ?? null,
+      mediaId: e.media?.blobId ?? null,
+      albumSize: e.album?.length ?? (e.media ? 1 : 0),
+      format: e.format,
+      expiresAt: e.expiresAt,
+      viewCount: e.viewCount,
+      seenAt: e.seenAt,
+    },
+  };
+}
+
+// Chronological listing — "show me the last N diary entries".
+export async function list_diary_recent(args: {
+  limit?: number;
+  authorId?: string;
+}): Promise<ToolResult> {
+  let rows = await allVisibleDiaryEntries();
+  if (args.authorId) rows = rows.filter((e) => e.authorId === args.authorId);
+  rows.sort((a, b) => b.createdAt - a.createdAt);
+  const limit = Math.min(50, Math.max(1, args.limit ?? 20));
+  return { ok: true, kind: "data", value: await decorateDiary(rows.slice(0, limit).map((e) => ({ ...e }))) };
+}
+
+// Aggregate — "how many diary entries do I have / how many authors".
+export async function diary_stats(_args: Record<string, never> = {}): Promise<ToolResult> {
+  const rows = await allVisibleDiaryEntries();
+  const selfId = currentSession()?.user.id;
+  const now = Date.now();
+  const todayStart = new Date(now).setHours(0, 0, 0, 0);
+  const weekAgo = now - 7 * 86400_000;
+  const authors = new Set(rows.map((e) => e.authorId));
+  const mine = rows.filter((e) => e.authorId === selfId);
+  return {
+    ok: true, kind: "data",
+    value: {
+      totalVisible: rows.length,
+      mine: mine.length,
+      distinctAuthors: authors.size,
+      createdToday: rows.filter((e) => e.createdAt >= todayStart).length,
+      createdThisWeek: rows.filter((e) => e.createdAt >= weekAgo).length,
+      newestAt: rows.length > 0 ? Math.max(...rows.map((e) => e.createdAt)) : null,
+    },
+  };
+}
+
+// Suppress unused-import warnings for diary helpers imported alongside
+// the agent-only ones that may not all be referenced.
+void myDiaryEntries;
 
 // ---- write tools (pending — nothing executes until user confirms) ----
 
