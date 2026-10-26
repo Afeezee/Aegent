@@ -35,6 +35,7 @@ import {
 import {
   maybeLogSessionStart, recordAbuseReport, recordErrorReport, recordFeedback,
 } from "./analytics.js";
+import { adminRouter } from "./admin.js";
 import {
   applyNewPassword, completeReset, mintChallenge, putRecoveryWrapper, recoveryStatus,
 } from "./recovery.js";
@@ -324,6 +325,10 @@ app.get("/api/me", authed, async (req, res) => {
         readReceipts: !!u.read_receipts,
         presence: !!u.presence,
       },
+      // Surfaced so the client can gate the Admin dashboard link in
+      // Settings. The server still enforces admin-ness on every
+      // /api/admin/* request — this is cosmetic only.
+      isAdmin: !!u.is_admin,
     });
   } catch (e) { handleError(res, e); }
 });
@@ -1270,10 +1275,13 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
     res.status(403).json({ error: "forbidden" });
   } catch { res.status(403).json({ error: "forbidden" }); }
 }
-// Phase 3 wires actual admin endpoints to this gate. Phase 2 only
-// exports it so the function is reachable from the Phase 3 branch
-// without a second rebuild of this file.
-void requireAdmin; void invalidateAdminCache;
+void invalidateAdminCache;
+
+// Phase 3: mount the admin router. Every route under /api/admin/*
+// goes through both `authed` (verifies the Bearer) AND `requireAdmin`
+// (checks is_admin=1 against the users row). A non-admin hitting any
+// admin route gets 403, not 404 — hiding the path is theatre.
+app.use("/api/admin", authed, requireAdmin, adminRouter);
 
 // Shapes a diary page the same way the inbox pages, so the client's
 // cursor logic reads identically on both rails. `serverNow` is what the

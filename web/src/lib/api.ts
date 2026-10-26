@@ -46,6 +46,10 @@ export type GroupDetail = GroupApi & {
 
 export type MeApi = PublicUser & {
   settings: { readReceipts: boolean; presence: boolean };
+  // Server flag — the admin dashboard is behind this. Cosmetic on the
+  // client (hides the Settings link); server still gates every
+  // /api/admin/* request independently.
+  isAdmin?: boolean;
 };
 
 // Absolute base URL for the relay. In the web deploy the SPA and the

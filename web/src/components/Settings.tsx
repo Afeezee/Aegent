@@ -174,9 +174,17 @@ export function Settings({
       </section>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Button variant="ghost" size="small" onClick={replayTour}>
-          Replay welcome tour
-        </Button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Button variant="ghost" size="small" onClick={replayTour}>
+            Replay welcome tour
+          </Button>
+          {(me as unknown as { isAdmin?: boolean }).isAdmin && (
+            <Button variant="ghost" size="small"
+              onClick={() => { onClose(); location.hash = "#/admin"; }}>
+              Admin dashboard
+            </Button>
+          )}
+        </div>
         <Button variant="danger" onClick={() => { logout(); onSignedOut(); }}>
           <Icon.logout /> Sign out
         </Button>

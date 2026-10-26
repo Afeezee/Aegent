@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 // (AnimatePresence intentionally omitted here — see main.tsx and Auth.tsx
 // notes on why mode="wait" transitions get tangled in dev.)
 import { ToastHost, toast } from "./components/ui.js";
+import { AdminDashboard } from "./pages/Admin.js";
 import { AuthScreen } from "./pages/Auth.js";
 import { Home } from "./pages/Home.js";
 import { hasOnboarded, Onboarding } from "./pages/Onboarding.js";
@@ -18,6 +19,12 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
+  const [adminRoute, setAdminRoute] = useState<boolean>(() => location.hash === "#/admin");
+  useEffect(() => {
+    const sync = () => setAdminRoute(location.hash === "#/admin");
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -93,6 +100,8 @@ export default function App() {
         <Onboarding onDone={() => setOnboarded(true)} />
       ) : (!signedIn && !currentSession()) ? (
         <AuthScreen onDone={() => setSignedIn(true)} />
+      ) : adminRoute ? (
+        <AdminDashboard onExit={() => { location.hash = ""; }} />
       ) : (
         <Home onSignedOut={() => setSignedIn(false)} />
       )}
