@@ -90,7 +90,12 @@ export function AdminDashboard({ onExit }: { onExit: () => void }) {
 
   return (
     <div style={{
-      minHeight: "100vh", padding: "calc(16px + var(--safe-top)) 20px calc(24px + var(--safe-bottom))",
+      // Make the entire dashboard its own scroll container so tall
+      // tables (users, reports) don't push the footer off-screen on
+      // phone-sized viewports. The outer <body> stays overflow:hidden.
+      height: "100vh", overflowY: "auto", overflowX: "hidden",
+      WebkitOverflowScrolling: "touch",
+      padding: "calc(16px + var(--safe-top)) 20px calc(24px + var(--safe-bottom))",
       display: "flex", flexDirection: "column", gap: 16,
       maxWidth: 1180, margin: "0 auto",
     }}>
@@ -505,7 +510,12 @@ function FeedbackTab() {
   const [kind, setKind] = useState<string>("");
 
   useEffect(() => {
-    adminFetch<{ rows: FeedbackRow[] }>(`/api/admin/feedback${kind ? `?kind=${kind}` : ""}&limit=200`.replace("?&", "?"))
+    // URLSearchParams builds a correct `?a=b&c=d` every time — the
+    // previous `.replace("?&", "?")` fallback produced `&limit=200`
+    // (no `?`) when no kind was selected, which 404'd.
+    const qs = new URLSearchParams({ limit: "200" });
+    if (kind) qs.set("kind", kind);
+    adminFetch<{ rows: FeedbackRow[] }>(`/api/admin/feedback?${qs.toString()}`)
       .then((r) => setRows(r.rows)).catch((e) => toast(`feedback failed: ${e.message}`, "error"));
   }, [kind]);
 

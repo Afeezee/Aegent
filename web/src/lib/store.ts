@@ -275,7 +275,23 @@ class AegentDB extends Dexie {
     this.version(6).stores({
       messages: "id, peerId, direction, createdAt, [peerId+createdAt], diaryRef.entryId",
     });
+    // v7: persisted translation cache. Keyed by messageId so one row
+    // per translated message. targetLang lets us re-translate into
+    // another language later without blowing the first cached copy
+    // away. Stays local-only — translations are a client-side cache,
+    // never synced to the server (the server never saw the plaintext
+    // to begin with).
+    this.version(7).stores({
+      translations: "messageId, createdAt",
+    });
   }
+  translations!: Table<{
+    messageId: string;
+    sourceText: string;
+    translatedText: string;
+    targetLang: string;
+    createdAt: number;
+  }, string>;
 }
 
 let LOCAL_STORE_KEY: Uint8Array | null = null;
@@ -294,6 +310,41 @@ export function closeStore() {
 function requireDb(): AegentDB {
   if (!DB || !LOCAL_STORE_KEY) throw new Error("store_not_open");
   return DB;
+}
+
+// ---- translations ----
+//
+// Local-only cache. Translations are opt-in and leave the E2E
+// boundary (user consents inside the UI), so we don't want to send
+// the same text to Google twice if the user re-opens a chat.
+// Writes are idempotent — put() overwrites by messageId.
+
+export async function getTranslation(messageId: string): Promise<{ text: string; targetLang: string } | null> {
+  try {
+    const row = await requireDb().translations.get(messageId);
+    return row ? { text: row.translatedText, targetLang: row.targetLang } : null;
+  } catch { return null; }
+}
+
+export async function saveTranslation(input: {
+  messageId: string;
+  sourceText: string;
+  translatedText: string;
+  targetLang: string;
+}): Promise<void> {
+  try {
+    await requireDb().translations.put({
+      messageId: input.messageId,
+      sourceText: input.sourceText,
+      translatedText: input.translatedText,
+      targetLang: input.targetLang,
+      createdAt: Date.now(),
+    });
+  } catch { /* non-fatal — translation still shows in memory */ }
+}
+
+export async function clearTranslation(messageId: string): Promise<void> {
+  try { await requireDb().translations.delete(messageId); } catch { /* ignore */ }
 }
 
 // ---- contacts ----

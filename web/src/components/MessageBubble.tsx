@@ -9,11 +9,13 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
+import { clearTranslation, getTranslation, saveTranslation } from "../lib/store.js";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Avatar, Icon } from "./ui.js";
 import type { OpenedMessage } from "../lib/store.js";
 import { MediaView } from "./MediaView.js";
+import { AbuseReportDialog } from "./ReportDialogs.js";
 
 export type BubbleProps = {
   msg: OpenedMessage;
@@ -39,6 +41,17 @@ export function MessageBubble(p: BubbleProps) {
   const isNarrow = typeof window !== "undefined" && window.innerWidth < 720;
   const [translated, setTranslated] = useState<string | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  // Rehydrate any previously cached translation on mount. The Dexie
+  // row survives app restarts, reloads, and reinstalls (the cache is
+  // keyed to the per-user store that reopens on sign-in).
+  useEffect(() => {
+    let alive = true;
+    getTranslation(msg.id).then((row) => {
+      if (alive && row) setTranslated(row.text);
+    });
+    return () => { alive = false; };
+  }, [msg.id]);
   async function doTranslate() {
     const text = (msg.editedBody ?? msg.body ?? msg.caption ?? "").trim();
     if (!text) return;
@@ -50,9 +63,24 @@ export function MessageBubble(p: BubbleProps) {
       grantTranslationConsent();
     }
     setTranslating(true);
-    try { setTranslated(await translateText(text)); }
+    try {
+      const out = await translateText(text);
+      setTranslated(out);
+      // Persist so the next render / reload shows it without
+      // another round-trip to Google.
+      await saveTranslation({
+        messageId: msg.id, sourceText: text, translatedText: out,
+        targetLang: navigator.language?.split("-")[0] ?? "en",
+      });
+    }
     catch (e) { setTranslated(`(couldn't translate: ${(e as Error).message})`); }
     finally { setTranslating(false); }
+  }
+  async function hideTranslation() {
+    setTranslated(null);
+    // Also drop the cached row so the user truly "undoes" the
+    // translation — otherwise re-opening the bubble would show it again.
+    await clearTranslation(msg.id);
   }
   const longPress = useRef<number | null>(null);
   function openMenuAt(x: number, y: number) {
@@ -353,9 +381,13 @@ export function MessageBubble(p: BubbleProps) {
                 <MenuItem icon={<Icon.chevron />} label={translated ? "Hide translation" : "Translate"}
                   onClick={() => {
                     setMenuOpen(false);
-                    if (translated) setTranslated(null);
+                    if (translated) void hideTranslation();
                     else void doTranslate();
                   }} />
+              )}
+              {!isMine && (
+                <MenuItem icon={<Icon.x />} label="Report"
+                  onClick={() => { setMenuOpen(false); setReportOpen(true); }} />
               )}
               {isMine && (
                 <MenuItem icon={<Icon.trash />} label="Delete" danger
@@ -367,6 +399,13 @@ export function MessageBubble(p: BubbleProps) {
           </AnimatePresence>
         ), document.body)}
       </div>
+      <AbuseReportDialog
+        open={reportOpen}
+        onClose={() => setReportOpen(false)}
+        reportedUserId={msg.senderId}
+        reportedName={p.senderName}
+        threadId={msg.peerId}
+      />
     </motion.div>
   );
 }

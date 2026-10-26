@@ -15,6 +15,7 @@ import {
 } from "../lib/replication.js";
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
+import { ErrorReportDialog, FeedbackDialog } from "./ReportDialogs.js";
 import {
   revokeTranslationConsent, setTargetLanguage,
   targetLanguage, translationConsentGranted, TRANSLATION_TARGETS,
@@ -30,6 +31,8 @@ export function Settings({
   const [phoneBusy, setPhoneBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [backupInfo, setBackupInfo] = useState<{ size: number; createdAt: number } | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [errorReportOpen, setErrorReportOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -173,6 +176,22 @@ export function Settings({
         </div>
       </section>
 
+      <section style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>HELP &amp; FEEDBACK</div>
+        <div className="glass" style={{ padding: 12, borderRadius: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <Button size="small" onClick={() => setFeedbackOpen(true)}>
+            Give feedback
+          </Button>
+          <Button size="small" onClick={() => setErrorReportOpen(true)}>
+            Report a problem
+          </Button>
+          <div className="small" style={{ color: "var(--text-mute)" }}>
+            Only what you type is sent. Message content stays end-to-end
+            encrypted and never leaves this device.
+          </div>
+        </div>
+      </section>
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Button variant="ghost" size="small" onClick={replayTour}>
@@ -189,6 +208,9 @@ export function Settings({
           <Icon.logout /> Sign out
         </Button>
       </div>
+
+      <FeedbackDialog open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      <ErrorReportDialog open={errorReportOpen} onClose={() => setErrorReportOpen(false)} />
     </Modal>
   );
 }

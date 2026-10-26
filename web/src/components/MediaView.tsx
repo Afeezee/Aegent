@@ -11,6 +11,7 @@ import { api } from "../lib/api.js";
 import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
+import { clearTranslation, getTranslation, saveTranslation } from "../lib/store.js";
 
 // NOTE: prop is deliberately named `media`, NOT `ref` — React
 // intercepts a prop literally named `ref` as a forwarded-ref and
@@ -281,7 +282,7 @@ function VoiceCell({
       <VoicePlayer url={url} durationMs={media.durationMs} isMine={isMine} />
       {transcript
         ? (
-          <TranscriptWithTranslate text={transcript} isMine={isMine} />
+          <TranscriptWithTranslate text={transcript} isMine={isMine} messageId={messageId} />
         ) : messageId ? (
           <button onClick={runTranscribe} disabled={busy}
             style={{
@@ -440,9 +441,19 @@ function NavBtn({ dir, disabled, onClick }: { dir: "prev" | "next"; disabled: bo
 }
 
 
-function TranscriptWithTranslate({ text, isMine }: { text: string; isMine?: boolean }) {
+function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; isMine?: boolean; messageId?: string }) {
   const [translated, setTranslated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Rehydrate cached translation on mount — same persistence rail as
+  // MessageBubble's text translation.
+  useEffect(() => {
+    if (!messageId) return;
+    let alive = true;
+    getTranslation(messageId).then((row) => {
+      if (alive && row) setTranslated(row.text);
+    });
+    return () => { alive = false; };
+  }, [messageId]);
   async function doIt() {
     if (!translationConsentGranted()) {
       const ok = window.confirm(
@@ -452,9 +463,22 @@ function TranscriptWithTranslate({ text, isMine }: { text: string; isMine?: bool
       grantTranslationConsent();
     }
     setBusy(true);
-    try { setTranslated(await translateText(text)); }
+    try {
+      const out = await translateText(text);
+      setTranslated(out);
+      if (messageId) {
+        await saveTranslation({
+          messageId, sourceText: text, translatedText: out,
+          targetLang: navigator.language?.split("-")[0] ?? "en",
+        });
+      }
+    }
     catch (e) { setTranslated(`(couldn't translate: ${(e as Error).message})`); }
     finally { setBusy(false); }
+  }
+  async function hide() {
+    setTranslated(null);
+    if (messageId) await clearTranslation(messageId);
   }
   return (
     <div style={{ padding: "2px 8px 6px" }}>
@@ -464,7 +488,7 @@ function TranscriptWithTranslate({ text, isMine }: { text: string; isMine?: bool
       }}>
         “{text}”
       </div>
-      <button type="button" onClick={translated ? () => setTranslated(null) : doIt}
+      <button type="button" onClick={translated ? () => void hide() : doIt}
         style={{
           all: "unset", cursor: "pointer", marginTop: 4, fontSize: 11,
           color: "var(--accent-strong)",
