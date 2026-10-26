@@ -28,9 +28,13 @@ import {
   AuthError, ForbiddenError,
   checkPassword, findUserByEmail, findUserByHandle, findUserByPhone, getUserById,
   hashNewPassword, issueTokens,
+  invalidateAdminCache, isAdmin, isSuspended,
   listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
   rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
 } from "./auth.js";
+import {
+  maybeLogSessionStart, recordAbuseReport, recordErrorReport, recordFeedback,
+} from "./analytics.js";
 import {
   applyNewPassword, completeReset, mintChallenge, putRecoveryWrapper, recoveryStatus,
 } from "./recovery.js";
@@ -131,6 +135,76 @@ app.post("/api/sessions/revoke-others", authed, async (req, res) => {
 app.post("/api/sessions/:id/revoke", authed, async (req, res) => {
   try {
     await revokeSession((req as AuthedReq).userId, req.params.id);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- reports + feedback (Phase 2, user-facing writes) ----
+//
+// The client posts here when:
+//   - a top-level exception / network failure happens (/api/reports/error),
+//   - a user chooses "Report user" from a chat (/api/reports/abuse),
+//   - a user sends feedback / rates the app (/api/feedback).
+//
+// All three write metadata only (see analytics.ts). The dashboard
+// surfacing them lives in Phase 3; this is just the ingest side.
+
+// Error reports MAY arrive without a user (crash on the auth screen),
+// so this one isn't gated by `authed`. We still bind the JWT subject
+// if a valid Bearer is present so authenticated crashes attribute.
+app.post("/api/reports/error", async (req, res) => {
+  try {
+    const body = z.object({
+      kind: z.enum(["crash", "handled", "failed_request"]),
+      message: z.string().max(4000).optional(),
+      stack: z.string().max(16000).optional(),
+      appVersion: z.string().max(60).optional(),
+    }).parse(req.body);
+    const header = req.header("authorization") ?? "";
+    const m = /^Bearer (.+)$/.exec(header);
+    let userId: string | null = null;
+    if (m) { try { userId = verifyToken(m[1]); } catch { /* anonymous */ } }
+    await recordErrorReport({
+      userId, kind: body.kind,
+      message: body.message, stack: body.stack,
+      appVersion: body.appVersion,
+      userAgent: req.header("user-agent") ?? null,
+    });
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/reports/abuse", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      reportedUserId: z.string().min(1),
+      threadId: z.string().optional(),
+      reason: z.enum(["harassment", "spam", "threats", "impersonation", "csam", "other"]),
+      reporterNote: z.string().max(4000).optional(),
+    }).parse(req.body);
+    const id = await recordAbuseReport({
+      reporterId: (req as AuthedReq).userId,
+      reportedUserId: body.reportedUserId,
+      threadId: body.threadId ?? null,
+      reason: body.reason,
+      reporterNote: body.reporterNote,
+    });
+    if (!id) return res.status(500).json({ error: "write_failed" });
+    res.json({ ok: true, id });
+  } catch (e) { handleError(res, e); }
+});
+
+app.post("/api/feedback", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      kind: z.enum(["nps", "feature_request", "bug", "general"]),
+      rating: z.number().int().min(1).max(5).optional(),
+      note: z.string().max(4000).optional(),
+    }).parse(req.body);
+    await recordFeedback({
+      userId: (req as AuthedReq).userId,
+      kind: body.kind, rating: body.rating ?? null, note: body.note,
+    });
     res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });
@@ -1168,11 +1242,38 @@ function authed(req: express.Request, res: express.Response, next: express.NextF
   const header = req.header("authorization") ?? "";
   const m = /^Bearer (.+)$/.exec(header);
   if (!m) return res.status(401).json({ error: "unauthorized" });
+  let userId: string;
   try {
-    (req as AuthedReq).userId = verifyToken(m[1]);
+    userId = verifyToken(m[1]);
+  } catch { return res.status(401).json({ error: "unauthorized" }); }
+  (req as AuthedReq).userId = userId;
+  // Phase 2: suspension check + session-start analytics. Both are
+  // wrapped so a failure in either path cannot deny service: on a
+  // database hiccup we fall through to `next()` with no suspension
+  // enforcement for that one request, same as before the hook existed.
+  (async () => {
+    try {
+      if (await isSuspended(userId)) {
+        return res.status(403).json({ error: "account_suspended" });
+      }
+    } catch { /* let the request through; suspension re-checked next request */ }
+    void maybeLogSessionStart(userId);
     next();
-  } catch { res.status(401).json({ error: "unauthorized" }); }
+  })();
 }
+
+// Gate used by every admin-only endpoint (added in Phase 3). Reuses the
+// same cached admin flag the authed middleware would see.
+async function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  try {
+    if (await isAdmin((req as AuthedReq).userId)) return next();
+    res.status(403).json({ error: "forbidden" });
+  } catch { res.status(403).json({ error: "forbidden" }); }
+}
+// Phase 3 wires actual admin endpoints to this gate. Phase 2 only
+// exports it so the function is reachable from the Phase 3 branch
+// without a second rebuild of this file.
+void requireAdmin; void invalidateAdminCache;
 
 // Shapes a diary page the same way the inbox pages, so the client's
 // cursor logic reads identically on both rails. `serverNow` is what the

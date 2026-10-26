@@ -10,6 +10,7 @@ import { argon2id, argon2Verify } from "hash-wasm";
 import jwt from "jsonwebtoken";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { db, type UserRow } from "./db.js";
+import { logSessionEvent } from "./analytics.js";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-only-do-not-use-in-production";
 // Short-lived access token; the refresh token lives much longer and
@@ -106,6 +107,8 @@ export async function registerUser(input: {
   const user = await getUserById(id);
   if (!user) throw new AuthError("insert_failed", "Registration failed unexpectedly.");
   const refreshToken = await issueRefreshToken(id, input.deviceLabel);
+  // Analytics (metadata-only, fail-safe inside logSessionEvent).
+  void logSessionEvent(id, "login", input.deviceLabel);
   return { user: toPublic(user), token: sign(id), refreshToken, handle };
 }
 
@@ -127,6 +130,7 @@ export async function loginUser(input: {
   if (!ok) return fail();
 
   const refreshToken = await issueRefreshToken(row.id, input.deviceLabel);
+  void logSessionEvent(row.id, "login", input.deviceLabel);
   return {
     user: toPublic(row),
     token: sign(row.id),
@@ -211,11 +215,48 @@ export async function rotateRefreshToken(presented: string): Promise<{
       "UPDATE refresh_tokens SET last_used_at = ?, replaced_by = ? WHERE id = ?",
     ).run(now, newId, row.id);
   });
+  void logSessionEvent(row.user_id, "token_refresh", row.device_label);
   return {
     userId: row.user_id,
     accessToken: sign(row.user_id),
     refreshToken: `${newId}.${newRaw}`,
   };
+}
+
+// ---- admin + moderation helpers ----
+
+// Lightweight row-level checks for the authed middleware and admin
+// endpoint gates. Cached briefly so a request stream from one user
+// doesn't hammer users for the same two flags.
+type AdminCache = { isAdmin: boolean; suspendedAt: number | null; at: number };
+const ADMIN_CACHE_MS = 30 * 1000;
+const adminCache = new Map<string, AdminCache>();
+
+async function fetchAdminFlags(userId: string): Promise<AdminCache> {
+  const hit = adminCache.get(userId);
+  if (hit && Date.now() - hit.at < ADMIN_CACHE_MS) return hit;
+  const row = await db.prepare(
+    "SELECT is_admin, suspended_at FROM users WHERE id = ?",
+  ).get<{ is_admin: number; suspended_at: number | null }>(userId);
+  const fresh: AdminCache = {
+    isAdmin: !!row?.is_admin,
+    suspendedAt: row?.suspended_at ?? null,
+    at: Date.now(),
+  };
+  adminCache.set(userId, fresh);
+  return fresh;
+}
+
+export async function isAdmin(userId: string): Promise<boolean> {
+  return (await fetchAdminFlags(userId)).isAdmin;
+}
+export async function isSuspended(userId: string): Promise<boolean> {
+  return (await fetchAdminFlags(userId)).suspendedAt !== null;
+}
+// Admin-only mutations below bust the cache for the affected user so
+// a promotion / suspension takes effect on their next request.
+export function invalidateAdminCache(userId: string): void {
+  adminCache.delete(userId);
 }
 
 async function revokeChainFrom(startId: string): Promise<void> {

@@ -80,6 +80,11 @@ export type UserRow = {
   presence: number;
   last_seen_at: number | null;
   created_at: number;
+  // Phase-2 admin + abuse additions. Both default to the safe state
+  // (not admin, not suspended) and are backfilled on existing rows via
+  // the ADDED_COLUMNS migration.
+  is_admin: number;
+  suspended_at: number | null;
 };
 
 export type MessageRow = {
@@ -494,6 +499,82 @@ const SCHEMA = `
     last_seen_at ${BIG} NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+
+  -- Phase 2: metadata-only analytics + user-safety tables.
+  --
+  -- NON-NEGOTIABLE: nothing below ever carries message plaintext.
+  -- session_events is a per-sign-in / per-session-start log so the
+  -- admin dashboard can compute DAU, WAU and retention cohorts without
+  -- having to infer them from inbox write patterns. kind is one of
+  -- login / session_start / token_refresh. device_label is the UA
+  -- family string already attached to refresh tokens.
+  CREATE TABLE IF NOT EXISTS session_events (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    kind         TEXT NOT NULL,
+    device_label TEXT,
+    created_at   ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_events_user
+    ON session_events(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_session_events_time
+    ON session_events(created_at);
+
+  -- Client-side crashes / handled exceptions. message and stack are
+  -- JavaScript error metadata (never message content). kind is one of
+  -- crash / handled / failed_request. user_id is NULL for pre-auth
+  -- errors (e.g. a crash on the sign-in screen).
+  CREATE TABLE IF NOT EXISTS error_reports (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT REFERENCES users(id),
+    kind        TEXT NOT NULL,
+    message     TEXT,
+    stack       TEXT,
+    user_agent  TEXT,
+    app_version TEXT,
+    created_at  ${BIG} NOT NULL,
+    resolved_at ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_error_reports_time
+    ON error_reports(created_at, resolved_at);
+
+  -- One user flagging another. thread_id is a pointer the admin can
+  -- cross-reference in their own moderation queue — the server never
+  -- decrypts the thread, and the dashboard never displays its contents.
+  -- reporter_note is the REPORTERs own free text (their consent to
+  -- share it is explicit when they submit the form), not any encrypted
+  -- content.
+  CREATE TABLE IF NOT EXISTS abuse_reports (
+    id                TEXT PRIMARY KEY,
+    reporter_id       TEXT NOT NULL REFERENCES users(id),
+    reported_user_id  TEXT NOT NULL REFERENCES users(id),
+    thread_id         TEXT,
+    reason            TEXT NOT NULL,
+    reporter_note     TEXT,
+    created_at        ${BIG} NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'open',
+    reviewed_by       TEXT REFERENCES users(id),
+    reviewed_at       ${BIG},
+    action_taken      TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_abuse_reports_state
+    ON abuse_reports(state, created_at);
+  CREATE INDEX IF NOT EXISTS idx_abuse_reports_reported
+    ON abuse_reports(reported_user_id, created_at);
+
+  -- Satisfaction / feature-request / general feedback. rating is 1-5
+  -- for NPS-style prompts, NULL for free-text submissions. note is
+  -- the users own words.
+  CREATE TABLE IF NOT EXISTS feedback (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    kind        TEXT NOT NULL,
+    rating      INTEGER,
+    note        TEXT,
+    created_at  ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_feedback_time
+    ON feedback(created_at);
 `;
 
 // Columns added after the first release. Both backends get the same
@@ -521,6 +602,13 @@ const ADDED_COLUMNS: AddedColumn[] = [
   { table: "group_members", name: "left_at", ddl: "ALTER TABLE group_members ADD COLUMN left_at BIGINT" },
   { table: "users", name: "wrapped_priv_rec", ddl: "ALTER TABLE users ADD COLUMN wrapped_priv_rec TEXT" },
   { table: "users", name: "rec_salt", ddl: "ALTER TABLE users ADD COLUMN rec_salt TEXT" },
+  // Phase 2: admin + moderation flags + 1:1 message dedupe key.
+  // All nullable or defaulted so existing rows survive without a
+  // backfill. Postgres treats BOOLEAN natively; SQLite stores it as an
+  // INTEGER 0/1 — we use INTEGER for compatibility and treat !=0 as true.
+  { table: "users", name: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
+  { table: "users", name: "suspended_at", ddl: "ALTER TABLE users ADD COLUMN suspended_at BIGINT" },
+  { table: "messages", name: "msg_id", ddl: "ALTER TABLE messages ADD COLUMN msg_id TEXT" },
 ];
 
 export async function initSchema(): Promise<void> {
@@ -557,4 +645,20 @@ export async function initSchema(): Promise<void> {
      WHERE role = 'member'
        AND user_id = (SELECT g.created_by FROM groups g WHERE g.id = group_members.group_id)
   `);
+
+  // Admin bootstrap. ADMIN_EMAILS is a comma-separated list set as an
+  // env var on the Coolify deploy. Every email in that list gets
+  // is_admin=1 on boot — safe to re-run, flipping is_admin=0 for an
+  // email NOT on the list IS INTENTIONAL so demotions survive restart.
+  // The dashboard's promote/demote endpoints update the same column
+  // and the env var reflects the long-term intent.
+  const emails = (process.env.ADMIN_EMAILS ?? "").split(",")
+    .map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (emails.length > 0) {
+    const placeholders = emails.map(() => "?").join(",");
+    await db.prepare(
+      `UPDATE users SET is_admin = 1 WHERE lower(email) IN (${placeholders})`,
+    ).run(...emails);
+    console.log(`[aegent] admin bootstrap: ${emails.length} email${emails.length === 1 ? "" : "s"} elevated`);
+  }
 }
