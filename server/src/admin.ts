@@ -58,12 +58,18 @@ adminRouter.get("/overview", async (_req, res, next) => {
 
     // Agent engagement metrics (metadata only — no prompts or
     // responses are persisted; see analytics.logAgentEvent).
-    const [agentCallsTotal, agentCalls24h, agentCalls7d, agentDistinctUsers7d, agentRateLimited24h] = await Promise.all([
+    // trackingSince is the timestamp of the earliest logged event,
+    // which is also when the agent_events table was created on the
+    // first boot after commit 76bec0b. Pre-feature agent calls were
+    // never persisted anywhere and cannot be reconstructed.
+    const [agentCallsTotal, agentCalls24h, agentCalls7d, agentDistinctUsers7d, agentRateLimited24h, agentFirstSeen] = await Promise.all([
       scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok'"),
       scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", dayAgo),
       scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", weekAgo),
       scalar("SELECT COUNT(DISTINCT user_id)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", weekAgo),
       scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'rate_limited' AND created_at >= ?", dayAgo),
+      // Fallback 0 when there are no rows yet — the client treats 0 as "tracking not started yet".
+      scalar("SELECT COALESCE(MIN(created_at), 0)::bigint AS n FROM agent_events"),
     ]);
 
     res.json({
@@ -77,6 +83,11 @@ adminRouter.get("/overview", async (_req, res, next) => {
         calls7d: agentCalls7d,
         distinctUsers7d: agentDistinctUsers7d,
         rateLimited24h: agentRateLimited24h,
+        // ms epoch of the first logged agent event, or 0 if none yet.
+        // Pre-feature calls aren't recoverable (no column existed to
+        // hold them). This is the earliest timestamp the dashboard
+        // numbers can honestly cover.
+        trackingSince: Number(agentFirstSeen) || 0,
       },
       generatedAt: Date.now(),
     });

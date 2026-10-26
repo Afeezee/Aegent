@@ -19,7 +19,7 @@ type Overview = {
   messages: { total: number; totalExcludingAdmins: number };
   conversations: { oneToOne: number; groups: number };
   queue: { openAbuseReports: number; unresolvedErrors: number };
-  agent: { totalCalls: number; calls24h: number; calls7d: number; distinctUsers7d: number; rateLimited24h: number };
+  agent: { totalCalls: number; calls24h: number; calls7d: number; distinctUsers7d: number; rateLimited24h: number; trackingSince: number };
   generatedAt: number;
 };
 type AgentLeaderboardRow = { userId: string; handle: string; displayName: string; calls: number; lastCallAt: number };
@@ -197,8 +197,20 @@ function OverviewTab() {
         <Stat label="1:1 conversations" value={data.conversations.oneToOne} hint={`${data.conversations.groups} groups`} />
         <Stat label="Agent calls (24h)" value={data.agent.calls24h}
           hint={`${data.agent.calls7d} this week · ${data.agent.distinctUsers7d} user${data.agent.distinctUsers7d === 1 ? "" : "s"}`} />
-        <Stat label="Agent · lifetime" value={data.agent.totalCalls}
-          hint={data.agent.rateLimited24h > 0 ? `${data.agent.rateLimited24h} rate-limited (24h)` : undefined}
+        <Stat
+          label={
+            data.agent.trackingSince > 0
+              ? `Agent · tracked (since ${new Date(data.agent.trackingSince).toLocaleDateString(undefined, { month: "short", day: "numeric" })})`
+              : "Agent · tracked"
+          }
+          value={data.agent.totalCalls}
+          hint={
+            data.agent.rateLimited24h > 0
+              ? `${data.agent.rateLimited24h} rate-limited (24h)`
+              : (data.agent.trackingSince === 0
+                  ? "No agent calls recorded yet"
+                  : "Pre-tracking calls are not stored anywhere")
+          }
           tint={data.agent.rateLimited24h > 0 ? "var(--amber)" : undefined} />
         <Stat label="Open abuse reports" value={data.queue.openAbuseReports} tint={data.queue.openAbuseReports > 0 ? "var(--rose)" : undefined} />
         <Stat label="Unresolved errors" value={data.queue.unresolvedErrors} tint={data.queue.unresolvedErrors > 0 ? "var(--amber)" : undefined} />
