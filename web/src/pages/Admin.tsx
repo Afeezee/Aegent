@@ -23,6 +23,7 @@ type Overview = {
   generatedAt: number;
 };
 type AgentLeaderboardRow = { userId: string; handle: string; displayName: string; calls: number; lastCallAt: number };
+type AgentDebugRow = { id: string; userId: string; outcome: string; tokensIn: number | null; createdAt: number; handle: string | null; displayName: string | null; isAdmin: boolean };
 type SeriesPoint = { at: number; count: number };
 type UserRow = {
   id: string; email: string; handle: string; displayName: string;
@@ -221,6 +222,8 @@ function OverviewTab() {
         <BarChart series={messages} />
       </Glass>
 
+      <AgentDebugCard />
+
       {agentBoard.length > 0 && (
         <Glass style={{ padding: 16, borderRadius: 14 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Top AI agent users</div>
@@ -287,6 +290,89 @@ function OverviewTab() {
         </Glass>
       )}
     </div>
+  );
+}
+
+// Shows the raw agent_events feed — proves whether writes are landing
+// at all. Useful when the stat tiles read zero but you know you just
+// used the agent. Expand to see the last 25 rows (no prompt content).
+function AgentDebugCard() {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<{ count: number; recent: AgentDebugRow[] } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  function load() {
+    setLoading(true);
+    adminFetch<{ count: number; recent: AgentDebugRow[] }>("/api/admin/debug/agent-events")
+      .then(setData)
+      .catch((e) => toast(`debug fetch failed: ${e.message}`, "error"))
+      .finally(() => setLoading(false));
+  }
+
+  return (
+    <Glass style={{ padding: 16, borderRadius: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ fontWeight: 700, flex: 1 }}>Agent diagnostics</div>
+        <Button size="small" variant="ghost" onClick={() => { if (!open) load(); setOpen(!open); }}>
+          {open ? "Hide" : "Show raw events"}
+        </Button>
+        <Button size="small" variant="ghost" onClick={load} disabled={loading}>
+          {loading ? "…" : "Refresh"}
+        </Button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          {data === null ? (
+            <div className="small" style={{ color: "var(--text-mute)" }}>Loading…</div>
+          ) : (
+            <>
+              <div className="small" style={{ color: "var(--text-dim)", marginBottom: 8 }}>
+                <strong style={{ color: "var(--text)" }}>{data.count}</strong> total rows in agent_events.
+                If this is 0 but you've used the agent, the write is failing silently
+                — check Coolify logs for a "[analytics] agent_event write FAILED" line.
+              </div>
+              {data.recent.length === 0 && <div className="small" style={{ color: "var(--text-mute)" }}>No rows yet.</div>}
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ color: "var(--text-dim)" }}>
+                      <th style={th}>When</th>
+                      <th style={th}>User</th>
+                      <th style={th}>Outcome</th>
+                      <th style={th}>~tokens in</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.recent.map((r) => (
+                      <tr key={r.id} style={{ borderTop: "1px solid var(--line)" }}>
+                        <td style={td}>{new Date(r.createdAt).toLocaleString()}</td>
+                        <td style={td}>
+                          {r.displayName ?? "(unknown)"}
+                          {r.isAdmin && <span className="tag ok" style={{ marginLeft: 6, fontSize: 10 }}>admin</span>}
+                          <div className="small" style={{ color: "var(--text-mute)" }}>@{r.handle ?? r.userId.slice(0, 8)}</div>
+                        </td>
+                        <td style={td}>
+                          <span style={{
+                            padding: "2px 6px", borderRadius: 6, fontSize: 11,
+                            background: r.outcome === "ok" ? "rgba(127, 230, 161, 0.15)"
+                              : r.outcome === "rate_limited" ? "rgba(255, 209, 102, 0.15)"
+                              : "rgba(255, 107, 139, 0.15)",
+                            color: r.outcome === "ok" ? "var(--ok)"
+                              : r.outcome === "rate_limited" ? "var(--amber)"
+                              : "var(--danger)",
+                          }}>{r.outcome}</span>
+                        </td>
+                        <td style={td}>{r.tokensIn ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Glass>
   );
 }
 

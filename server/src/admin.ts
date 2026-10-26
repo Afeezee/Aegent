@@ -83,6 +83,38 @@ adminRouter.get("/overview", async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Raw agent-event rows for diagnostics. Shows the admin the last 25
+// writes so they can verify logging is actually landing. No prompt or
+// response text is in the table to begin with, so there's nothing
+// sensitive to leak here.
+adminRouter.get("/debug/agent-events", async (_req, res, next) => {
+  try {
+    const [count, recent] = await Promise.all([
+      scalar("SELECT COUNT(*)::int AS n FROM agent_events"),
+      db.prepare(
+        `SELECT a.id, a.user_id, a.outcome, a.tokens_in, a.created_at,
+                u.handle, u.display_name, u.is_admin
+           FROM agent_events a
+           LEFT JOIN users u ON u.id = a.user_id
+           ORDER BY a.created_at DESC
+           LIMIT 25`,
+      ).all<{ id: string; user_id: string; outcome: string; tokens_in: number | string | null;
+              created_at: number | string; handle: string | null; display_name: string | null;
+              is_admin: number | null }>(),
+    ]);
+    res.json({
+      count,
+      recent: recent.map((r) => ({
+        id: r.id, userId: r.user_id, outcome: r.outcome,
+        tokensIn: r.tokens_in === null ? null : Number(r.tokens_in),
+        createdAt: Number(r.created_at),
+        handle: r.handle, displayName: r.display_name,
+        isAdmin: !!r.is_admin,
+      })),
+    });
+  } catch (e) { next(e); }
+});
+
 // Per-user agent usage, highest first — "who's actually using the AI?"
 adminRouter.get("/agent-leaderboard", async (req, res, next) => {
   try {

@@ -167,8 +167,12 @@ export async function logAgentEvent(input: {
       `INSERT INTO agent_events (id, user_id, outcome, tokens_in, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     ).run(randomUUID(), input.userId, input.outcome, tokensIn, Date.now());
+    // Visible in Coolify logs so you can watch calls land in real time.
+    console.log(`[agent] ${input.outcome} user=${input.userId.slice(0, 8)}… tokens~${tokensIn ?? "?"}`);
   } catch (e) {
-    console.warn("[analytics] agent_event write failed:", (e as Error).message);
+    // VERY loud on failure — this is the one write that was silently
+    // dropping and showing as "0 agent calls" in the dashboard.
+    console.error("[analytics] agent_event write FAILED:", (e as Error).message, "— user:", input.userId.slice(0, 8));
   }
 }
 
