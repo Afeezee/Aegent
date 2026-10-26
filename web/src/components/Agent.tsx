@@ -12,6 +12,7 @@ import { runAgent, type AgentEvent, type ConvTurn } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
 import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
 import { appendAgentTurn, clearAgentTurns, listAgentTurns } from "../lib/store.js";
+import { apiUrl, loadToken } from "../lib/api.js";
 
 // A single match surfaced by a retrieval tool (search_messages,
 // search_exact, get_last_message, etc.). Carries the identifiers
@@ -63,6 +64,16 @@ export function AgentSheet({
   const [consented, setConsented] = useState(hasAgentConsent);
   useEffect(() => { if (open) setConsented(hasAgentConsent()); }, [open]);
   const [busy, setBusy] = useState(false);
+  // Daily agent quota surfaced from the server (10/day for non-admins,
+  // unlimited for admins). Refreshed on open and after every turn so
+  // the badge next to the input always reflects the latest usage.
+  const [quota, setQuota] = useState<{ used: number; limit: number; resetsAt: number | null; unlimited: boolean } | null>(null);
+  const refreshQuota = () => {
+    fetch(apiUrl("/api/agent/quota"), {
+      headers: loadToken() ? { authorization: `Bearer ${loadToken()}` } : {},
+    }).then((r) => r.ok ? r.json() : null).then(setQuota).catch(() => undefined);
+  };
+  useEffect(() => { if (open) refreshQuota(); }, [open]);
   // Start empty; the persisted-history effect below fills this in on
   // first open, appending the greeting only if the transcript is
   // genuinely empty.
@@ -197,7 +208,7 @@ export function AgentSheet({
       const err: UiMsg = { id: crypto.randomUUID(), kind: "error", text: (e as Error).message };
       setMsgs((xs) => [...xs, err]);
       persistTurn(err);
-    } finally { setBusy(false); }
+    } finally { setBusy(false); refreshQuota(); }
   }
 
   async function confirm(id: string, action: PendingAction) {
@@ -298,6 +309,32 @@ export function AgentSheet({
               </AnimatePresence>
             </div>
 
+            {quota && !quota.unlimited && (
+              <div style={{
+                padding: "6px 14px 0",
+                display: "flex", alignItems: "center", gap: 8,
+                fontSize: 11, color: quota.used >= quota.limit ? "var(--danger)" : "var(--text-mute)",
+              }}>
+                <span>
+                  {quota.used >= quota.limit
+                    ? `Daily limit reached (${quota.used}/${quota.limit}). Resets ${quota.resetsAt ? new Date(quota.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}.`
+                    : `${quota.used}/${quota.limit} agent messages used today`}
+                </span>
+                <div style={{
+                  flex: 1, height: 4, borderRadius: 999, overflow: "hidden",
+                  background: "var(--line)",
+                }}>
+                  <div style={{
+                    width: `${Math.min(100, (quota.used / quota.limit) * 100)}%`,
+                    height: "100%",
+                    background: quota.used >= quota.limit
+                      ? "var(--danger)"
+                      : "linear-gradient(90deg, var(--violet), var(--aqua))",
+                    transition: "width 0.3s ease",
+                  }} />
+                </div>
+              </div>
+            )}
             <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "flex", gap: 8, alignItems: "center" }}>
               {speechSupported && (
                 <Button variant="icon"
@@ -314,11 +351,16 @@ export function AgentSheet({
               <input value={listening && interim ? interim : input}
                 onChange={(e) => { if (!listening) setInput(e.target.value); }}
                 onKeyDown={(e) => { if (e.key === "Enter" && !listening) ask(input); }}
-                placeholder={listening ? "Listening…" : "Ask the agent…"}
-                disabled={listening}
+                placeholder={
+                  quota && !quota.unlimited && quota.used >= quota.limit
+                    ? "Daily agent limit reached"
+                    : (listening ? "Listening…" : "Ask the agent…")
+                }
+                disabled={listening || (!!quota && !quota.unlimited && quota.used >= quota.limit)}
                 autoFocus
               />
-              <Button variant="primary" onClick={() => ask(input)} disabled={busy || listening || !input.trim()}
+              <Button variant="primary" onClick={() => ask(input)}
+                disabled={busy || listening || !input.trim() || (!!quota && !quota.unlimited && quota.used >= quota.limit)}
                 aria-label="Ask"><Icon.send /></Button>
             </div>
             {listening && (

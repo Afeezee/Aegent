@@ -575,6 +575,30 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_feedback_time
     ON feedback(created_at);
+
+  -- Agent usage log — one row per call to /api/agent/turn.
+  --
+  -- The agent proxy is the one place the server legitimately sees
+  -- the plaintext of a prompt (it has to, to forward it to Anthropic).
+  -- NO plaintext is persisted. We store only:
+  --   outcome      — ok / rate_limited / error (what happened)
+  --   tokens_in    — approximate char count of the serialized
+  --                  messages array / 4 (a rough token proxy — not
+  --                  exact, not meant to be exact).
+  -- This gives the admin dashboard a count of how often the agent is
+  -- used and by whom. The daily rate limit (10 ok outcomes per user
+  -- per UTC day) is enforced by counting rows in this table.
+  CREATE TABLE IF NOT EXISTS agent_events (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id),
+    outcome     TEXT NOT NULL,
+    tokens_in   INTEGER,
+    created_at  ${BIG} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_events_user
+    ON agent_events(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_agent_events_time
+    ON agent_events(created_at);
 `;
 
 // Columns added after the first release. Both backends get the same

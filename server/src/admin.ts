@@ -56,12 +56,54 @@ adminRouter.get("/overview", async (_req, res, next) => {
     const openAbuse = await scalar("SELECT COUNT(*)::int AS n FROM abuse_reports WHERE state = 'open'");
     const openErrors = await scalar("SELECT COUNT(*)::int AS n FROM error_reports WHERE resolved_at IS NULL");
 
+    // Agent engagement metrics (metadata only — no prompts or
+    // responses are persisted; see analytics.logAgentEvent).
+    const [agentCallsTotal, agentCalls24h, agentCalls7d, agentDistinctUsers7d, agentRateLimited24h] = await Promise.all([
+      scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok'"),
+      scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", dayAgo),
+      scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", weekAgo),
+      scalar("SELECT COUNT(DISTINCT user_id)::int AS n FROM agent_events WHERE outcome = 'ok' AND created_at >= ?", weekAgo),
+      scalar("SELECT COUNT(*)::int AS n FROM agent_events WHERE outcome = 'rate_limited' AND created_at >= ?", dayAgo),
+    ]);
+
     res.json({
       users: { total: totalUsers, activeDay, activeWeek, activeMonth },
       messages: { total: totalMessages, totalExcludingAdmins: totalMessagesNonFounder },
       conversations: { oneToOne: totalThreads, groups: totalGroups },
       queue: { openAbuseReports: openAbuse, unresolvedErrors: openErrors },
+      agent: {
+        totalCalls: agentCallsTotal,
+        calls24h: agentCalls24h,
+        calls7d: agentCalls7d,
+        distinctUsers7d: agentDistinctUsers7d,
+        rateLimited24h: agentRateLimited24h,
+      },
       generatedAt: Date.now(),
+    });
+  } catch (e) { next(e); }
+});
+
+// Per-user agent usage, highest first — "who's actually using the AI?"
+adminRouter.get("/agent-leaderboard", async (req, res, next) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20)));
+    const rows = await db.prepare(
+      `SELECT a.user_id, u.handle, u.display_name,
+              COUNT(*) AS calls,
+              MAX(a.created_at) AS last_call_at
+         FROM agent_events a
+         JOIN users u ON u.id = a.user_id
+         WHERE a.outcome = 'ok'
+         GROUP BY a.user_id, u.handle, u.display_name
+         ORDER BY calls DESC
+         LIMIT ?`,
+    ).all<{ user_id: string; handle: string; display_name: string;
+            calls: number | string; last_call_at: number | string }>(limit);
+    res.json({
+      rows: rows.map((r) => ({
+        userId: r.user_id, handle: r.handle, displayName: r.display_name,
+        calls: Number(r.calls), lastCallAt: Number(r.last_call_at),
+      })),
     });
   } catch (e) { next(e); }
 });

@@ -19,8 +19,10 @@ type Overview = {
   messages: { total: number; totalExcludingAdmins: number };
   conversations: { oneToOne: number; groups: number };
   queue: { openAbuseReports: number; unresolvedErrors: number };
+  agent: { totalCalls: number; calls24h: number; calls7d: number; distinctUsers7d: number; rateLimited24h: number };
   generatedAt: number;
 };
+type AgentLeaderboardRow = { userId: string; handle: string; displayName: string; calls: number; lastCallAt: number };
 type SeriesPoint = { at: number; count: number };
 type UserRow = {
   id: string; email: string; handle: string; displayName: string;
@@ -170,11 +172,13 @@ function OverviewTab() {
   const [messages, setMessages] = useState<SeriesPoint[]>([]);
   const [excludeAdmins, setExcludeAdmins] = useState(true);
   const [retention, setRetention] = useState<{ cohorts: CohortRow[] } | null>(null);
+  const [agentBoard, setAgentBoard] = useState<AgentLeaderboardRow[]>([]);
 
   useEffect(() => {
     adminFetch<Overview>("/api/admin/overview").then(setData).catch((e) => toast(`overview failed: ${e.message}`, "error"));
     adminFetch<{ series: SeriesPoint[] }>("/api/admin/signups?period=day&days=30").then((r) => setSignups(r.series)).catch(() => undefined);
     adminFetch<{ cohorts: CohortRow[] }>("/api/admin/retention").then((r) => setRetention({ cohorts: r.cohorts })).catch(() => undefined);
+    adminFetch<{ rows: AgentLeaderboardRow[] }>("/api/admin/agent-leaderboard?limit=20").then((r) => setAgentBoard(r.rows)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -190,6 +194,11 @@ function OverviewTab() {
         <Stat label="Active (24h)" value={data.users.activeDay} hint={`${data.users.activeWeek} this week`} />
         <Stat label="Messages (excl. admin)" value={data.messages.totalExcludingAdmins} hint={`${data.messages.total} total`} />
         <Stat label="1:1 conversations" value={data.conversations.oneToOne} hint={`${data.conversations.groups} groups`} />
+        <Stat label="Agent calls (24h)" value={data.agent.calls24h}
+          hint={`${data.agent.calls7d} this week · ${data.agent.distinctUsers7d} user${data.agent.distinctUsers7d === 1 ? "" : "s"}`} />
+        <Stat label="Agent · lifetime" value={data.agent.totalCalls}
+          hint={data.agent.rateLimited24h > 0 ? `${data.agent.rateLimited24h} rate-limited (24h)` : undefined}
+          tint={data.agent.rateLimited24h > 0 ? "var(--amber)" : undefined} />
         <Stat label="Open abuse reports" value={data.queue.openAbuseReports} tint={data.queue.openAbuseReports > 0 ? "var(--rose)" : undefined} />
         <Stat label="Unresolved errors" value={data.queue.unresolvedErrors} tint={data.queue.unresolvedErrors > 0 ? "var(--amber)" : undefined} />
       </div>
@@ -211,6 +220,38 @@ function OverviewTab() {
         </div>
         <BarChart series={messages} />
       </Glass>
+
+      {agentBoard.length > 0 && (
+        <Glass style={{ padding: 16, borderRadius: 14 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Top AI agent users</div>
+          <div className="small" style={{ color: "var(--text-dim)", marginBottom: 10 }}>
+            Lifetime successful agent calls. The daily cap is {10} per non-admin user.
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ color: "var(--text-dim)" }}>
+                  <th style={th}>User</th>
+                  <th style={th}>Agent calls</th>
+                  <th style={th}>Last call</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agentBoard.map((r) => (
+                  <tr key={r.userId} style={{ borderTop: "1px solid var(--line)" }}>
+                    <td style={td}>
+                      <div style={{ fontWeight: 600 }}>{r.displayName}</div>
+                      <div className="small" style={{ color: "var(--text-dim)" }}>@{r.handle}</div>
+                    </td>
+                    <td style={td}>{r.calls}</td>
+                    <td style={td}>{relativeTime(r.lastCallAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Glass>
+      )}
 
       {retention && (
         <Glass style={{ padding: 16, borderRadius: 14 }}>

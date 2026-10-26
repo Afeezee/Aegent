@@ -142,3 +142,57 @@ function truncate(s: string | null | undefined, max: number): string | null {
   const t = String(s);
   return t.length > max ? t.slice(0, max) : t;
 }
+
+// -----------------------------------------------------------------------------
+// Agent usage — metadata only. outcome is the only string we persist,
+// along with an approximate token count. The prompt text and the
+// model response NEVER touch this table. This is the one place in the
+// system where the server does see plaintext in-flight (the agent
+// proxy forwards it to Anthropic), so we are deliberate about it: the
+// moment the fetch returns, nothing of substance is kept.
+// -----------------------------------------------------------------------------
+
+export type AgentOutcome = "ok" | "rate_limited" | "error";
+
+export async function logAgentEvent(input: {
+  userId: string;
+  outcome: AgentOutcome;
+  approxCharsIn?: number;
+}): Promise<void> {
+  try {
+    const tokensIn = input.approxCharsIn !== undefined
+      ? Math.max(0, Math.round(input.approxCharsIn / 4))
+      : null;
+    await db.prepare(
+      `INSERT INTO agent_events (id, user_id, outcome, tokens_in, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(randomUUID(), input.userId, input.outcome, tokensIn, Date.now());
+  } catch (e) {
+    console.warn("[analytics] agent_event write failed:", (e as Error).message);
+  }
+}
+
+// Daily cap: 10 OK outcomes per user per UTC day. We count only
+// outcome='ok' so a rate-limit rejection itself doesn't consume quota.
+export const AGENT_DAILY_LIMIT = 10;
+
+export async function agentUsageToday(userId: string): Promise<{ used: number; limit: number; resetsAt: number }> {
+  const dayStart = utcDayStart(Date.now());
+  const resetsAt = dayStart + 86_400_000;
+  try {
+    const row = await db.prepare(
+      `SELECT COUNT(*)::int AS n FROM agent_events
+         WHERE user_id = ? AND outcome = 'ok' AND created_at >= ?`,
+    ).get<{ n: number | string }>(userId, dayStart);
+    return { used: Number(row?.n ?? 0), limit: AGENT_DAILY_LIMIT, resetsAt };
+  } catch {
+    // Fail open on quota read — never block legit use because of a DB
+    // hiccup. The write path is the one that actually enforces caps.
+    return { used: 0, limit: AGENT_DAILY_LIMIT, resetsAt };
+  }
+}
+
+function utcDayStart(ms: number): number {
+  const d = new Date(ms);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}

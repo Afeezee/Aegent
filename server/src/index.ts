@@ -53,7 +53,7 @@ import {
   publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
 } from "./diary.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
-import { agentTurn } from "./agent.js";
+import { agentQuota, agentTurn } from "./agent.js";
 import { pushEnabled, registerToken, unregisterToken, wake } from "./push.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -83,6 +83,7 @@ app.get("/healthz", (_req, res) => res.json({
 
 // LLM agent proxy — keeps the API key server-side.
 app.post("/api/agent/turn", authed, (req, res) => agentTurn(req as AuthedReq, res));
+app.get("/api/agent/quota", authed, (req, res) => agentQuota(req as AuthedReq, res));
 
 // ---- registration / auth ----
 

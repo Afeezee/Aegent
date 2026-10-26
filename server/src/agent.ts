@@ -10,33 +10,19 @@
 // (see spec §5.2 / §8) — enable it on the account whose key you paste
 // into ANTHROPIC_API_KEY. This code doesn't need any change for ZDR.
 //
-// Per-user rate limit: coarse in-memory sliding window. Enough for a
-// pilot; swap for a real limiter (Redis token bucket) if you open to
-// the public.
+// Rate limiting: persistent 10-successful-calls per user per UTC day,
+// backed by agent_events in the db. Survives restarts and exposes an
+// accurate count the client can display. Admins (is_admin=1) bypass
+// the cap entirely so the founder can test / dogfood freely.
 
 import type { Request, Response } from "express";
+import { agentUsageToday, AGENT_DAILY_LIMIT, logAgentEvent } from "./analytics.js";
+import { isAdmin } from "./auth.js";
 
 const ANTHROPIC_ENDPOINT = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5";
 const DEFAULT_MAX_TOKENS = 1024;
-
-// Sliding window: up to N calls per user per hour.
-const CALLS_PER_HOUR = 60;
-const WINDOW_MS = 60 * 60 * 1000;
-const callWindow = new Map<string, number[]>();
-
-function withinRateLimit(userId: string): boolean {
-  const now = Date.now();
-  const entries = (callWindow.get(userId) ?? []).filter((t) => now - t < WINDOW_MS);
-  if (entries.length >= CALLS_PER_HOUR) {
-    callWindow.set(userId, entries);
-    return false;
-  }
-  entries.push(now);
-  callWindow.set(userId, entries);
-  return true;
-}
 
 export async function agentTurn(req: Request & { userId: string }, res: Response) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -46,8 +32,20 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
       message: "The server has no ANTHROPIC_API_KEY set; agent runs in offline mode.",
     });
   }
-  if (!withinRateLimit(req.userId)) {
-    return res.status(429).json({ error: "rate_limited", message: "Slow down." });
+
+  // Daily cap: admins bypass; everyone else gets 10/day. We log the
+  // rate-limit outcome too so the dashboard can see cap pressure.
+  const admin = await isAdmin(req.userId);
+  if (!admin) {
+    const usage = await agentUsageToday(req.userId);
+    if (usage.used >= usage.limit) {
+      await logAgentEvent({ userId: req.userId, outcome: "rate_limited" });
+      return res.status(429).json({
+        error: "rate_limited",
+        message: `You've hit today's agent limit (${usage.limit}). Resets at ${new Date(usage.resetsAt).toISOString()}.`,
+        used: usage.used, limit: usage.limit, resetsAt: usage.resetsAt,
+      });
+    }
   }
 
   const body = req.body as {
@@ -76,6 +74,12 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
     tools: body.tools,
   };
 
+  // Approximate char count of the serialized messages array, logged
+  // as a crude token proxy. The content itself is NOT stored.
+  const approxCharsIn = (() => {
+    try { return JSON.stringify(body.messages).length; } catch { return 0; }
+  })();
+
   try {
     const upstream = await fetch(ANTHROPIC_ENDPOINT, {
       method: "POST",
@@ -87,13 +91,34 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
       body: JSON.stringify(upstreamBody),
     });
     const text = await upstream.text();
+    // Log the outcome (metadata only, no response body). Anthropic
+    // returns 400/429/5xx with its own shapes we pass through — treat
+    // any non-2xx as an error for quota-accounting purposes.
+    await logAgentEvent({
+      userId: req.userId,
+      outcome: upstream.ok ? "ok" : "error",
+      approxCharsIn,
+    });
     // Pass through the API's response verbatim (status + body). Errors from
     // Anthropic come back with their own shape; the client understands it.
     res.status(upstream.status).type("application/json").send(text);
   } catch (err) {
+    await logAgentEvent({ userId: req.userId, outcome: "error", approxCharsIn });
     res.status(502).json({
       error: "upstream_failed",
       message: (err as Error).message,
     });
   }
+}
+
+// GET /api/agent/quota — returns {used, limit, resetsAt, unlimited}
+// for the client to show a count badge next to the agent input.
+// Admins are reported as unlimited so the UI can hide the counter.
+export async function agentQuota(req: Request & { userId: string }, res: Response) {
+  const admin = await isAdmin(req.userId);
+  if (admin) {
+    return res.json({ unlimited: true, used: 0, limit: AGENT_DAILY_LIMIT, resetsAt: null });
+  }
+  const usage = await agentUsageToday(req.userId);
+  res.json({ unlimited: false, ...usage });
 }
