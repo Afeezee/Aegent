@@ -111,14 +111,13 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
   }
 }
 
-// GET /api/agent/quota — returns {used, limit, resetsAt, unlimited}
-// for the client to show a count badge next to the agent input.
-// Admins are reported as unlimited so the UI can hide the counter.
+// GET /api/agent/quota — returns {used, limit, resetsAt, unlimited}.
+// Admins are reported as unlimited but we STILL compute `used` for
+// them so the UI can show their own activity ("12 messages today ·
+// no limit"). Hiding the counter entirely left admins unable to see
+// their own usage.
 export async function agentQuota(req: Request & { userId: string }, res: Response) {
   const admin = await isAdmin(req.userId);
-  if (admin) {
-    return res.json({ unlimited: true, used: 0, limit: AGENT_DAILY_LIMIT, resetsAt: null });
-  }
   const usage = await agentUsageToday(req.userId);
-  res.json({ unlimited: false, ...usage });
+  res.json({ ...usage, unlimited: admin });
 }

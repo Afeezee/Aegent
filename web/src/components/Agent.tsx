@@ -309,30 +309,35 @@ export function AgentSheet({
               </AnimatePresence>
             </div>
 
-            {quota && !quota.unlimited && (
+            {quota && (
               <div style={{
                 padding: "6px 14px 0",
                 display: "flex", alignItems: "center", gap: 8,
-                fontSize: 11, color: quota.used >= quota.limit ? "var(--danger)" : "var(--text-mute)",
+                fontSize: 11,
+                color: !quota.unlimited && quota.used >= quota.limit ? "var(--danger)" : "var(--text-mute)",
               }}>
                 <span>
-                  {quota.used >= quota.limit
-                    ? `Daily limit reached (${quota.used}/${quota.limit}). Resets ${quota.resetsAt ? new Date(quota.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}.`
-                    : `${quota.used}/${quota.limit} agent messages used today`}
+                  {quota.unlimited
+                    ? `${quota.used} agent message${quota.used === 1 ? "" : "s"} today · admin · no limit`
+                    : quota.used >= quota.limit
+                      ? `Daily limit reached (${quota.used}/${quota.limit}). Resets ${quota.resetsAt ? new Date(quota.resetsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}.`
+                      : `${quota.used}/${quota.limit} agent messages used today`}
                 </span>
-                <div style={{
-                  flex: 1, height: 4, borderRadius: 999, overflow: "hidden",
-                  background: "var(--line)",
-                }}>
+                {!quota.unlimited && (
                   <div style={{
-                    width: `${Math.min(100, (quota.used / quota.limit) * 100)}%`,
-                    height: "100%",
-                    background: quota.used >= quota.limit
-                      ? "var(--danger)"
-                      : "linear-gradient(90deg, var(--violet), var(--aqua))",
-                    transition: "width 0.3s ease",
-                  }} />
-                </div>
+                    flex: 1, height: 4, borderRadius: 999, overflow: "hidden",
+                    background: "var(--line)",
+                  }}>
+                    <div style={{
+                      width: `${Math.min(100, (quota.used / quota.limit) * 100)}%`,
+                      height: "100%",
+                      background: quota.used >= quota.limit
+                        ? "var(--danger)"
+                        : "linear-gradient(90deg, var(--violet), var(--aqua))",
+                      transition: "width 0.3s ease",
+                    }} />
+                  </div>
+                )}
               </div>
             )}
             <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "flex", gap: 8, alignItems: "center" }}>
