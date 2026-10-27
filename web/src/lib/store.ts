@@ -284,6 +284,13 @@ class AegentDB extends Dexie {
     this.version(7).stores({
       translations: "messageId, createdAt",
     });
+    // v8: per-conversation local state — pin / archive. Keyed by the
+    // thread's peerId (contact id or group id). Local-only: these are
+    // organisational preferences, not content, so there's nothing to
+    // sync. pinnedAt/archivedAt double as the "when" for ordering.
+    this.version(8).stores({
+      threadMeta: "peerId, pinnedAt, archivedAt",
+    });
   }
   translations!: Table<{
     messageId: string;
@@ -291,6 +298,11 @@ class AegentDB extends Dexie {
     translatedText: string;
     targetLang: string;
     createdAt: number;
+  }, string>;
+  threadMeta!: Table<{
+    peerId: string;
+    pinnedAt: number | null;
+    archivedAt: number | null;
   }, string>;
 }
 
@@ -387,7 +399,64 @@ export type Thread = {
   unread: number;
   online?: boolean;
   memberIds?: string[];
+  pinned?: boolean;
+  archived?: boolean;
 };
+
+// ---- conversation management (pin / archive / delete) ----
+
+export const MAX_PINNED = 10;
+
+export async function getThreadMetaMap(): Promise<Map<string, { pinnedAt: number | null; archivedAt: number | null }>> {
+  const rows = await requireDb().threadMeta.toArray();
+  return new Map(rows.map((r) => [r.peerId, { pinnedAt: r.pinnedAt, archivedAt: r.archivedAt }]));
+}
+
+export async function countPinned(): Promise<number> {
+  return requireDb().threadMeta.filter((r) => r.pinnedAt !== null).count();
+}
+
+// Returns false (and changes nothing) if pinning would exceed MAX_PINNED.
+export async function setThreadPinned(peerId: string, pinned: boolean): Promise<boolean> {
+  const db = requireDb();
+  if (pinned && (await countPinned()) >= MAX_PINNED) {
+    const existing = await db.threadMeta.get(peerId);
+    if (!existing?.pinnedAt) return false;  // already at cap and this one isn't pinned
+  }
+  const cur = await db.threadMeta.get(peerId);
+  await db.threadMeta.put({
+    peerId,
+    pinnedAt: pinned ? Date.now() : null,
+    archivedAt: cur?.archivedAt ?? null,
+  });
+  return true;
+}
+
+export async function setThreadArchived(peerId: string, archived: boolean): Promise<void> {
+  const db = requireDb();
+  const cur = await db.threadMeta.get(peerId);
+  await db.threadMeta.put({
+    peerId,
+    // Archiving clears a pin — a pinned chat shouldn't hide in archive.
+    pinnedAt: archived ? null : (cur?.pinnedAt ?? null),
+    archivedAt: archived ? Date.now() : null,
+  });
+}
+
+// Delete a conversation locally: drop every message for the peer, its
+// thread-meta, and its contact/group row so the thread disappears from
+// the list. The person stays reachable — messaging them again (or them
+// messaging you) re-creates the contact and a fresh thread. Server-side
+// history is untouched; this is a local clear, like WhatsApp's "delete
+// chat".
+export async function deleteConversation(peerId: string, isGroup: boolean): Promise<void> {
+  const db = requireDb();
+  const ids = await db.messages.where("peerId").equals(peerId).primaryKeys();
+  await db.messages.bulkDelete(ids);
+  await db.threadMeta.delete(peerId);
+  if (isGroup) await db.groups.delete(peerId);
+  else await db.contacts.delete(peerId);
+}
 
 // Threads used to be enumerated purely from the contacts and groups
 // tables, which meant a conversation whose metadata we did not happen
@@ -399,6 +468,7 @@ export type Thread = {
 export async function listThreads(): Promise<Thread[]> {
   const contacts = await listContacts();
   const groups = await listGroups();
+  const meta = await getThreadMetaMap();
   const threads: Thread[] = [];
   const named = new Set<string>([...contacts.map((c) => c.id), ...groups.map((g) => g.id)]);
 
@@ -442,7 +512,21 @@ export async function listThreads(): Promise<Thread[]> {
       unread: await unreadCount(id),
     });
   }
-  return threads.sort((a, b) => b.updatedAt - a.updatedAt);
+  // Fold in pin/archive state.
+  for (const t of threads) {
+    const m = meta.get(t.peerId);
+    t.pinned = !!m?.pinnedAt;
+    t.archived = !!m?.archivedAt;
+  }
+  // Sort: pinned first (newest pin on top), then everyone else by
+  // recency. Archived threads are NOT filtered here — the caller
+  // decides whether to show them, so an "Archived" view can reuse
+  // this same list.
+  return threads.sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    return b.updatedAt - a.updatedAt;
+  });
 }
 
 // Upper bound of a thread query.

@@ -388,4 +388,6 @@ export const Icon = {
   link: () => ico(<><path d="M8 12l4-4M6 10a3.5 3.5 0 015-5l2 2M14 8a3.5 3.5 0 01-5 5l-2-2" /></>),
   kebab: () => ico(<><circle cx="10" cy="4.5" r="1.4" fill="currentColor" stroke="none" /><circle cx="10" cy="10" r="1.4" fill="currentColor" stroke="none" /><circle cx="10" cy="15.5" r="1.4" fill="currentColor" stroke="none" /></>),
   transcribe: () => ico(<><path d="M4 4h8M4 8h12M4 12h9M4 16h6" /><path d="M15 14l3 3" /><circle cx="15" cy="14" r="2.5" /></>),
+  pin: () => ico(<><path d="M9 2.5h2l.6 5.2 2.4 2.1v1.4H5.4v-1.4l2.4-2.1L8.4 2.5" /><path d="M10 12.7V17" /></>),
+  archive: () => ico(<><rect x="3" y="4" width="14" height="4" rx="1" /><path d="M4.5 8v6.5a1 1 0 001 1h9a1 1 0 001-1V8M8 11h4" /></>),
 };
