@@ -380,7 +380,7 @@ export function Composer({
           </AnimatePresence>
           <Button variant="icon" onClick={() => { setStickerOpen((v) => !v); setEmojiOpen(false); }}
             title="Stickers" aria-label="Stickers">
-            <span style={{ fontSize: 18, lineHeight: 1 }}>🪄</span>
+            <Icon.sticker />
           </Button>
 
           {/* View-once toggle. Dormant most of the time; when ON it
@@ -403,7 +403,7 @@ export function Composer({
               color: "#10132a",
             } : undefined}
           >
-            <span style={{ fontSize: 16, lineHeight: 1 }}>👁️</span>
+            <Icon.viewOnce />
           </Button>
 
           <textarea

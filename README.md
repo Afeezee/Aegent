@@ -1,6 +1,6 @@
 # Aegent
 
-A private messenger where every conversation is genuinely end-to-end encrypted — with a long-form **Diary** your contacts see for a day and you keep forever, real **groups** with admin control, an always-there history that follows you to any device, and an on-device AI agent that searches and acts on your own messages, always with your confirmation and never without your consent.
+A private messenger where every conversation is genuinely end-to-end encrypted — with a long-form **Diary** your contacts see for a day and you keep forever, a public **Discover** feed to meet people beyond your contacts, real **groups** with admin control, an always-there history that follows you to any device, and an on-device AI agent that searches and acts on your own messages, always with your confirmation and never without your consent.
 
 **Live at:** [aegent.onrender.com](https://aegent.cereustechnologies.com)
 **Repo:** [Afeezee/Aegent](https://github.com/Afeezee/Aegent)
@@ -63,9 +63,19 @@ A long-form daily page — an upgrade on disappearing "status".
 - **You keep it forever; your contacts read each entry for 24 hours.** Expiry is cryptographic, not a flag: each entry is sealed once with a per-entry key, and every viewer holds that key sealed to them with a 24h grant. At expiry the relay deletes the *grant*, so the ciphertext — and diary images, which are ACL-gated the same way — can't be served to them again.
 - **Genuine formatting, no markup characters** — a WYSIWYG editor (heading, bold, italics, quote, list, alignment) that stores Markdown and renders it; you never see raw `**stars**`.
 - **Multiple images per entry** — a swipeable, zoomable carousel (side-by-side on wide screens), up to 8 photos.
-- **Per-entry visibility** — share with contacts, or keep an entry just for yourself.
+- **Per-entry visibility** — share with contacts, keep an entry just for yourself, or make it **Public** so it also appears in Discover.
 - **Reactions and private replies** ride the normal message rail straight to the author (nothing a viewer writes is visible to another viewer, so there's nothing to moderate), plus view counts — names only for viewers who send read receipts.
 - **Your own archive is searchable by the agent** and restores on a new device from a bare login.
+
+### Discover
+A public feed built from diary entries their authors chose to make public — a way to meet people beyond your contacts.
+- **Explicit opt-in per entry.** A post reaches Discover only when the author picks **Public**; it's one of a single image, a voice note, or up to **500 characters** of text (links allowed).
+- **Separate from the private path by design.** A public entry keeps its normal end-to-end-sealed diary copy (contacts still read it the encrypted way); the Discover copy is a *separate* cleartext row — "public" and "E2E-sealed to specific keys" are contradictory, so public content honestly leaves the envelope and nothing else is weakened.
+- **Slide into DMs.** "Message" on any card auto-adds a non-contact (pulling only their public key, exactly like adding a contact) and opens a **normal end-to-end encrypted** chat — the discovery is public, the conversation is sealed.
+
+### Translation
+- **Tap Translate** on any message or voice-note transcript to read it in your language, powered by Google Translate.
+- **Never automatic.** Only the message you tap is sent to the service, and the target language lives in Settings. Like email backup, this one trip leaves E2E — and the first use says so.
 
 ### Groups
 Real groups, enforced at the relay — not just in the UI.

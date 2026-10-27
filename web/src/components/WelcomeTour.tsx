@@ -114,6 +114,23 @@ const STEPS: Step[] = [
     ),
   },
   {
+    art: <span style={{ fontSize: 30, lineHeight: 1 }}>🧭</span>,
+    title: "Diary & Discover",
+    body: (
+      <>
+        The <strong>Diary</strong> tab is your daily page — text or photos
+        your contacts can read for 24 hours while you keep them forever.
+        Mark an entry <strong>Public</strong> and it also appears in{" "}
+        <strong>Discover</strong>.
+        <br /><br />
+        <strong>Discover</strong> is a feed of everyone's public posts —
+        find people beyond your contacts and message them directly, still
+        end-to-end encrypted. And tap <strong>Translate</strong> on any
+        message to read it in your language.
+      </>
+    ),
+  },
+  {
     art: <Cog />,
     title: "Settings → Devices",
     body: (

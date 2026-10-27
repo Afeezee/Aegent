@@ -26,8 +26,20 @@ const STEPS: Array<{ title: string; body: string; art: string }> = [
   {
     title: "Diary",
     body:
-      "Write about your day — long text, formatted, or a set of photos. Your contacts can read each entry for 24 hours; you keep it forever. Or mark an entry just for you.",
+      "Write about your day — long text, formatted, or a set of photos. Contacts can read each entry for 24 hours; you keep it forever. Keep one just for you, or make it Public to share it with everyone.",
     art: "📔",
+  },
+  {
+    title: "Discover",
+    body:
+      "A feed of everyone's public posts. Meet people who aren't in your contacts through what they share — an image, a voice note, or a few lines — and slide straight into their DMs, end-to-end encrypted.",
+    art: "🧭",
+  },
+  {
+    title: "Translate anything",
+    body:
+      "Tap Translate on any message or voice-note transcript to read it in your language. You choose the language in Settings; nothing is translated unless you ask.",
+    art: "🌐",
   },
   {
     title: "Groups you can run",

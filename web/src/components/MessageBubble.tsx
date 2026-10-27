@@ -314,18 +314,18 @@ export function MessageBubble(p: BubbleProps) {
           )}
 
           <div style={{
-            display: "flex", alignItems: "center", gap: 6,
+            display: "flex", alignItems: "center", gap: 4,
             marginTop: msg.media ? 6 : 4,
-            fontSize: 10, opacity: 0.7,
+            fontSize: 10.5, opacity: 0.75, letterSpacing: 0.2,
             justifyContent: "flex-end",
-            color: isMine ? "rgba(16,19,42,0.7)" : "var(--text-mute)",
+            color: isMine ? "rgba(16,19,42,0.72)" : "var(--text-mute)",
             padding: msg.media ? "0 8px 4px" : undefined,
           }}>
-            {msg.editedBody && !deleted && <span>edited</span>}
-            <span>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            {msg.editedBody && !deleted && <span style={{ fontStyle: "italic", opacity: 0.85 }}>edited</span>}
+            <span style={{ fontVariantNumeric: "tabular-nums" }}>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
             {isMine && !deleted && (
               <span title={msg.readAt ? "Read" : msg.deliveredAt ? "Delivered" : "Sent"}
-                style={{ display: "inline-flex", alignItems: "center" }}>
+                style={{ display: "inline-flex", alignItems: "center", marginLeft: -1 }}>
                 {msg.readAt
                   // Read: bright aqua double-check, clearly distinct from the
                   // muted grey of "delivered". Reads well on the violet

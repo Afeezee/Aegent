@@ -357,8 +357,13 @@ export const Icon = {
   forward: () => ico(<><path d="M10 5l6 5-6 5v-3c-5 0-7 2-7 5 0-6 3-9 7-9V5z" /></>),
   copy: () => ico(<><rect x="6" y="6" width="10" height="12" rx="2" /><path d="M4 14V4h10" /></>),
   x: () => ico(<><path d="M5 5l10 10M15 5L5 15" /></>),
-  check: () => ico(<><path d="M4 10l4 4 8-8" /></>),
-  checkDouble: () => ico(<><path d="M2 10l4 4 6-6M9 14l4 4 5-9" /></>),
+  // Delivery ticks. Both built from one identical check shape so the
+  // single and double read as the same mark; the double is just two of
+  // them nested with a fixed 5px offset, the way every messaging app
+  // draws them. Rendered a touch larger than the timestamp text so they
+  // sit cleanly on the baseline rather than looming over it.
+  check: () => ico(<><path d="M5 10.5l3 3 5.5-6" /></>, 15),
+  checkDouble: () => ico(<><path d="M2.5 10.5l3 3 5.5-6" /><path d="M7.5 10.5l3 3 5.5-6" /></>, 15),
   moon: () => ico(<><path d="M15 12A5 5 0 018 5a6 6 0 107 7z" /></>),
   // Sparkles — the near-universal AI-assistant glyph. A big 4-point star
   // plus two smaller companions.
@@ -395,4 +400,18 @@ export const Icon = {
   pin: () => ico(<><path d="M9 2.5h2l.6 5.2 2.4 2.1v1.4H5.4v-1.4l2.4-2.1L8.4 2.5" /><path d="M10 12.7V17" /></>),
   archive: () => ico(<><rect x="3" y="4" width="14" height="4" rx="1" /><path d="M4.5 8v6.5a1 1 0 001 1h9a1 1 0 001-1V8M8 11h4" /></>),
   compass: () => ico(<><circle cx="10" cy="10" r="7.5" /><path d="M13.2 6.8l-2 4.4-4.4 2 2-4.4 4.4-2z" /></>),
+  // Sticker: a rounded tile with its bottom-right corner peeled up — the
+  // universal sticker glyph, plus a tiny smile so it reads as playful
+  // rather than as a document.
+  sticker: () => ico(<>
+    <path d="M4.5 3.5h11A1.5 1.5 0 0117 5v6.5L11.5 17H4.5A1.5 1.5 0 013 15.5V5a1.5 1.5 0 011.5-1.5z" />
+    <path d="M11.5 17v-4a1.5 1.5 0 011.5-1.5h4" />
+    <path d="M7 8.5h.01M11 8.5h.01M7.4 11.5a2.2 2.2 0 003.2 0" />
+  </>),
+  // View-once: an eye, clean line-art. The toggle itself glows when ON,
+  // so the glyph only has to say "visibility", which an eye does best.
+  viewOnce: () => ico(<>
+    <path d="M2.5 10S5.2 5 10 5s7.5 5 7.5 5-2.7 5-7.5 5-7.5-5-7.5-5z" />
+    <circle cx="10" cy="10" r="2.2" />
+  </>),
 };
