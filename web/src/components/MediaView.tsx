@@ -12,6 +12,7 @@ import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
 import { clearTranslation, getTranslation, saveTranslation } from "../lib/store.js";
+import { sendTranscriptEdit } from "../lib/session.js";
 
 // NOTE: prop is deliberately named `media`, NOT `ref` — React
 // intercepts a prop literally named `ref` as a forwarded-ref and
@@ -457,8 +458,24 @@ function NavBtn({ dir, disabled, onClick }: { dir: "prev" | "next"; disabled: bo
 
 
 function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; isMine?: boolean; messageId?: string }) {
+  // The transcript shown here. The author may correct it (Whisper often
+  // mishears unclear audio); the fix propagates to the recipient so they
+  // read what was actually said. Local state so the display updates
+  // instantly, and re-syncs if `text` changes (e.g. a remote correction).
+  const [transcript, setTranscript] = useState(text);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const [savingT, setSavingT] = useState(false);
+  useEffect(() => { setTranscript(text); setDraft(text); }, [text]);
+
   const [translated, setTranslated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The viewer can fix a garbled machine translation for their own
+  // reading; it's stored locally (translation never leaves this device
+  // except the one trip to the service), so editing it is purely local.
+  const [editingTr, setEditingTr] = useState(false);
+  const [trDraft, setTrDraft] = useState("");
+
   // Rehydrate cached translation on mount — same persistence rail as
   // MessageBubble's text translation.
   useEffect(() => {
@@ -469,6 +486,35 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
     });
     return () => { alive = false; };
   }, [messageId]);
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%", boxSizing: "border-box", resize: "vertical",
+    fontSize: 12.5, lineHeight: 1.4, padding: "6px 8px", borderRadius: 8,
+    background: "rgba(255,255,255,0.08)", color: "var(--text)",
+    border: "1px solid var(--line-strong)",
+  };
+  const linkBtn = (onClick: () => void, label: string, extra?: React.CSSProperties) => (
+    <button type="button" onClick={onClick}
+      style={{ all: "unset", cursor: "pointer", fontSize: 11, color: "var(--accent-strong)", ...extra }}>
+      {label}
+    </button>
+  );
+
+  async function saveTranscript() {
+    const next = draft.trim();
+    if (!next || next === transcript) { setEditing(false); return; }
+    setSavingT(true);
+    try {
+      if (messageId) await sendTranscriptEdit(messageId, next);
+      setTranscript(next);
+      setEditing(false);
+      // A correction invalidates any cached translation of the old text.
+      if (translated && messageId) { setTranslated(null); await clearTranslation(messageId); }
+    } catch (e) {
+      toast(`Couldn't save the correction: ${(e as Error).message}`, "error");
+    } finally { setSavingT(false); }
+  }
+
   async function doIt() {
     if (!translationConsentGranted()) {
       const ok = window.confirm(
@@ -479,11 +525,11 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
     }
     setBusy(true);
     try {
-      const out = await translateText(text);
+      const out = await translateText(transcript);
       setTranslated(out);
       if (messageId) {
         await saveTranslation({
-          messageId, sourceText: text, translatedText: out,
+          messageId, sourceText: transcript, translatedText: out,
           targetLang: navigator.language?.split("-")[0] ?? "en",
         });
       }
@@ -495,27 +541,66 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
     setTranslated(null);
     if (messageId) await clearTranslation(messageId);
   }
+  async function saveTr() {
+    const next = trDraft.trim();
+    setEditingTr(false);
+    if (!next) return;
+    setTranslated(next);
+    if (messageId) {
+      await saveTranslation({
+        messageId, sourceText: transcript, translatedText: next,
+        targetLang: navigator.language?.split("-")[0] ?? "en",
+      });
+    }
+  }
+
   return (
     <div style={{ padding: "2px 8px 6px" }}>
-      <div title="On-device transcript" style={{
-        fontSize: 12, fontStyle: "italic", lineHeight: 1.4,
-        color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
-      }}>
-        “{text}”
-      </div>
-      <button type="button" onClick={translated ? () => void hide() : doIt}
-        style={{
-          all: "unset", cursor: "pointer", marginTop: 4, fontSize: 11,
-          color: "var(--accent-strong)",
+      {editing ? (
+        <div style={{ marginBottom: 4 }}>
+          <textarea autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} rows={2} style={inputStyle} />
+          <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+            {linkBtn(() => void saveTranscript(), savingT ? "Saving…" : "Save correction")}
+            {linkBtn(() => { setEditing(false); setDraft(transcript); }, "Cancel", { color: "var(--text-dim)" })}
+          </div>
+        </div>
+      ) : (
+        <div title="On-device transcript" style={{
+          fontSize: 12, fontStyle: "italic", lineHeight: 1.4,
+          color: isMine ? "rgba(16,19,42,0.75)" : "var(--text-dim)",
         }}>
-        {busy ? "Translating…" : translated ? "Hide translation" : "Translate"}
-      </button>
-      {translated && (
+          “{transcript}”
+        </div>
+      )}
+
+      {!editing && (
+        <div style={{ display: "flex", gap: 12, marginTop: 4, flexWrap: "wrap" }}>
+          {linkBtn(translated ? () => void hide() : doIt, busy ? "Translating…" : translated ? "Hide translation" : "Translate")}
+          {/* Only the author can correct the transcript everyone reads. */}
+          {isMine && messageId && linkBtn(() => { setDraft(transcript); setEditing(true); }, "Edit transcript")}
+        </div>
+      )}
+
+      {translated && !editingTr && (
         <div style={{
           marginTop: 4, padding: "6px 8px", borderRadius: 8,
           background: "rgba(255,255,255,0.08)", borderLeft: "2px solid var(--aqua)",
           fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.4,
-        }}>{translated}</div>
+        }}>
+          {translated}
+          <div style={{ marginTop: 4 }}>
+            {linkBtn(() => { setTrDraft(translated); setEditingTr(true); }, "Fix translation", { fontSize: 10.5, opacity: 0.85 })}
+          </div>
+        </div>
+      )}
+      {editingTr && (
+        <div style={{ marginTop: 4 }}>
+          <textarea autoFocus value={trDraft} onChange={(e) => setTrDraft(e.target.value)} rows={2} style={inputStyle} />
+          <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+            {linkBtn(() => void saveTr(), "Save")}
+            {linkBtn(() => setEditingTr(false), "Cancel", { color: "var(--text-dim)" })}
+          </div>
+        </div>
       )}
     </div>
   );

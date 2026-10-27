@@ -47,8 +47,8 @@ import {
   applyDelete, applyEdit, applyReaction, setReaction, toggleReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
-  markRead, openStore, outboxCount, rekeyLocalStore, repairAgentTurns, repairSentTimes, repairTimestamps,
-  saveMediaMessage,
+  markRead, messageSenderId, openStore, outboxCount, rekeyLocalStore, repairAgentTurns, repairSentTimes, repairTimestamps,
+  saveMediaMessage, updateMessageMedia,
   saveTextMessage, setMeta, upsertContact, upsertGroup, type MediaRef,
 } from "./store.js";
 import { scheduleAutoBackup } from "./backup.js";
@@ -1164,6 +1164,20 @@ export async function sendEdit(
   await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
+// Correct a voice note's transcript and push the fix to the recipient.
+// Self-contained: it finds the message's thread and whether it's a group
+// from the stored row, so callers deep in the media UI don't have to
+// thread peerId/isGroup down. Only the author's own outgoing message can
+// be corrected — the local update returns null or a non-"out" row
+// otherwise and we send nothing.
+export async function sendTranscriptEdit(targetMsgId: string, transcript: string) {
+  const opened = await updateMessageMedia(targetMsgId, { transcript });
+  if (!opened || opened.direction !== "out") return;
+  const isGroup = !!(await getGroup(opened.peerId));
+  const payload: Payload = { v: 1, t: "transcript", msgId: newMsgId(), targetId: targetMsgId, transcript };
+  await deliverOrQueue(opened.peerId, isGroup, payload);
+}
+
 export async function sendDelete(targetPeerId: string, isGroup: boolean, targetMsgId: string) {
   const payload: Payload = { v: 1, t: "delete", msgId: newMsgId(), targetId: targetMsgId };
   await applyDelete(targetMsgId, CURRENT!.user.id);
@@ -1301,6 +1315,12 @@ export async function ingestEnvelope(envIn: {
     // The envelope's sender is the authority here — not the payload,
     // which anyone could have written.
     await applyDelete(payload.targetId, env.senderId);
+  } else if (payload.t === "transcript") {
+    // A corrected transcript is only honoured from the message's own
+    // author, so a group member can't rewrite someone else's voice note.
+    if (await messageSenderId(payload.targetId) === env.senderId) {
+      await updateMessageMedia(payload.targetId, { transcript: payload.transcript });
+    }
   }
 
   // A self-echo IS the cloud copy of one of our own sends; remember that

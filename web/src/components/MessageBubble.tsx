@@ -62,6 +62,20 @@ export function MessageBubble(p: BubbleProps) {
   const isNarrow = typeof window !== "undefined" && window.innerWidth < 720;
   const [translated, setTranslated] = useState<string | null>(null);
   const [translating, setTranslating] = useState(false);
+  // The viewer can fix a garbled machine translation for their own
+  // reading; stored locally, so it's purely a local correction.
+  const [editingTr, setEditingTr] = useState(false);
+  const [trDraft, setTrDraft] = useState("");
+  async function saveTrFix() {
+    const next = trDraft.trim();
+    setEditingTr(false);
+    if (!next) return;
+    setTranslated(next);
+    await saveTranslation({
+      messageId: msg.id, sourceText: (msg.editedBody ?? msg.body ?? msg.caption ?? "").trim(),
+      translatedText: next, targetLang: navigator.language?.split("-")[0] ?? "en",
+    });
+  }
   const [reportOpen, setReportOpen] = useState(false);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   // Rehydrate any previously cached translation on mount. The Dexie
@@ -300,7 +314,7 @@ export function MessageBubble(p: BubbleProps) {
               {body && msg.media && (
                 <div style={{ padding: "8px 8px 4px", fontSize: 14 }}>{body}</div>
               )}
-              {(translating || translated) && (
+              {(translating || translated) && !editingTr && (
                 <div style={{
                   marginTop: 6, padding: "6px 8px", borderRadius: 8,
                   background: "rgba(255,255,255,0.08)", fontSize: 13, lineHeight: 1.45,
@@ -308,6 +322,28 @@ export function MessageBubble(p: BubbleProps) {
                   borderLeft: "2px solid var(--aqua)",
                 }}>
                   {translating ? "Translating…" : translated}
+                  {translated && !translating && (
+                    <div style={{ marginTop: 3 }}>
+                      <button type="button" onClick={() => { setTrDraft(translated); setEditingTr(true); }}
+                        style={{ all: "unset", cursor: "pointer", fontSize: 10.5, opacity: 0.8, color: isMine ? "rgba(16,19,42,0.9)" : "var(--accent-strong)" }}>
+                        Fix translation
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {editingTr && (
+                <div style={{ marginTop: 6 }}>
+                  <textarea autoFocus value={trDraft} onChange={(e) => setTrDraft(e.target.value)} rows={2}
+                    style={{
+                      width: "100%", boxSizing: "border-box", resize: "vertical", fontSize: 13, lineHeight: 1.45,
+                      padding: "6px 8px", borderRadius: 8, background: "rgba(255,255,255,0.1)",
+                      color: isMine ? "#10132a" : "var(--text)", border: "1px solid var(--line-strong)",
+                    }} />
+                  <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 11 }}>
+                    <button type="button" onClick={() => void saveTrFix()} style={{ all: "unset", cursor: "pointer", color: isMine ? "#10132a" : "var(--accent-strong)" }}>Save</button>
+                    <button type="button" onClick={() => setEditingTr(false)} style={{ all: "unset", cursor: "pointer", opacity: 0.7 }}>Cancel</button>
+                  </div>
                 </div>
               )}
             </>

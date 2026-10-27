@@ -685,6 +685,13 @@ export async function updateMessageMedia(
   return fresh ? openMessage(fresh) : null;
 }
 
+// Who authored a message — used to gate an incoming transcript
+// correction so only the message's own author can rewrite it.
+export async function messageSenderId(msgId: string): Promise<string | null> {
+  const row = await requireDb().messages.get(msgId);
+  return row?.senderId ?? null;
+}
+
 // Reactions arrive as tiny E2E messages; we merge them into the target.
 // Toggle a reaction (user tapped it): flips the user's presence in the
 // emoji's set and returns which way it went, so the caller can send an

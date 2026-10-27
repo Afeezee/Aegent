@@ -511,6 +511,42 @@ export async function diary_stats(_args: Record<string, never> = {}): Promise<To
   };
 }
 
+// ---- discover (public feed) ----
+
+// Public posts from across the app — people the user may not know,
+// aggregated from diary entries their authors chose to make public.
+// Read-only and already-public, so no consent gate.
+export async function list_discover(args: { limit?: number } = {}): Promise<ToolResult> {
+  const { fetchDiscoverFeed } = await import("../lib/discover.js");
+  const limit = Math.min(50, Math.max(1, args.limit ?? 20));
+  const page = await fetchDiscoverFeed(undefined, limit);
+  return {
+    ok: true, kind: "data",
+    value: page.posts.map((p) => ({
+      id: p.id,
+      author: p.author.displayName,
+      handle: p.author.handle,
+      authorId: p.authorId,
+      kind: p.kind,
+      text: p.text ?? (p.kind === "voice" ? "(voice note)" : p.kind === "image" ? "(image)" : ""),
+      at: new Date(p.createdAt).toISOString(),
+    })),
+  };
+}
+
+// ---- translation ----
+
+// Translate any text into a target language (default: the user's own).
+// Uses the same public endpoint the UI's Translate action uses.
+export async function translate_text(args: { text: string; target?: string }): Promise<ToolResult> {
+  const text = (args.text ?? "").trim();
+  if (!text) return { ok: false, error: "No text to translate." };
+  const { translateText, targetLanguage } = await import("../lib/translate.js");
+  const target = args.target || targetLanguage();
+  const out = await translateText(text, target);
+  return { ok: true, kind: "data", value: { target, translated: out } };
+}
+
 // Suppress unused-import warnings for diary helpers imported alongside
 // the agent-only ones that may not all be referenced.
 void myDiaryEntries;

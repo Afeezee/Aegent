@@ -103,7 +103,14 @@ export type Payload =
     }
   | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; op?: "add" | "remove"; _thread?: string; _at?: number; _from?: string }
   | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string; _at?: number; _from?: string }
-  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number; _from?: string };
+  | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number; _from?: string }
+  // A corrected voice-note transcript, sent by the message's author so
+  // the recipient sees what was actually said even when the audio (and
+  // therefore the on-device transcription) was unclear. Carries only
+  // the new transcript for an existing voice message; the audio itself
+  // is unchanged. An older client that doesn't know this type ignores
+  // it and keeps showing the original transcript — acceptable.
+  | { v: 1; t: "transcript"; msgId: string; targetId: string; transcript: string; _thread?: string; _at?: number; _from?: string };
 
 // Does the sender the relay recorded agree with the one sealed inside?
 //

@@ -30,6 +30,8 @@ import {
   set_reminder, summarize_thread, tone_adjust, transcribe_voice, read_media,
   // Diary agent surface — read-only, metadata + consented body text.
   diary_stats, get_diary_entry, list_diary_recent, search_diary,
+  // Discover (public feed) + translation.
+  list_discover, translate_text,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -143,6 +145,16 @@ const TOOLS = [
     name: "diary_stats",
     description: "Aggregate counters for the diary: total entries visible, how many are the user's own, distinct authors, entries created today / this week, newest timestamp. Use for 'how many entries do I have', 'am I keeping up with my diary'.",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_discover",
+    description: "List recent PUBLIC posts from the Discover feed — diary entries other users chose to make public, aggregated across everyone (not just the user's contacts). Returns id, author, handle, authorId, kind ('text'|'image'|'voice'), text (up to 500 chars; a placeholder for image/voice), ISO time. Use when the user asks what people are posting publicly, who to discover/follow, or to find someone beyond their contacts.",
+    input_schema: { type: "object", properties: { limit: { type: "number" } } },
+  },
+  {
+    name: "translate_text",
+    description: "Translate a piece of text into a target language (ISO code like 'es','fr','yo'; defaults to the user's own language). Use when the user asks to translate a message, a transcript, or any text, or wants something said in another language.",
+    input_schema: { type: "object", properties: { text: { type: "string" }, target: { type: "string" } }, required: ["text"] },
   },
   {
     name: "resolve_target",
@@ -558,6 +570,8 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "list_diary_recent")   return dataOnly(await list_diary_recent(args as never));
     if (name === "get_diary_entry")     return dataOnly(await get_diary_entry(args as never));
     if (name === "diary_stats")         return dataOnly(await diary_stats());
+    if (name === "list_discover")       return dataOnly(await list_discover(args as never));
+    if (name === "translate_text")      return dataOnly(await translate_text(args as never));
     if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
