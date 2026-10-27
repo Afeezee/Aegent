@@ -62,7 +62,13 @@ export function diaryNow(): number {
 
 // ---- publishing ----
 
-export type DiaryVisibility = "contacts" | "private";
+// "public" is a superset of "contacts": contacts still see the entry in
+// their normal diary feed (same grants), and additionally a cleartext
+// copy goes to the global Discover feed so people who aren't contacts
+// can find the author through it.
+export type DiaryVisibility = "contacts" | "private" | "public";
+
+export const MAX_PUBLIC_TEXT = 500;
 
 export type PublishInput =
   | { kind: "text"; body: string; format?: DiaryFormat; align?: DiaryAlign; visibility?: DiaryVisibility }
@@ -147,13 +153,40 @@ export async function publishDiaryEntry(input: PublishInput): Promise<{ id: stri
     format: input.format, align: input.align,
   });
 
+  let queued = false;
   try {
     await api.diaryPublish(payload);
-    return { id, queued: false };
   } catch {
     await enqueueDiaryPublish(id, JSON.stringify(payload));
-    return { id, queued: true };
+    queued = true;
   }
+
+  // Public entries get a cleartext twin in the Discover feed. Best
+  // effort and strictly additive: a failure here never costs the
+  // private entry, which is already saved and published above. Only a
+  // single image or a voice note carries media into Discover — an album
+  // contributes just its cover.
+  if (input.visibility === "public") {
+    try { await publishToDiscover(id, input); } catch { /* feed is non-critical */ }
+  }
+
+  return { id, queued };
+}
+
+async function publishToDiscover(id: string, input: PublishInput): Promise<void> {
+  if (input.kind === "text") {
+    const body = input.body.trim();
+    if (!body || body.length > MAX_PUBLIC_TEXT) return;
+    await api.discoverPublish({ id, kind: "text", text: body });
+    return;
+  }
+  const media = input.media;
+  const kind = media.kind === "voice" ? "voice" : "image";
+  const caption = (input.caption ?? "").trim().slice(0, MAX_PUBLIC_TEXT);
+  await api.discoverPublish({
+    id, kind, text: caption || undefined,
+    mediaJson: JSON.stringify(media), blobId: media.blobId,
+  });
 }
 
 async function nextSeqFor(dayKey: string): Promise<number> {
@@ -399,6 +432,9 @@ export async function editDiaryText(id: string, newBody: string, opts: { format?
 
 export async function removeDiaryEntry(id: string): Promise<void> {
   await api.diaryDelete(id).catch(() => { /* may already be gone */ });
+  // If it was also public, pull its Discover twin. Harmless if there was
+  // never one (the server no-ops on an unknown id).
+  await api.discoverDelete(id).catch(() => { /* no public twin, or already gone */ });
   const { getDiaryEntry } = await import("./store.js");
   const row = await getDiaryEntry(id);
   if (row?.media) revokeObjectUrlFor(row.media.blobId);

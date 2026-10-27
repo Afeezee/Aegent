@@ -394,4 +394,5 @@ export const Icon = {
   transcribe: () => ico(<><path d="M4 4h8M4 8h12M4 12h9M4 16h6" /><path d="M15 14l3 3" /><circle cx="15" cy="14" r="2.5" /></>),
   pin: () => ico(<><path d="M9 2.5h2l.6 5.2 2.4 2.1v1.4H5.4v-1.4l2.4-2.1L8.4 2.5" /><path d="M10 12.7V17" /></>),
   archive: () => ico(<><rect x="3" y="4" width="14" height="4" rx="1" /><path d="M4.5 8v6.5a1 1 0 001 1h9a1 1 0 001-1V8M8 11h4" /></>),
+  compass: () => ico(<><circle cx="10" cy="10" r="7.5" /><path d="M13.2 6.8l-2 4.4-4.4 2 2-4.4 4.4-2z" /></>),
 };

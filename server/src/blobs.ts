@@ -53,6 +53,16 @@ export async function readBlobFor(id: string, requesterId: string): Promise<Blob
   if (!row) return undefined;
   if (row.owner_id === requesterId) return row;
 
+  // A blob bound to a live discover post is public — any signed-in
+  // viewer may read it, because the whole point of a discover post is to
+  // be seen by people who are not the author's contacts.
+  const pub = await db.prepare(
+    `SELECT 1 AS one FROM discover_blobs b
+       JOIN discover_posts p ON p.id = b.post_id
+      WHERE b.blob_id = ? AND p.revoked_at IS NULL`,
+  ).get(id);
+  if (pub) return row;
+
   const bound = await db.prepare("SELECT entry_id FROM diary_blobs WHERE blob_id = ?")
     .get<{ entry_id: string }>(id);
   if (!bound) return row;

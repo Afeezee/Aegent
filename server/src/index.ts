@@ -52,6 +52,9 @@ import {
   MAX_AUDIENCE, archiveFor, deleteEntry, editEntryBody, feedFor, granteesOf, markSeen,
   publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
 } from "./diary.js";
+import {
+  MAX_DISCOVER_TEXT, discoverFeed, publishPublic, unpublishPublic,
+} from "./discover.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentQuota, agentTurn } from "./agent.js";
 import { webSearch, webSearchEnabled } from "./websearch.js";
@@ -1152,6 +1155,49 @@ app.patch("/api/diary/entries/:id/grants", authed, async (req, res) => {
 app.delete("/api/diary/entries/:id", authed, async (req, res) => {
   try {
     await deleteEntry((req as AuthedReq).userId, req.params.id);
+    res.json({ ok: true });
+  } catch (e) { handleError(res, e); }
+});
+
+// ---- discover (public feed) ----
+
+app.post("/api/discover", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      id: z.string().min(1),
+      kind: z.enum(["text", "image", "voice"]),
+      text: z.string().max(MAX_DISCOVER_TEXT).optional(),
+      mediaJson: z.string().optional(),
+      blobId: z.string().optional(),
+    }).parse(req.body);
+    res.json(await publishPublic((req as AuthedReq).userId, body));
+  } catch (e) { handleError(res, e); }
+});
+
+app.get("/api/discover/feed", authed, async (req, res) => {
+  try {
+    const rows = await discoverFeed((req as AuthedReq).userId, {
+      before: Number(req.query.before ?? 0) || undefined,
+      limit: Number(req.query.limit ?? 30) || 30,
+    });
+    res.json({
+      posts: rows.map((r) => ({
+        id: r.id, authorId: r.author_id, kind: r.kind,
+        text: r.text, media: r.media_json ? JSON.parse(r.media_json) : null,
+        createdAt: Number(r.created_at),
+        author: {
+          id: r.author_id, displayName: r.display_name, handle: r.handle,
+          publicKey: r.public_key, avatar: r.avatar ?? null,
+        },
+      })),
+      nextBefore: rows.length ? Number(rows[rows.length - 1].created_at) : null,
+    });
+  } catch (e) { handleError(res, e); }
+});
+
+app.delete("/api/discover/:id", authed, async (req, res) => {
+  try {
+    await unpublishPublic((req as AuthedReq).userId, req.params.id);
     res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });

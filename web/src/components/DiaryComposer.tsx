@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar, Button, Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
-import { publishDiaryEntry, resolveAudience, type DiaryVisibility } from "../lib/diary.js";
+import { MAX_PUBLIC_TEXT, publishDiaryEntry, resolveAudience, type DiaryVisibility } from "../lib/diary.js";
 import { RichEditor, applyRich, type RichCommand } from "./RichEditor.js";
 import type { DiaryAlign } from "../lib/diary-protocol.js";
 import { dayKeyFor } from "../lib/daybreaks.js";
@@ -132,6 +132,10 @@ export function DiaryComposer({
   async function postText() {
     const body = text.trim();
     if (!body || busy) return;
+    if (visibility === "public" && body.length > MAX_PUBLIC_TEXT) {
+      toast(`A public post is limited to ${MAX_PUBLIC_TEXT} characters. Trim it, or post to contacts only.`, "warn");
+      return;
+    }
     setBusy(true);
     try {
       const r = await publishDiaryEntry({ kind: "text", body, format: "md", align, visibility });
@@ -241,6 +245,7 @@ export function DiaryComposer({
                 <div style={{ fontWeight: 650 }}>Today's page</div>
                 <div className="small">
                   {visibility === "private" ? "Only you will see this"
+                    : visibility === "public" ? "Shared with contacts and shown in Discover to everyone"
                     : audience === null ? "…"
                     : audience === 0 ? "No contacts yet — only you will see this"
                     : `${audience} ${audience === 1 ? "contact" : "contacts"} can read it for 24 hours`}
@@ -253,7 +258,7 @@ export function DiaryComposer({
 
             {/* Who can see it. */}
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-              {([["contacts", "Share with contacts"], ["private", "Only me"]] as const).map(([v, label]) => (
+              {([["contacts", "Contacts"], ["public", "Public"], ["private", "Only me"]] as const).map(([v, label]) => (
                 <button key={v} type="button" onClick={() => setVisibility(v)}
                   aria-pressed={visibility === v}
                   style={{
@@ -267,6 +272,19 @@ export function DiaryComposer({
                 </button>
               ))}
             </div>
+
+            {/* 500-char guard for public text. Warn at set-to-public time
+                so the person knows before they try to post. */}
+            {visibility === "public" && text.trim().length > MAX_PUBLIC_TEXT && (
+              <div className="small" style={{
+                marginBottom: 10, padding: "8px 12px", borderRadius: 10,
+                background: "rgba(255,120,120,0.10)", border: "1px solid rgba(255,120,120,0.3)",
+                color: "var(--text)",
+              }}>
+                A public post is capped at {MAX_PUBLIC_TEXT} characters — yours is {text.trim().length}.
+                Trim {text.trim().length - MAX_PUBLIC_TEXT} to post it publicly, or choose Contacts / Only me.
+              </div>
+            )}
 
             {/* Exclude specific contacts from this day's page. */}
             {visibility === "contacts" && contacts.length > 0 && (

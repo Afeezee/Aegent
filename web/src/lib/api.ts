@@ -231,6 +231,19 @@ export type DiaryPage = {
   cursor: { since: number; afterId: string } | null;
 };
 
+// A public post as the relay serves it in the Discover feed. `media` is
+// a MediaRef (loosely typed here; lib/discover.ts owns the rich type).
+export type DiscoverPostApi = {
+  id: string;
+  authorId: string;
+  kind: "text" | "image" | "voice";
+  text: string | null;
+  media: unknown | null;
+  createdAt: number;
+  author: { id: string; displayName: string; handle: string; publicKey: string; avatar: string | null };
+};
+export type DiscoverFeedResponse = { posts: DiscoverPostApi[]; nextBefore: number | null };
+
 export type RecoveryChallenge = {
   challengeId: string;
   serverPublicKey: string;
@@ -416,6 +429,21 @@ export const api = {
     req<{ ok: true }>(`/api/diary/entries/${encodeURIComponent(entryId)}`, {
       method: "PATCH", body: JSON.stringify(body),
     }),
+  // ---- discover (public feed) ----
+  discoverPublish: (body: {
+    id: string; kind: "text" | "image" | "voice";
+    text?: string; mediaJson?: string; blobId?: string;
+  }) => req<{ id: string }>("/api/discover", { method: "POST", body: JSON.stringify(body) }),
+  discoverFeed: (opts: { before?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.before) q.set("before", String(opts.before));
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return req<DiscoverFeedResponse>(`/api/discover/feed${qs ? `?${qs}` : ""}`);
+  },
+  discoverDelete: (id: string) => req<{ ok: true }>(
+    `/api/discover/${encodeURIComponent(id)}`, { method: "DELETE" },
+  ),
   // Exact reconciliation pair: every envelope id the relay holds for us,
   // and retrieval of specific envelopes by id.
   inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),

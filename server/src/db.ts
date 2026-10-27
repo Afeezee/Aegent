@@ -403,6 +403,43 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_diary_blobs_entry ON diary_blobs(entry_id);
 
+  -- Discover.
+  --
+  -- The PUBLIC counterpart of a diary entry. Deliberately a separate
+  -- table from diary_entries, because the two have opposite contracts:
+  -- a diary entry is sealed and readable only through a per-viewer grant,
+  -- whereas a discover post is public by construction and stored in the
+  -- clear so it can be aggregated into one global feed across all users.
+  -- Mixing a cleartext row into diary_entries would quietly weaken the
+  -- "the relay never holds the plaintext" promise for the private path.
+  --
+  -- A post is created only when the author explicitly chooses "public"
+  -- for that entry. The text column holds the 500-char-max body/caption
+  -- in the clear; media_json holds the MediaRef (which includes the
+  -- content key in the clear — fine, the media is public) for an image
+  -- or voice post. The id matches the originating diary entry so re-
+  -- publishing is idempotent and deleting the entry finds its public twin.
+  CREATE TABLE IF NOT EXISTS discover_posts (
+    id          TEXT PRIMARY KEY,
+    author_id   TEXT NOT NULL REFERENCES users(id),
+    kind        TEXT NOT NULL,             -- 'text' | 'image' | 'voice'
+    text        TEXT,                      -- plaintext, <=500 chars
+    media_json  TEXT,                      -- JSON MediaRef for image/voice
+    created_at  ${BIG} NOT NULL,
+    revoked_at  ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_discover_created
+    ON discover_posts(created_at, id);
+
+  -- Binds a blob to a discover post so readBlobFor can serve it to any
+  -- signed-in viewer. A discover post's media is public, so unlike a
+  -- diary blob there is no grant to check — presence of the binding is
+  -- the authorisation.
+  CREATE TABLE IF NOT EXISTS discover_blobs (
+    blob_id  TEXT PRIMARY KEY REFERENCES blobs(id),
+    post_id  TEXT NOT NULL REFERENCES discover_posts(id)
+  );
+
   -- Group moderation.
   --
   -- Invite tokens are stored hashed, the same shape refresh tokens use:

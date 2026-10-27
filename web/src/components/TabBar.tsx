@@ -11,12 +11,13 @@
 import { motion } from "framer-motion";
 import { Icon } from "./ui.js";
 
-export type Dest = "chats" | "groups" | "diary";
+export type Dest = "chats" | "groups" | "diary" | "discover";
 
 const DESTS: Array<{ id: Dest; label: string; icon: () => JSX.Element }> = [
   { id: "chats", label: "Chats", icon: Icon.chat },
   { id: "groups", label: "Groups", icon: Icon.users },
   { id: "diary", label: "Diary", icon: Icon.diary },
+  { id: "discover", label: "Discover", icon: Icon.compass },
 ];
 
 export function TabBar({

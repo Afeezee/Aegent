@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Avatar, Button, ErrorBoundary, Glass, Icon } from "../components/ui.js";
 import { NavRail, TabBar, type Dest } from "../components/TabBar.js";
 import { Diary } from "./Diary.js";
+import { Discover } from "./Discover.js";
 import { Chat } from "../components/Chat.js";
 import { ThreadList } from "../components/ThreadList.js";
 import { ComposeOverlay } from "../components/ComposeOverlay.js";
@@ -349,7 +350,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     <div style={{
       display: "grid",
       gridTemplateColumns: bp === "sm" ? "1fr"
-        : dest === "diary" ? "64px 1fr"
+        : dest === "diary" || dest === "discover" ? "64px 1fr"
         : "64px 320px 1fr",
       height: "var(--app-h)",
       // On a phone with a chat open the conversation goes full-bleed —
@@ -371,6 +372,10 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
 
       {dest === "diary" ? (
         <Diary refreshKey={refresh} />
+      ) : dest === "discover" ? (
+        <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <Discover onMessage={(authorId) => { void openThread(authorId, false).then(() => setDest("chats")); }} />
+        </Glass>
       ) : (
       <>
       {showSidebar && (
