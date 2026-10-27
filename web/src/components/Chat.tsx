@@ -213,7 +213,13 @@ export function Chat({
         display: "flex", alignItems: "center", gap: 12, padding: "12px 18px",
         borderBottom: "1px solid var(--line)",
       }}>
-        {onBack && <Button variant="icon" onClick={onBack} aria-label="Back"><Icon.chevron /></Button>}
+        {onBack && (
+          <Button variant="icon" onClick={onBack} aria-label="Back">
+            {/* Point left — this collapses the chat back to the list. The
+                raw chevron glyph points right, so flip it. */}
+            <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}><Icon.chevron /></span>
+          </Button>
+        )}
         <Avatar
           name={thread.title}
           group={thread.isGroup}
