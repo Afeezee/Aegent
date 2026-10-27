@@ -85,6 +85,10 @@ export type UserRow = {
   // the ADDED_COLUMNS migration.
   is_admin: number;
   suspended_at: number | null;
+  // Profile fields (public-directory info).
+  avatar: string | null;
+  status_text: string | null;
+  status_until: number | null;
 };
 
 export type MessageRow = {
@@ -633,6 +637,12 @@ const ADDED_COLUMNS: AddedColumn[] = [
   { table: "users", name: "is_admin", ddl: "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0" },
   { table: "users", name: "suspended_at", ddl: "ALTER TABLE users ADD COLUMN suspended_at BIGINT" },
   { table: "messages", name: "msg_id", ddl: "ALTER TABLE messages ADD COLUMN msg_id TEXT" },
+  // Profile: avatar (small base64 data URI, client-resized), status
+  // text + optional expiry. All public-directory info, like display
+  // name and handle — not message content, so plain columns are fine.
+  { table: "users", name: "avatar", ddl: "ALTER TABLE users ADD COLUMN avatar TEXT" },
+  { table: "users", name: "status_text", ddl: "ALTER TABLE users ADD COLUMN status_text TEXT" },
+  { table: "users", name: "status_until", ddl: "ALTER TABLE users ADD COLUMN status_until BIGINT" },
 ];
 
 export async function initSchema(): Promise<void> {

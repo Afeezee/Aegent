@@ -16,6 +16,7 @@ import {
 import { saveContactToPhone } from "../lib/contacts-integration.js";
 import { markTourPending } from "./WelcomeTour.js";
 import { ErrorReportDialog, FeedbackDialog } from "./ReportDialogs.js";
+import { Profile } from "./Profile.js";
 import {
   revokeTranslationConsent, setTargetLanguage,
   targetLanguage, translationConsentGranted, TRANSLATION_TARGETS,
@@ -33,6 +34,7 @@ export function Settings({
   const [backupInfo, setBackupInfo] = useState<{ size: number; createdAt: number } | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [errorReportOpen, setErrorReportOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -75,15 +77,27 @@ export function Settings({
   }
 
   if (!me) return null;
+  const meExt = me as unknown as { avatar?: string | null; statusText?: string | null };
   return (
     <Modal open={open} onClose={onClose} title="Settings" width={520}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-        <Avatar name={me.displayName} size="lg" />
-        <div style={{ minWidth: 0 }}>
+      <button
+        onClick={() => setProfileOpen(true)}
+        aria-label="Edit your profile"
+        style={{
+          all: "unset", cursor: "pointer", width: "100%",
+          display: "flex", alignItems: "center", gap: 12, marginBottom: 20,
+          padding: 10, borderRadius: 14, background: "var(--ink-2)", border: "1px solid var(--line)",
+        }}>
+        <Avatar name={me.displayName} src={meExt.avatar} size="lg" />
+        <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontWeight: 700, fontSize: 17 }}>{me.displayName}</div>
           <div className="small">@{me.handle} · {me.email}</div>
+          {meExt.statusText && (
+            <div className="small" style={{ color: "var(--accent-strong)", marginTop: 2 }}>{meExt.statusText}</div>
+          )}
         </div>
-      </div>
+        <span style={{ color: "var(--text-dim)" }}><Icon.chevron /></span>
+      </button>
 
       <section style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 8, letterSpacing: 0.05 }}>PHONE NUMBER</div>
@@ -211,6 +225,7 @@ export function Settings({
 
       <FeedbackDialog open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
       <ErrorReportDialog open={errorReportOpen} onClose={() => setErrorReportOpen(false)} />
+      <Profile open={profileOpen} onClose={() => setProfileOpen(false)} />
     </Modal>
   );
 }

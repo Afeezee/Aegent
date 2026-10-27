@@ -458,20 +458,49 @@ export type PublicUser = {
   displayName: string;
   handle: string;
   publicKey: string;
+  avatar?: string | null;
+  statusText?: string | null;
+  statusUntil?: number | null;
   presence?: { online: boolean; lastSeenAt: number | null };
 };
 
 export function toPublic(u: UserRow, live?: Map<string, number>): PublicUser {
+  // A status with an expiry that's passed reads as no status.
+  const statusLive = u.status_until == null || u.status_until > Date.now();
   const out: PublicUser = {
     id: u.id, email: u.email, phone: u.phone ?? null,
     displayName: u.display_name,
     handle: u.handle, publicKey: u.public_key,
+    avatar: u.avatar ?? null,
+    statusText: statusLive ? (u.status_text ?? null) : null,
+    statusUntil: statusLive ? (u.status_until ?? null) : null,
   };
   if (u.presence) {
     const isOnline = live?.has(u.id) ?? false;
     out.presence = { online: isOnline, lastSeenAt: u.last_seen_at };
   }
   return out;
+}
+
+// Update profile fields. displayName is also the only field here that
+// changes the public directory name; avatar/status are additive.
+export async function updateProfile(userId: string, patch: {
+  displayName?: string;
+  avatar?: string | null;
+  statusText?: string | null;
+  statusUntil?: number | null;
+}): Promise<void> {
+  const cur = await getUserById(userId);
+  if (!cur) throw new AuthError("not_found", "User not found.");
+  await db.prepare(
+    `UPDATE users SET display_name = ?, avatar = ?, status_text = ?, status_until = ? WHERE id = ?`,
+  ).run(
+    patch.displayName !== undefined ? patch.displayName : cur.display_name,
+    patch.avatar !== undefined ? patch.avatar : cur.avatar,
+    patch.statusText !== undefined ? patch.statusText : cur.status_text,
+    patch.statusUntil !== undefined ? patch.statusUntil : cur.status_until,
+    userId,
+  );
 }
 
 function sign(userId: string): string {

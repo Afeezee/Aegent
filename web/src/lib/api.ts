@@ -7,6 +7,9 @@ export type PublicUser = {
   displayName: string;
   handle: string;
   publicKey: string;
+  avatar?: string | null;
+  statusText?: string | null;
+  statusUntil?: number | null;
   presence?: { online: boolean; lastSeenAt: number | null };
 };
 
@@ -288,6 +291,10 @@ export const api = {
   me: () => req<MeApi>("/api/me"),
   updateSettings: (patch: { readReceipts?: boolean; presence?: boolean }) =>
     req<{ ok: true }>("/api/me/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  updateProfile: (patch: {
+    displayName?: string; avatar?: string | null;
+    statusText?: string | null; statusUntil?: number | null;
+  }) => req<PublicUser>("/api/me/profile", { method: "PATCH", body: JSON.stringify(patch) }),
   search: (q: string) => req<PublicUser[]>(`/api/users/search?q=${encodeURIComponent(q)}`),
   byEmail: (email: string) => req<PublicUser>(`/api/users/by-email/${encodeURIComponent(email)}`),
   byHandle: (handle: string) => req<PublicUser>(`/api/users/by-handle/${encodeURIComponent(handle.replace(/^@/, ""))}`),

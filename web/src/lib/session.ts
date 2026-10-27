@@ -1342,6 +1342,8 @@ export async function ensureContact(id: string): Promise<{ id: string; publicKey
       displayName: u.displayName, publicKey: u.publicKey,
       lastSeenAt: Date.now(),
       online: u.presence?.online,
+      avatar: u.avatar ?? null,
+      statusText: u.statusText ?? null,
     });
     return { id: u.id, publicKey: u.publicKey, displayName: u.displayName };
   } catch { return null; }

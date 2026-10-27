@@ -29,6 +29,10 @@ export type ContactRow = {
   publicKey: string;
   lastSeenAt: number;
   online?: boolean;
+  // Public-directory profile bits, refreshed whenever we fetch the
+  // contact. Optional so old rows migrate silently.
+  avatar?: string | null;
+  statusText?: string | null;
 };
 
 export type GroupRow = {

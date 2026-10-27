@@ -52,20 +52,24 @@ export function Glass({
 // ---- avatar ----
 
 export function Avatar({
-  name = "?", size = "md", group = false, online, style,
+  name = "?", size = "md", group = false, online, style, src,
 }: {
   name?: string; size?: "sm" | "md" | "lg" | "xl"; group?: boolean;
   online?: boolean; style?: CSSProperties;
+  // Optional profile image (base64 data URI). Falls back to initials.
+  src?: string | null;
 }) {
   const initials = (name.trim().split(/\s+/).slice(0, 2).map(w => w[0]).join("") || "?").toUpperCase();
   const hue = hashHue(name);
   return (
     <div
       className={`avatar ${size} ${group ? "group" : ""}`}
-      style={{ background: gradientFor(hue, group), ...style }}
+      style={{ background: src ? "transparent" : gradientFor(hue, group), ...style }}
       aria-label={name}
     >
-      <span>{initials}</span>
+      {src
+        ? <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit", display: "block" }} />
+        : <span>{initials}</span>}
       {online && <span className="presence-dot" title="online" />}
     </div>
   );

@@ -30,7 +30,7 @@ import {
   hashNewPassword, issueTokens,
   invalidateAdminCache, isAdmin, isSuspended,
   listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
-  rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, verifyToken,
+  rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, updateProfile, verifyToken,
 } from "./auth.js";
 import {
   maybeLogSessionStart, recordAbuseReport, recordErrorReport, recordFeedback,
@@ -330,7 +330,26 @@ app.get("/api/me", authed, async (req, res) => {
       // Settings. The server still enforces admin-ness on every
       // /api/admin/* request — this is cosmetic only.
       isAdmin: !!u.is_admin,
+      avatar: u.avatar ?? null,
+      statusText: u.status_text ?? null,
+      statusUntil: u.status_until ?? null,
     });
+  } catch (e) { handleError(res, e); }
+});
+
+app.patch("/api/me/profile", authed, async (req, res) => {
+  try {
+    const body = z.object({
+      displayName: z.string().min(1).max(80).optional(),
+      // Base64 data URI of a small client-resized image, or null to clear.
+      // Capped so a huge image can't be stuffed into the directory row.
+      avatar: z.string().max(400_000).nullable().optional(),
+      statusText: z.string().max(120).nullable().optional(),
+      statusUntil: z.number().int().positive().nullable().optional(),
+    }).parse(req.body);
+    await updateProfile((req as AuthedReq).userId, body);
+    const u = await getUserById((req as AuthedReq).userId);
+    res.json(u ? toPublic(u, livePresence) : { ok: true });
   } catch (e) { handleError(res, e); }
 });
 

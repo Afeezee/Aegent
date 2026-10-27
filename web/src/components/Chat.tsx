@@ -224,6 +224,7 @@ export function Chat({
           name={thread.title}
           group={thread.isGroup}
           online={peerMeta.contact?.online}
+          src={peerMeta.contact?.avatar}
         />
         <div
           style={{ minWidth: 0, flex: 1, cursor: thread.isGroup && onOpenGroupInfo ? "pointer" : "default" }}
@@ -232,6 +233,12 @@ export function Chat({
           <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {thread.title}
           </div>
+          {/* Peer status takes the subtitle slot when present. */}
+          {!thread.isGroup && peerMeta.contact?.statusText && (
+            <div className="small" style={{ color: "var(--accent-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {peerMeta.contact.statusText}
+            </div>
+          )}
           <div className="small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span>{subtitle}</span>
             {agentOn && (
