@@ -18,11 +18,13 @@ COPY web/package.json ./web/
 RUN npm ci
 
 # Full source, then build + prune to a production-only tree.
-# NODE_OPTIONS caps the heap so Vite's bundle step (transformers.js
-# + Office-doc parsers push the working set past 500 MB otherwise)
-# doesn't OOM on Render free's 512 MB build container. Garbage
-# collects earlier instead of asking the OS for more.
-ENV NODE_OPTIONS="--max-old-space-size=460"
+# NODE_OPTIONS sets Vite's heap ceiling. This project's bundle step
+# (transformers.js + pdfjs + xlsx + Office parsers) needs well over
+# 1 GB to render chunks, so the old 460 MB cap — set back when we
+# built on a 512 MB container — now STARVES the build and it dies
+# with "JavaScript heap out of memory". 2 GB is comfortable on a
+# host with a few GB of RAM (add swap if the host is tight).
+ENV NODE_OPTIONS="--max-old-space-size=2048"
 COPY . .
 RUN npm run build \
  && npm prune --omit=dev --workspaces --include-workspace-root
