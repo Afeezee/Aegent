@@ -2,7 +2,7 @@
 
 A private messenger where every conversation is genuinely end-to-end encrypted — with a long-form **Diary** your contacts see for a day and you keep forever, real **groups** with admin control, an always-there history that follows you to any device, and an on-device AI agent that searches and acts on your own messages, always with your confirmation and never without your consent.
 
-**Live at:** [aegent.onrender.com](https://aegent.onrender.com)
+**Live at:** [aegent.onrender.com](https://aegent.cereustechnologies.com)
 **Repo:** [Afeezee/Aegent](https://github.com/Afeezee/Aegent)
 **Android APK:** built from [`build-apk.yml`](.github/workflows/build-apk.yml) on every push to main.
 
