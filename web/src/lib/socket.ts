@@ -15,12 +15,14 @@ let sock: Socket | null = null;
 type EnvelopeCb = (env: Envelope) => void;
 type TypingCb = (info: { from: string; groupId?: string }) => void;
 type ReadCb = (info: { id: string; at: number; by: string }) => void;
+type DeliveredCb = (info: { id: string; at: number }) => void;
 type PresenceCb = (info: { userId: string; online: boolean; at: number }) => void;
 type ConnectedCb = () => void;
 
 const onMessageCbs = new Set<EnvelopeCb>();
 const onTypingCbs = new Set<TypingCb>();
 const onReadCbs = new Set<ReadCb>();
+const onDeliveredCbs = new Set<DeliveredCb>();
 const onPresenceCbs = new Set<PresenceCb>();
 // Fires on every successful (re)connect. Subscribers use this to
 // re-drain the inbox — any messages the server queued while the
@@ -37,6 +39,7 @@ function wireListeners(s: Socket) {
   s.on("message",  (env: Envelope) => fanout(onMessageCbs, env));
   s.on("typing",   (info: Parameters<TypingCb>[0]) => fanout(onTypingCbs, info));
   s.on("read",     (info: Parameters<ReadCb>[0]) => fanout(onReadCbs, info));
+  s.on("delivered",(info: Parameters<DeliveredCb>[0]) => fanout(onDeliveredCbs, info));
   s.on("presence", (info: Parameters<PresenceCb>[0]) => fanout(onPresenceCbs, info));
   s.on("connect_error", (e) => console.warn("[socket] connect_error:", e.message));
   s.on("disconnect", (reason) => console.log("[socket] disconnected:", reason));
@@ -84,6 +87,9 @@ export function onTyping(cb: TypingCb): () => void {
 export function onRead(cb: ReadCb): () => void {
   onReadCbs.add(cb); return () => { onReadCbs.delete(cb); };
 }
+export function onDelivered(cb: DeliveredCb): () => void {
+  onDeliveredCbs.add(cb); return () => { onDeliveredCbs.delete(cb); };
+}
 export function onPresence(cb: PresenceCb): () => void {
   onPresenceCbs.add(cb); return () => { onPresenceCbs.delete(cb); };
 }
@@ -96,10 +102,15 @@ export function sendCipher(
   ciphertext: string,
   groupId?: string,
   sentAt?: number,
+  msgId?: string,
 ): Promise<{ ok: true; envelope: Envelope } | { ok: false; error: string }> {
   return new Promise((resolve) => {
     if (!sock) return resolve({ ok: false, error: "not_connected" });
-    sock.emit("send", { recipientId, ciphertext, groupId, sentAt }, resolve);
+    // msgId is the client-generated id (opaque, non-sensitive — same
+    // one already stored as metadata). Passing it lets the server
+    // correlate delivery/read receipts back to the sender's own copy,
+    // which is keyed by msgId, not by the server's envelope id.
+    sock.emit("send", { recipientId, ciphertext, groupId, sentAt, msgId }, resolve);
   });
 }
 

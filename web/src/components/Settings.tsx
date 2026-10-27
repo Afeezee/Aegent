@@ -520,23 +520,19 @@ function replayTour(): void {
 
 // Default-on: a stored "0" means the user explicitly turned it off.
 // Anything else (unset, "1") = on.
+// Transcription is now fully on-demand (tap "Transcribe" on any voice
+// note). There's no auto-on-send toggle anymore — it added a surprising
+// wait before every voice note. This section just explains the current
+// behaviour.
 function VoiceTranscribeToggle() {
-  const [on, setOn] = useState<boolean>(() => localStorage.getItem("aegent.transcribeVoice") !== "0");
-  function set(v: boolean) {
-    setOn(v);
-    try {
-      if (v) localStorage.removeItem("aegent.transcribeVoice");
-      else localStorage.setItem("aegent.transcribeVoice", "0");
-    } catch { /* ignore */ }
-    toast(v ? "Voice notes will transcribe on this device" : "Transcription disabled", "ok");
-  }
   return (
-    <Toggle
-      label="Transcribe voice notes on this device"
-      hint="On by default. Runs Whisper locally in this WebView — your audio never leaves the phone. First use downloads a ~40 MB model to your browser cache."
-      checked={on}
-      onChange={set}
-    />
+    <div className="glass" style={{ padding: 12, borderRadius: 12, fontSize: 13, color: "var(--text-dim)" }}>
+      Voice notes send instantly. To read one as text, tap
+      <strong style={{ color: "var(--text)" }}> Transcribe </strong>
+      on the voice note — it runs Whisper locally in this app, so your
+      audio never leaves the device. The first transcription downloads a
+      ~40&nbsp;MB model to your browser cache; after that it's quick.
+    </div>
   );
 }
 

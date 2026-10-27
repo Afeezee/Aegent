@@ -253,12 +253,27 @@ function VoiceCell({
         }
         throw impErr;
       }
+      // Monotonic progress: the model downloads several files, each
+      // reporting its own 0→100%, so the raw number bounces around.
+      // We clamp to the max seen so the bar only ever moves forward,
+      // and switch the label to "Transcribing audio…" once the model
+      // is ready (download done) so the final inference step doesn't
+      // look stalled at 100%.
+      let maxPct = 0;
+      let modelReady = false;
       const { text } = await transcribeAudio(pt, {
         onProgress: (p) => {
+          if (p.status === "ready" || p.status === "done") {
+            modelReady = true;
+            toastUpdate(tId, { text: "Transcribing audio…", progress: 1 });
+            return;
+          }
           if (p.status === "progress" && typeof p.progress === "number" && p.progress > 0) {
             const pct = Math.min(100, Math.round(p.progress));
+            if (pct <= maxPct) return;  // never go backwards
+            maxPct = pct;
             toastUpdate(tId, {
-              text: `Loading model · ${pct}%`,
+              text: modelReady ? "Transcribing audio…" : `Loading model · ${pct}%`,
               progress: pct / 100,
             });
           }

@@ -101,7 +101,7 @@ export type Payload =
       _at?: number;
       _from?: string;
     }
-  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; _thread?: string; _at?: number; _from?: string }
+  | { v: 1; t: "reaction"; msgId: string; targetId: string; emoji: string; op?: "add" | "remove"; _thread?: string; _at?: number; _from?: string }
   | { v: 1; t: "edit";     msgId: string; targetId: string; body: string; _thread?: string; _at?: number; _from?: string }
   | { v: 1; t: "delete";   msgId: string; targetId: string; _thread?: string; _at?: number; _from?: string };
 

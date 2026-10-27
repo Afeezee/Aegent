@@ -244,12 +244,18 @@ export function MessageBubble(p: BubbleProps) {
             {msg.editedBody && !deleted && <span>edited</span>}
             <span>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
             {isMine && !deleted && (
-              <span title={msg.readAt ? "Read" : msg.deliveredAt ? "Delivered" : "Sent"} style={{ display: "inline-flex" }}>
+              <span title={msg.readAt ? "Read" : msg.deliveredAt ? "Delivered" : "Sent"}
+                style={{ display: "inline-flex", alignItems: "center" }}>
                 {msg.readAt
-                  ? <span style={{ color: "#0e5a3a" }}><Icon.checkDouble /></span>
+                  // Read: bright aqua double-check, clearly distinct from the
+                  // muted grey of "delivered". Reads well on the violet
+                  // sent-bubble in both themes.
+                  ? <span style={{ color: "#17c3e6", filter: "drop-shadow(0 0 1px rgba(23,195,230,0.4))" }}><Icon.checkDouble /></span>
                   : msg.deliveredAt
-                    ? <Icon.checkDouble />
-                    : <Icon.check />}
+                    // Delivered: double-check at normal opacity.
+                    ? <span style={{ opacity: 0.85 }}><Icon.checkDouble /></span>
+                    // Sent (reached server, not yet delivered): single check, dimmed.
+                    : <span style={{ opacity: 0.55 }}><Icon.check /></span>}
               </span>
             )}
           </div>

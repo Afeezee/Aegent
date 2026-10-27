@@ -870,11 +870,29 @@ app.post("/api/ack", authed, async (req, res) => {
   try {
     const ids = z.array(z.string()).parse(req.body?.ids ?? []);
     if (ids.length === 0) return res.json({ ok: true });
+    const uid = (req as AuthedReq).userId;
     const now = Date.now();
     const stmt = db.prepare("UPDATE messages SET delivered_at = ? WHERE id = ? AND recipient_id = ?");
+    // Collect (sender_id, msg_id) for each acked envelope so we can tell
+    // the SENDER their message was delivered — keyed by the sender's own
+    // msg_id, which is what their local copy is stored under. Skip
+    // self-acks (a self-echo's sender IS the recipient) so a device
+    // doesn't flash "delivered" at itself.
+    const notify: Array<{ senderId: string; msgId: string }> = [];
     await db.tx(async () => {
-      for (const id of ids) await stmt.run(now, id, (req as AuthedReq).userId);
+      for (const id of ids) {
+        await stmt.run(now, id, uid);
+        const row = await db.prepare(
+          "SELECT sender_id, msg_id FROM messages WHERE id = ? AND recipient_id = ?",
+        ).get<{ sender_id: string; msg_id: string | null }>(id, uid);
+        if (row?.msg_id && row.sender_id !== uid) {
+          notify.push({ senderId: row.sender_id, msgId: row.msg_id });
+        }
+      }
     });
+    for (const n of notify) {
+      io.to(`u:${n.senderId}`).emit("delivered", { id: n.msgId, at: now });
+    }
     res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });
@@ -886,13 +904,25 @@ app.post("/api/read", authed, async (req, res) => {
     const me = await getUserById(uid);
     if (!me?.read_receipts) return res.json({ ok: true, sent: 0 });
     const now = Date.now();
-    const stmt = db.prepare("UPDATE messages SET read_at = ? WHERE id = ? AND recipient_id = ?");
+    // `body.ids` are the receiver's LOCAL message ids (= msg_id). Match
+    // on the msg_id column scoped to this recipient so we hit the right
+    // envelope, then tell the SENDER — keyed by the same msg_id, which
+    // is what their local copy is stored under. (The old code matched
+    // on the server's envelope id, which the client never has, so read
+    // receipts silently never fired.)
+    const stmt = db.prepare("UPDATE messages SET read_at = ? WHERE msg_id = ? AND recipient_id = ?");
+    const notify: Array<{ senderId: string; msgId: string }> = [];
     await db.tx(async () => {
-      for (const id of body.ids) await stmt.run(now, id, uid);
+      for (const msgId of body.ids) {
+        await stmt.run(now, msgId, uid);
+        const row = await db.prepare(
+          "SELECT sender_id FROM messages WHERE msg_id = ? AND recipient_id = ?",
+        ).get<{ sender_id: string }>(msgId, uid);
+        if (row && row.sender_id !== uid) notify.push({ senderId: row.sender_id, msgId });
+      }
     });
-    for (const id of body.ids) {
-      const row = await db.prepare("SELECT sender_id FROM messages WHERE id = ?").get<{ sender_id: string }>(id);
-      if (row) io.to(`u:${row.sender_id}`).emit("read", { id, at: now, by: uid });
+    for (const n of notify) {
+      io.to(`u:${n.senderId}`).emit("read", { id: n.msgId, at: now, by: uid });
     }
     res.json({ ok: true, sent: body.ids.length });
   } catch (e) { handleError(res, e); }
@@ -1156,6 +1186,11 @@ io.on("connection", (socket) => {
         recipientId: z.string(),
         ciphertext: z.string().min(1),
         groupId: z.string().optional(),
+        // Client-generated message id (opaque, non-sensitive). Stored
+        // so delivery/read receipts can be correlated back to the
+        // sender's own copy, which is keyed by this id rather than by
+        // the server's per-recipient envelope id.
+        msgId: z.string().max(80).optional(),
         // The moment the sender actually composed this. Live sends pass
         // "now"; a device-backfill re-uploading an old message passes its
         // ORIGINAL time. Honouring it is what stops backfilled history
@@ -1191,9 +1226,9 @@ io.on("connection", (socket) => {
         read_at: null,
       };
       await db.prepare(
-        `INSERT INTO messages (id, sender_id, recipient_id, group_id, ciphertext, created_at, delivered_at, read_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
-      ).run(row.id, row.sender_id, row.recipient_id, row.group_id, row.ciphertext, row.created_at);
+        `INSERT INTO messages (id, sender_id, recipient_id, group_id, ciphertext, created_at, delivered_at, read_at, msg_id)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ).run(row.id, row.sender_id, row.recipient_id, row.group_id, row.ciphertext, row.created_at, body.msgId ?? null);
 
       const envelope = envelopeOf(row);
       io.to(`u:${body.recipientId}`).emit("message", envelope);

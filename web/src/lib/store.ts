@@ -580,16 +580,47 @@ export async function updateMessageMedia(
 }
 
 // Reactions arrive as tiny E2E messages; we merge them into the target.
-export async function applyReaction(targetId: string, userId: string, emoji: string) {
+// Toggle a reaction (user tapped it): flips the user's presence in the
+// emoji's set and returns which way it went, so the caller can send an
+// explicit op to peers. Returns null if the target is gone.
+export async function toggleReaction(targetId: string, userId: string, emoji: string): Promise<"add" | "remove" | null> {
   const target = await requireDb().messages.get(targetId);
-  if (!target) return;
+  if (!target) return null;
   const map = target.reactions || {};
   const users = new Set(map[emoji] ?? []);
-  if (users.has(userId)) users.delete(userId); else users.add(userId);
+  const op: "add" | "remove" = users.has(userId) ? "remove" : "add";
+  if (op === "remove") users.delete(userId); else users.add(userId);
   const next: Record<string, string[]> = { ...map };
   if (users.size === 0) delete next[emoji];
   else next[emoji] = Array.from(users);
   await requireDb().messages.update(targetId, { reactions: next });
+  return op;
+}
+
+// Idempotent apply of an explicit op (used when INGESTING a reaction
+// from a peer or a self-echo). Setting a state that's already set is a
+// no-op — this is what stops a self-echo of our own reaction from
+// toggling it back off, the bug where a reaction flashed then vanished
+// on the sender's side while persisting on the receiver's.
+export async function setReaction(
+  targetId: string, userId: string, emoji: string, op: "add" | "remove",
+) {
+  const target = await requireDb().messages.get(targetId);
+  if (!target) return;
+  const map = target.reactions || {};
+  const users = new Set(map[emoji] ?? []);
+  if (op === "add") users.add(userId); else users.delete(userId);
+  const next: Record<string, string[]> = { ...map };
+  if (users.size === 0) delete next[emoji];
+  else next[emoji] = Array.from(users);
+  await requireDb().messages.update(targetId, { reactions: next });
+}
+
+// Back-compat alias: the old toggle name, still used by any caller that
+// genuinely wants toggle semantics. New code should prefer
+// toggleReaction (returns the op) + setReaction (idempotent apply).
+export async function applyReaction(targetId: string, userId: string, emoji: string) {
+  await toggleReaction(targetId, userId, emoji);
 }
 
 export async function applyEdit(targetId: string, newBody: string) {

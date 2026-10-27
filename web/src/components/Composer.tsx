@@ -173,51 +173,15 @@ export function Composer({
     setSending(true);
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
-
-      // Best-effort on-device transcription — now default-on. The
-      // first voice note triggers a ~40 MB Whisper model download
-      // that stays cached forever after. Users who don't want it can
-      // flip the toggle in Settings → Voice notes to "Disable".
-      // Never blocks the send: on error we still upload the audio,
-      // just without the transcript sidecar.
-      let transcript: string | undefined;
-      const wantsTranscript = localStorage.getItem("aegent.transcribeVoice") !== "0";
-      if (wantsTranscript) {
-        // One sticky toast, updated in place — same pattern as the
-        // attachment-upload progress above. Previously we called
-        // toast() on every progress tick, which spawned a dozen
-        // duplicate "Loading transcription model…" toasts as each
-        // model file's download hit the sample point.
-        const transcribeToastId = toast("Transcribing…", "info", { sticky: true });
-        try {
-          const { transcribeAudio } = await loadTranscribeModule();
-          const { text } = await transcribeAudio(bytes, {
-            onProgress: (p) => {
-              if (p.status === "progress" && typeof p.progress === "number" && p.progress > 0) {
-                const pct = Math.min(100, Math.round(p.progress));
-                toastUpdate(transcribeToastId, {
-                  text: `Loading transcription model · ${pct}%`,
-                  progress: pct / 100,
-                });
-              } else if (p.status && p.status !== "progress") {
-                toastUpdate(transcribeToastId, { text: `Transcribing · ${p.status}` });
-              }
-            },
-          });
-          if (text) transcript = text;
-          toastDismiss(transcribeToastId);
-        } catch (e) {
-          toastUpdate(transcribeToastId, {
-            text: `Transcription skipped: ${(e as Error).message}`,
-            kind: "warn", sticky: false, progress: undefined,
-          });
-        }
-      }
-
+      // Voice notes now send INSTANTLY — no transcription on the send
+      // path at all. Testers found the automatic on-send transcription
+      // added a long, surprising wait. Transcription is on-demand only:
+      // either side taps "Transcribe" on the voice note bubble when
+      // they actually want it (MediaView handles that, with the model
+      // cached after the first use).
       const ref = await uploadMedia({
         bytes, mime: blob.type, kind: "voice", durationMs, filename: "voice.webm",
       });
-      if (transcript) (ref as { transcript?: string }).transcript = transcript;
       const res = await sendMedia(peerId, isGroup, ref, undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Voice send failed: ${res.error}`, "error");
       else { onClearReply(); onSent(); }
@@ -315,7 +279,16 @@ export function Composer({
             rows={1}
             value={text}
             onChange={(e) => { setText(e.target.value); emitTyping(isGroup ? { groupId: peerId } : { recipientId: peerId }); }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitText(); } }}
+            onKeyDown={(e) => {
+              // Desktop: Enter sends, Shift+Enter is a newline.
+              // Touch devices have no Shift key, so Enter must insert a
+              // newline there — sending is done with the Send button.
+              // This is what lets people type paragraphs on mobile.
+              if (e.key === "Enter" && !e.shiftKey && !isTouchDevice()) {
+                e.preventDefault();
+                submitText();
+              }
+            }}
             placeholder={editing ? "Edit your message" : "Write a message"}
             style={{ flex: 1 }}
           />
@@ -328,28 +301,6 @@ export function Composer({
   );
 }
 
-// Dynamic-import loader with a one-shot retry. If the first attempt
-// fails with "Failed to fetch dynamically imported module" (which
-// happens after a deploy if the device has a stale index.html
-// pointing at a chunk hash that no longer exists), we refresh the
-// SPA assets by appending a cache-bust and reloading on persistent
-// failure. The caller gets a clear error either way.
-async function loadTranscribeModule(): Promise<typeof import("../lib/transcribe.js")> {
-  try {
-    return await import("../lib/transcribe.js");
-  } catch (e) {
-    const msg = (e as Error)?.message ?? String(e);
-    if (/Failed to fetch dynamically imported module|ChunkLoadError/i.test(msg)) {
-      // The app on this device is out of date vs. the server. Offer
-      // a reload — fixes it 100% of the time at the cost of a bounce.
-      if (confirm("Aegent was updated on the server. Reload now to pick up the new version?")) {
-        location.reload();
-      }
-      throw new Error("Transcription unavailable — app needs reload");
-    }
-    throw e;
-  }
-}
 
 function AttachOption({
   children, label, title, onClick,
@@ -368,6 +319,17 @@ function AttachOption({
       <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{label}</span>
     </button>
   );
+}
+
+// Touch heuristic for the Enter-key behaviour. Coarse pointer (no
+// hover) is a reliable "this is a phone/tablet" signal; we also treat
+// the presence of touch points as touch. Desktop with a touchscreen
+// still reports a fine pointer, so Enter-to-send stays there.
+function isTouchDevice(): boolean {
+  try {
+    if (window.matchMedia?.("(pointer: coarse)").matches) return true;
+    return navigator.maxTouchPoints > 0 && !window.matchMedia?.("(pointer: fine)").matches;
+  } catch { return false; }
 }
 
 function pickAudioMime(): string {

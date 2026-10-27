@@ -21,13 +21,13 @@ import {
   bumpInboxCursor,
   currentSession, ensureContact, ensureGroup, flushOutbox, ingestEnvelope, pullInbox,
 } from "../lib/session.js";
-import { onConnected, onMessage, onPresence, onRead } from "../lib/socket.js";
+import { onConnected, onDelivered, onMessage, onPresence, onRead } from "../lib/socket.js";
 import { onReplication, replicationSummary, type ReplicationState } from "../lib/replication.js";
 import { onChatDeepLink } from "../lib/deeplinks.js";
 import { WelcomeTour, consumeTourPending } from "../components/WelcomeTour.js";
 import { diaryNow } from "../lib/diary.js";
 import {
-  getContact, listGroups, listThreads, liveDiaryEntries, markRead, setContactPresence,
+  getContact, listGroups, listThreads, liveDiaryEntries, markDelivered, markRead, setContactPresence,
   takeDueScheduledBackups,
   upsertContact, upsertGroup, type OpenedMessage, type Thread,
 } from "../lib/store.js";
@@ -214,6 +214,12 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // Sender's copy: mark read when the peer reports it.
   useEffect(() => {
     return onRead(({ id, at }) => { markRead(id, at).then(() => setRefresh((k) => k + 1)); });
+  }, []);
+  // Sender's copy: mark delivered when the peer's device acks it. This
+  // is what flips the single check to a double check on the sender's
+  // bubble — previously nothing ever set deliveredAt sender-side.
+  useEffect(() => {
+    return onDelivered(({ id, at }) => { markDelivered(id, at).then(() => setRefresh((k) => k + 1)); });
   }, []);
 
   // Request notification permission once, quietly.

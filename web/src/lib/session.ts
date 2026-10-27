@@ -44,7 +44,7 @@ import {
   type Envelope, type InboxStats, type MeApi, type PublicUser,
 } from "./api.js";
 import {
-  applyDelete, applyEdit, applyReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
+  applyDelete, applyEdit, applyReaction, setReaction, toggleReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
   markRead, openStore, outboxCount, rekeyLocalStore, repairAgentTurns, repairSentTimes, repairTimestamps,
@@ -1016,7 +1016,8 @@ async function fanOut(
     }
     const cipher = encryptForPeer(packed, peerPubKey, CURRENT.privateKey);
     const sentAt = (withThread as { _at?: number })._at;
-    const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined, sentAt);
+    const outMsgId = (withThread as { msgId?: string }).msgId;
+    const res = await sendCipher(rid, cipher, isGroup ? targetPeerId : undefined, sentAt, outMsgId);
     if (!res.ok) {
       // Abandoning here leaves earlier recipients holding a message that
       // later ones never get, and the retry re-sends to everyone. Carry
@@ -1143,8 +1144,15 @@ export async function sendMedia(
 export async function sendReaction(
   targetPeerId: string, isGroup: boolean, targetMsgId: string, emoji: string,
 ) {
-  const payload: Payload = { v: 1, t: "reaction", msgId: newMsgId(), targetId: targetMsgId, emoji };
-  await applyReaction(targetMsgId, CURRENT!.user.id, emoji);
+  // Toggle locally first and capture which way it went, then tell
+  // peers the explicit op. Peers (and our own self-echo / other
+  // devices) apply it idempotently, so the self-echo can't flip our
+  // own reaction back off.
+  const op = await toggleReaction(targetMsgId, CURRENT!.user.id, emoji);
+  const payload: Payload = {
+    v: 1, t: "reaction", msgId: newMsgId(), targetId: targetMsgId, emoji,
+    op: op ?? "add",
+  };
   await deliverOrQueue(targetPeerId, isGroup, payload);
 }
 
@@ -1278,7 +1286,15 @@ export async function ingestEnvelope(envIn: {
       replyTo: payload.replyTo ?? null,
     });
   } else if (payload.t === "reaction") {
-    await applyReaction(payload.targetId, env.senderId, payload.emoji);
+    // Idempotent apply from the op. Old clients that didn't send an op
+    // fall back to toggle — but a self-echo from THIS client always
+    // carries an op now, so the vanishing-reaction bug is fixed going
+    // forward.
+    if (payload.op === "add" || payload.op === "remove") {
+      await setReaction(payload.targetId, env.senderId, payload.emoji, payload.op);
+    } else {
+      await applyReaction(payload.targetId, env.senderId, payload.emoji);
+    }
   } else if (payload.t === "edit") {
     await applyEdit(payload.targetId, payload.body);
   } else if (payload.t === "delete") {
