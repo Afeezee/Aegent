@@ -9,7 +9,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
-import { clearTranslation, getTranslation, markMessageViewed, saveTranslation } from "../lib/store.js";
+import { burnViewOnce, clearTranslation, getTranslation, saveTranslation } from "../lib/store.js";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Avatar, Icon } from "./ui.js";
@@ -151,17 +151,17 @@ export function MessageBubble(p: BubbleProps) {
 
   const body = msg.editedBody ?? msg.body;
   const deleted = !!msg.deletedAt;
-  // View-once reveal state. Clicking the placeholder flips `revealed`
-  // on and persists `viewedAt` so later renders show "Viewed". We
-  // don't gate the sender — they already know what they sent — but
-  // we show them a small badge so they can tell at a glance.
+  // View-once: the artifact is covered for BOTH sides. The sender sees
+  // only a "sent" placeholder after it leaves — they can't reopen what
+  // they sent. The receiver gets one tap to view; revealing burns the
+  // content key so it can never be decrypted on this device again, and
+  // viewedAt locks every later render to "Viewed".
   const isViewOnce = !!msg.media?.viewOnce && !deleted;
-  const alreadyViewed = !!msg.viewedAt;
   const [revealed, setRevealed] = useState(false);
   async function revealViewOnce() {
-    if (isMine) return; // sender always sees their own
+    if (isMine) return; // the sender never reopens their own view-once
     setRevealed(true);
-    try { await markMessageViewed(msg.id); } catch { /* non-fatal */ }
+    try { await burnViewOnce(msg.id); } catch { /* non-fatal */ }
   }
   // Single-emoji text? Render it as a sticker (no bubble, big glyph).
   const stickerText = !msg.media && !deleted && body && isSingleEmojiMessage(body) ? body : null;
@@ -549,15 +549,14 @@ export function MessageBubble(p: BubbleProps) {
   );
 }
 
-// Placeholder for a view-once attachment. Three states:
-//   - sender: shows a "View once" badge and the content itself, so they
-//     have context without the "revealed" moment ever burning. (They
-//     already know what they sent.)
-//   - receiver, unrevealed: "Tap to view once" button.
-//   - receiver, revealed OR already-viewed persisted on disk: content
-//     (or "Viewed" placeholder if the per-message `viewedAt` was set in
-//     a prior session and the user navigated away — tapping again
-//     would re-reveal, which defeats the point).
+// A view-once attachment. The artifact is covered for both sides:
+//   - sender: a "sent" placeholder, always. They can't reopen what they
+//     sent — the whole point of view-once.
+//   - receiver, unrevealed: "Tap to view once".
+//   - receiver, already viewed (persisted): "Viewed", permanently —
+//     revealing burned the content key, so there's nothing left to open.
+//   - receiver, revealing now: the content, once, with casual-capture
+//     hardening (no long-press-save, drag, context menu or selection).
 function ViewOncePane({
   media, caption, isMine, messageId, revealed, viewedAt, onReveal,
 }: {
@@ -569,8 +568,29 @@ function ViewOncePane({
   viewedAt: number | null;
   onReveal: () => void;
 }) {
-  // Already-viewed sticks across reloads: the placeholder wins.
-  if (!isMine && viewedAt && !revealed) {
+  const kindLabel = media.kind === "image" ? "photo or text card"
+    : media.kind === "voice" ? "voice note"
+    : media.kind === "audio" ? "audio" : String(media.kind);
+
+  // Sender: covered after sending, no reopen.
+  if (isMine) {
+    return (
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 4, alignItems: "center",
+        padding: "20px 22px", borderRadius: 12, minWidth: 180,
+        background: "rgba(16,19,42,0.10)", border: "1px dashed rgba(16,19,42,0.25)",
+        color: "rgba(16,19,42,0.7)", fontSize: 13, textAlign: "center",
+      }}>
+        <span style={{ fontSize: 20 }}>👁️</span>
+        <span>View-once {kindLabel} sent</span>
+        <span style={{ fontSize: 11, opacity: 0.8 }}>You can't reopen it</span>
+      </div>
+    );
+  }
+
+  // Receiver, already viewed — stays locked across reloads; the key is
+  // gone, so there is nothing to reveal.
+  if (viewedAt && !revealed) {
     return (
       <div style={{
         display: "flex", flexDirection: "column", gap: 6, alignItems: "center",
@@ -584,7 +604,8 @@ function ViewOncePane({
     );
   }
 
-  if (!isMine && !revealed) {
+  // Receiver, not yet revealed.
+  if (!revealed) {
     return (
       <button
         type="button"
@@ -601,17 +622,25 @@ function ViewOncePane({
         <span style={{ fontSize: 28 }}>👁️</span>
         <strong>Tap to view once</strong>
         <span className="small" style={{ color: "var(--text-dim)" }}>
-          {media.kind === "image" ? "Photo or text card" : media.kind === "voice" ? "Voice note" : media.kind === "audio" ? "Audio" : media.kind}
-          {" • disappears after you open it"}
+          {kindLabel}{" • you can only open it once"}
         </span>
       </button>
     );
   }
 
-  // Sender's own copy OR a receiver who just revealed → show content
-  // with a persistent "View once" tag so the intent is still legible.
+  // Receiver revealing now → the content, with casual-capture hardening.
+  // This stops long-press-save, drag-to-save, right-click-save and
+  // selection; it cannot stop an OS screenshot (no web/WebView API can —
+  // a native FLAG_SECURE build is the only real block).
   return (
-    <div style={{ position: "relative" }}>
+    <div
+      style={{
+        position: "relative", userSelect: "none", WebkitUserSelect: "none",
+        WebkitTouchCallout: "none",
+      } as React.CSSProperties}
+      onContextMenu={(e) => e.preventDefault()}
+      onDragStart={(e) => e.preventDefault()}
+    >
       <div style={{
         position: "absolute", top: 8, left: 8, zIndex: 2,
         padding: "2px 8px", borderRadius: 999, fontSize: 11,
@@ -620,7 +649,7 @@ function ViewOncePane({
       }}>
         <span>👁️</span> View once
       </div>
-      <MediaView media={media} caption={caption} isMine={isMine} messageId={messageId} />
+      <MediaView media={media} caption={caption} isMine={isMine} messageId={messageId} protect />
     </div>
   );
 }

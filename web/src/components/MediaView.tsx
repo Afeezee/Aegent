@@ -19,8 +19,8 @@ import { sendTranscriptEdit } from "../lib/session.js";
 // never delivers it to the component, so any read from it would
 // throw "Cannot read properties of undefined (reading 'blobId')".
 export function MediaView({
-  media, caption, isMine, messageId,
-}: { media: MediaRef; caption?: string; isMine?: boolean; messageId?: string }) {
+  media, caption, isMine, messageId, protect,
+}: { media: MediaRef; caption?: string; isMine?: boolean; messageId?: string; protect?: boolean }) {
   const [url, setUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -34,6 +34,16 @@ export function MediaView({
   if (!url) return <MediaSkeleton kind={media.kind} />;
 
   if (media.kind === "image") {
+    // `protect` (view-once): render inline, NO lightbox — the lightbox
+    // would let the viewer re-open, zoom and save the image, which
+    // defeats view-once. Drag/right-click save is blocked too.
+    if (protect) {
+      return (
+        <img src={url} alt={caption ?? ""} draggable={false}
+          onContextMenu={(e) => e.preventDefault()}
+          style={{ maxWidth: "100%", maxHeight: 360, display: "block", borderRadius: 12, pointerEvents: "none" }} />
+      );
+    }
     return <ImageWithLightbox url={url} alt={caption ?? ""} />;
   }
   if (media.kind === "video") {

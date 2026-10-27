@@ -789,6 +789,25 @@ export async function markMessageViewed(id: string, at = Date.now()) {
   await requireDb().messages.update(id, { viewedAt: at });
 }
 
+// Make a view-once attachment permanently unopenable on this device.
+//
+// Strips the content key so the ciphertext (still on the relay) can
+// never be decrypted again here, and stamps viewedAt so every later
+// render shows the "Viewed" placeholder. The object URL already
+// decrypted for the current reveal is left in place (objectUrlFor
+// caches by blob id), so the viewing in progress finishes normally
+// while every future open is locked — on this device. A reinstall that
+// restores the message from backup is the known residual, called out in
+// the UI copy.
+export async function burnViewOnce(id: string, at = Date.now()): Promise<void> {
+  const row = await requireDb().messages.get(id);
+  if (!row?.media) { await markMessageViewed(id, at); return; }
+  await requireDb().messages.update(id, {
+    media: { ...row.media, contentKey: "" },
+    viewedAt: row.viewedAt ?? at,
+  });
+}
+
 export async function markDelivered(id: string, at = Date.now()) {
   await requireDb().messages.update(id, { deliveredAt: at });
 }
