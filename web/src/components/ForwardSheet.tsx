@@ -5,7 +5,7 @@ import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { listContacts, listGroups, type OpenedMessage } from "../lib/store.js";
 import { sendText, sendMedia } from "../lib/session.js";
 
-type Target = { id: string; label: string; isGroup: boolean };
+type Target = { id: string; label: string; isGroup: boolean; avatar: string | null };
 
 export function ForwardSheet({
   open, onClose, message,
@@ -22,8 +22,8 @@ export function ForwardSheet({
       const cs = await listContacts();
       const gs = await listGroups();
       setTargets([
-        ...cs.map((c) => ({ id: c.id, label: c.displayName, isGroup: false })),
-        ...gs.map((g) => ({ id: g.id, label: g.name, isGroup: true })),
+        ...cs.map((c) => ({ id: c.id, label: c.displayName, isGroup: false, avatar: c.avatar ?? null })),
+        ...gs.map((g) => ({ id: g.id, label: g.name, isGroup: true, avatar: g.avatar ?? null })),
       ]);
     })();
   }, [open]);
@@ -98,7 +98,7 @@ export function ForwardSheet({
                 background: on ? "var(--accent)" : "transparent",
                 color: "#0f1226", display: "grid", placeItems: "center",
               }}>{on && <Icon.check />}</span>
-              <Avatar name={t.label} group={t.isGroup} size="sm" />
+              <Avatar name={t.label} group={t.isGroup} src={t.avatar} size="sm" />
               <div style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.label}</div>
             </button>
           );

@@ -32,6 +32,7 @@ import {
 type Page = {
   authorId: string;
   authorName: string;
+  avatar?: string | null;
   mine: boolean;
   entries: OpenedDiaryEntry[];
   unseen: number;
@@ -61,6 +62,7 @@ export function Diary({ refreshKey }: { refreshKey: number }) {
       out.push({
         authorId,
         authorName: authorId === me.id ? "Your diary" : contact?.displayName ?? "Someone",
+        avatar: authorId === me.id ? ((me as unknown as { avatar?: string | null }).avatar ?? null) : (contact?.avatar ?? null),
         mine: authorId === me.id,
         entries,
         unseen: entries.filter((e) => !e.seenAt && e.authorId !== me.id).length,
@@ -97,9 +99,14 @@ export function Diary({ refreshKey }: { refreshKey: number }) {
             <Reader
               page={reading}
               nextName={nextAfter(others, reading.authorId)?.authorName ?? null}
+              prevName={prevBefore(others, reading.authorId)?.authorName ?? null}
               onNext={() => {
                 const next = nextAfter(others, reading.authorId);
                 setOpenAuthor(next ? next.authorId : null);
+              }}
+              onPrev={() => {
+                const prev = prevBefore(others, reading.authorId);
+                if (prev) setOpenAuthor(prev.authorId);
               }}
               onBack={() => { setOpenAuthor(null); void load(); }}
               onDeleted={load}
@@ -166,6 +173,12 @@ function nextAfter(pages: Page[], authorId: string): Page | null {
   const i = pages.findIndex((p) => p.authorId === authorId);
   if (i < 0) return pages[0] ?? null;
   return pages[i + 1] ?? null;
+}
+
+function prevBefore(pages: Page[], authorId: string): Page | null {
+  const i = pages.findIndex((p) => p.authorId === authorId);
+  if (i <= 0) return null;
+  return pages[i - 1] ?? null;
 }
 
 // ---- the list ----
@@ -241,11 +254,13 @@ function PageRow({ page, onClick }: { page: Page; onClick: () => void }) {
 // ---- the reader ----
 
 function Reader({
-  page, nextName, onNext, onBack, onDeleted,
+  page, nextName, prevName, onNext, onPrev, onBack, onDeleted,
 }: {
   page: Page;
   nextName: string | null;
+  prevName: string | null;
   onNext: () => void;
+  onPrev: () => void;
   onBack: () => void;
   onDeleted: () => void;
 }) {
@@ -290,8 +305,10 @@ function Reader({
         display: "flex", alignItems: "center", gap: 10,
         padding: "12px 14px", borderBottom: "1px solid var(--line)",
       }}>
-        <Button variant="icon" onClick={onBack} aria-label="Back"><Icon.chevron /></Button>
-        <Avatar name={page.authorName} size="sm" />
+        <Button variant="icon" onClick={onBack} aria-label="Back to diary list">
+          <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}><Icon.chevron /></span>
+        </Button>
+        <Avatar name={page.authorName} src={page.avatar} size="sm" />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
             {page.authorName}
@@ -300,6 +317,17 @@ function Reader({
             {page.mine ? "Only you keep this" : "Visible to you for 24 hours"}
           </div>
         </div>
+        {/* Jump straight to the previous / next contact's page. */}
+        {prevName && (
+          <Button variant="icon" onClick={onPrev} aria-label={`Previous: ${prevName}`} title={`Previous: ${prevName}`}>
+            <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}><Icon.chevron /></span>
+          </Button>
+        )}
+        {nextName && (
+          <Button variant="icon" onClick={onNext} aria-label={`Next: ${nextName}`} title={`Next: ${nextName}`}>
+            <Icon.chevron />
+          </Button>
+        )}
       </header>
 
       <div ref={scroller} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 16px 28px" }}>
@@ -314,7 +342,8 @@ function Reader({
           </section>
         ))}
 
-        <div style={{ textAlign: "center", padding: "26px 0 8px" }}>
+        <div style={{ textAlign: "center", padding: "26px 0 8px", display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          {prevName && <Button variant="ghost" onClick={onPrev}>↑ Previous: {prevName}</Button>}
           {nextName ? (
             <Button onClick={onNext}>Next: {nextName} ↓</Button>
           ) : (
@@ -468,12 +497,25 @@ function PagePreview({ page }: { page: Page }) {
   const last = page.entries[page.entries.length - 1];
   const [url, setUrl] = useState<string | null>(null);
 
+  // Only still images make a visual thumbnail. Voice / audio / files
+  // have no picture, so loading their blob into an <img> showed a
+  // broken image — those fall back to the author's avatar + a kind
+  // badge instead.
+  const isImageLike = last?.media?.kind === "image" || last?.media?.kind === "video";
   useEffect(() => {
     let live = true;
-    if (!last?.media) { setUrl(null); return; }
-    objectUrlFor(last.media).then((u) => { if (live) setUrl(u); }).catch(() => { /* leave the icon */ });
+    if (!last?.media || !isImageLike) { setUrl(null); return; }
+    objectUrlFor(last.media).then((u) => { if (live) setUrl(u); }).catch(() => { /* leave the avatar */ });
     return () => { live = false; };
-  }, [last?.id, last?.media]);
+  }, [last?.id, last?.media, isImageLike]);
+
+  // Badge glyph by entry kind.
+  const badge = !last?.media ? "✎"
+    : last.media.kind === "voice" ? "🎙"
+    : last.media.kind === "audio" ? "♪"
+    : last.media.kind === "image" ? "▣"
+    : last.media.kind === "video" ? "▶"
+    : "📎";
 
   const ring = page.unseen > 0 || (page.mine && page.entries.length > 0);
   return (
@@ -486,7 +528,7 @@ function PagePreview({ page }: { page: Page }) {
         <img src={url} alt="" width={40} height={40}
           style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", display: "block" }} />
       ) : (
-        <Avatar name={page.authorName} size="md" />
+        <Avatar name={page.authorName} src={page.avatar} size="md" />
       )}
       <span aria-hidden style={{
         position: "absolute", right: -2, bottom: -2,
@@ -495,7 +537,7 @@ function PagePreview({ page }: { page: Page }) {
         background: "var(--ink-2)", border: "1px solid var(--line)",
         fontSize: 9, color: "var(--text-dim)",
       }}>
-        {last?.media ? "▣" : "✎"}
+        {badge}
       </span>
     </span>
   );

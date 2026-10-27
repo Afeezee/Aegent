@@ -15,7 +15,7 @@
 // llm.ts's TOOLS array with its JSON schema + description, and (if
 // helpful) teach the offline planner to route to it too.
 
-import { api } from "../lib/api.js";
+import { api, apiUrl, loadToken } from "../lib/api.js";
 import { b64, secretBoxOpenBytes } from "../lib/crypto.js";
 import { cosine, embed, tokenize } from "../lib/embeddings.js";
 import {
@@ -1335,6 +1335,43 @@ async function countPdfPages(bytes: Uint8Array): Promise<number | undefined> {
 export const describe_image = read_media;
 
 // ---- general-assistant tools ----
+
+// Web search — proxied through the server so API keys stay off the
+// device. The LLM calls this when the user asks something that needs
+// fresh info ("what happened today in X", "nearest restaurant",
+// current scores, prices, who is …). Returns a bounded list of
+// {title, url, snippet} items the model can quote and cite.
+export async function web_search(args: { query: string; limit?: number }): Promise<ToolResult> {
+  const query = (args.query ?? "").trim();
+  if (!query) return { ok: false, error: "empty_query" };
+  const limit = Math.max(1, Math.min(10, args.limit ?? 5));
+  try {
+    const r = await fetch(apiUrl("/api/agent/search"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(loadToken() ? { authorization: `Bearer ${loadToken()}` } : {}),
+      },
+      body: JSON.stringify({ query, limit }),
+    });
+    if (r.status === 503) {
+      return { ok: false, error: "search_disabled" };
+    }
+    if (!r.ok) {
+      return { ok: false, error: `search_${r.status}` };
+    }
+    const body = await r.json() as {
+      provider: string;
+      results: Array<{ title: string; url: string; snippet: string; source: string }>;
+    };
+    return { ok: true, kind: "data", value: {
+      provider: body.provider,
+      results: body.results,
+    } };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message || "search_failed" };
+  }
+}
 
 export async function calculate(args: { expression: string }): Promise<ToolResult> {
   // Very deliberately narrow: numbers, operators, parens, decimal points.

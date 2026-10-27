@@ -42,6 +42,7 @@ export type GroupRow = {
   createdAt: number;
   createdBy: string;
   lastSeenAt: number;
+  avatar?: string | null;
 };
 
 export type MediaRef = {
@@ -405,6 +406,7 @@ export type Thread = {
   memberIds?: string[];
   pinned?: boolean;
   archived?: boolean;
+  avatar?: string | null;
 };
 
 // ---- conversation management (pin / archive / delete) ----
@@ -486,6 +488,7 @@ export async function listThreads(): Promise<Thread[]> {
       updatedAt: last?.createdAt ?? c.lastSeenAt,
       unread: await unreadCount(c.id),
       online: c.online,
+      avatar: c.avatar ?? null,
     });
   }
   for (const g of groups) {
@@ -498,6 +501,7 @@ export async function listThreads(): Promise<Thread[]> {
       updatedAt: last?.createdAt ?? g.lastSeenAt,
       unread: await unreadCount(g.id),
       memberIds: g.memberIds,
+      avatar: g.avatar ?? null,
     });
   }
   // Safety net: any thread with messages but no metadata row still gets

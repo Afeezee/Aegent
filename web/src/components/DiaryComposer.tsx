@@ -370,17 +370,19 @@ export function DiaryComposer({
                 <Button variant="primary" onClick={() => stopAndPostVoice(false)}><Icon.check /> Add</Button>
               </div>
             ) : (
-              <div style={{ display: "flex", gap: 8, marginTop: 14, alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 6, marginTop: 14, alignItems: "center" }}>
                 <input ref={fileRef} type="file" accept="image/*" multiple hidden
                   onChange={(e) => { const fs = [...(e.target.files ?? [])]; e.target.value = ""; if (fs.length) void attach(fs); }} />
                 <input ref={audioRef} type="file" accept="audio/*" hidden
                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void attachAudio(f); }} />
-                <Button onClick={() => fileRef.current?.click()} disabled={busy} aria-label="Add photos">
-                  <Icon.photo /> Photos
-                </Button>
-                <Button onClick={startVoice} disabled={busy} aria-label="Record a voice note">
-                  <Icon.mic /> Voice
-                </Button>
+                {/* Icon-only on narrow screens so the gradient Add
+                    primary button always fits — labels used to push it
+                    off the right edge. The aria-labels + titles still
+                    describe each action. */}
+                <Button variant="icon" onClick={() => fileRef.current?.click()} disabled={busy}
+                  title="Add photos" aria-label="Add photos"><Icon.photo /></Button>
+                <Button variant="icon" onClick={startVoice} disabled={busy}
+                  title="Record a voice note" aria-label="Record a voice note"><Icon.mic /></Button>
                 <Button variant="icon" onClick={() => audioRef.current?.click()} disabled={busy}
                   title="Add an audio file" aria-label="Add an audio file"><Icon.play /></Button>
                 <Button variant="primary" style={{ marginLeft: "auto" }}

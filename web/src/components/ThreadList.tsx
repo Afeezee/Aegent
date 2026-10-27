@@ -214,7 +214,7 @@ function ThreadRow({
             color: "#0f1226", display: "grid", placeItems: "center",
           }}>{selected && <Icon.check />}</span>
         )}
-        <Avatar name={t.title} group={t.isGroup} online={t.online} size="md" />
+        <Avatar name={t.title} group={t.isGroup} online={t.online} src={t.avatar} size="md" />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
             <div style={{

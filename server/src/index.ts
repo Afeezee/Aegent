@@ -54,6 +54,7 @@ import {
 } from "./diary.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentQuota, agentTurn } from "./agent.js";
+import { webSearch, webSearchEnabled } from "./websearch.js";
 import { pushEnabled, registerToken, unregisterToken, wake } from "./push.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -78,12 +79,18 @@ app.get("/healthz", (_req, res) => res.json({
   ok: true,
   ts: Date.now(),
   llm: !!process.env.ANTHROPIC_API_KEY,
+  // Lets the client gate the agent's "web_search" tool so the LLM only
+  // sees it when a provider is actually wired on the server.
+  webSearch: webSearchEnabled(),
   db: db.backend,
 }));
 
 // LLM agent proxy — keeps the API key server-side.
 app.post("/api/agent/turn", authed, (req, res) => agentTurn(req as AuthedReq, res));
 app.get("/api/agent/quota", authed, (req, res) => agentQuota(req as AuthedReq, res));
+// Web search for the agent, server-side so Serper/Tavily keys stay off
+// the client. Same authed gate; the search text itself isn't persisted.
+app.post("/api/agent/search", authed, (req, res) => webSearch(req as AuthedReq, res));
 
 // ---- registration / auth ----
 

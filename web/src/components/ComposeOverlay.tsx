@@ -67,6 +67,8 @@ export function ComposeOverlay({
       id: u.id, email: u.email, phone: u.phone ?? null, handle: u.handle,
       displayName: u.displayName, publicKey: u.publicKey,
       lastSeenAt: Date.now(), online: u.presence?.online,
+      avatar: u.avatar ?? null,
+      statusText: u.statusText ?? null,
     });
   }
 
@@ -245,7 +247,7 @@ function UserRow({ u, onClick, selected }: { u: PublicUser; onClick: () => void;
         border: selected ? "1px solid var(--glass-border-hi)" : "1px solid transparent",
         textAlign: "left", cursor: "pointer",
       }}>
-      <Avatar name={u.displayName} size="sm" online={u.presence?.online} />
+      <Avatar name={u.displayName} src={u.avatar} size="sm" online={u.presence?.online} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ fontWeight: 600 }}>{u.displayName}</div>
         <div className="small">@{u.handle}</div>

@@ -434,6 +434,16 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
   border-radius: 14px;
 }
 
+/* ---- narrow viewports (phones) ----
+   Elements that are nice to have but cost precious horizontal room in
+   the chat header on narrow screens. The 'tag' pill reading
+   "end-to-end" is informational; the hide-sm class drops it below 720px
+   so the Æ pill and group status have room to breathe. */
+
+@media (max-width: 720px) {
+  .hide-sm { display: none !important; }
+}
+
 /* ---- reduced motion ---- */
 
 @media (prefers-reduced-motion: reduce) {

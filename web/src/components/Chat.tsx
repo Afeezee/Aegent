@@ -36,6 +36,10 @@ export function Chat({
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
+  // Separate avatar map so bubbles can render the sender's profile
+  // picture in a group chat. Keyed by user id → base64 data URI (or
+  // undefined for the self row + anyone without an uploaded photo).
+  const [peerAvatars, setPeerAvatars] = useState<Map<string, string | null>>(new Map());
   const [peerMeta, setPeerMeta] = useState<{ contact?: ContactRow; group?: GroupRow }>({});
   const [agentOn, setAgentOn] = useState(false);
   const [typing, setTyping] = useState<Set<string>>(new Set());
@@ -88,17 +92,20 @@ export function Chat({
           if (!alive) return;
           setPeerMeta({ group: g });
           const map = new Map<string, string>();
+          const av = new Map<string, string | null>();
           for (const uid of g?.memberIds ?? []) {
             if (uid === me) { map.set(uid, "You"); continue; }
             const c = await getContact(uid);
             map.set(uid, c?.displayName ?? "Unknown");
+            av.set(uid, c?.avatar ?? null);
           }
-          if (alive) setPeers(map);
+          if (alive) { setPeers(map); setPeerAvatars(av); }
         } else {
           const c = await getContact(thread.peerId);
           if (!alive) return;
           setPeerMeta({ contact: c });
           setPeers(new Map([[thread.peerId, c?.displayName ?? "?"], [me, "You"]]));
+          setPeerAvatars(new Map([[thread.peerId, c?.avatar ?? null]]));
         }
       } catch (e) {
         console.warn("[Chat] peer resolve failed:", e);
@@ -239,14 +246,19 @@ export function Chat({
               {peerMeta.contact.statusText}
             </div>
           )}
-          <div className="small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span>{subtitle}</span>
+          <div className="small" style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+            {/* "assistant on" demoted to a compact dot-chip so it stops
+                fighting the subtitle for horizontal room on narrow phones.
+                The gradient Æ pill (which also indicates "ask Aegent")
+                carries the same meaning when the group has it on, and
+                the full phrase is still in the title. */}
             {agentOn && (
-              <span title="The assistant is on for this group" style={{
-                fontSize: 10, padding: "1px 6px", borderRadius: 999,
-                background: "rgba(138,125,255,0.18)", color: "var(--accent-strong)",
-                border: "1px solid var(--line)",
-              }}>🤖 assistant on</span>
+              <span title="The assistant is on for this group" aria-label="Assistant on" style={{
+                flex: "0 0 auto",
+                width: 8, height: 8, borderRadius: 999,
+                background: "var(--accent-strong)",
+              }} />
             )}
           </div>
         </div>
@@ -257,7 +269,7 @@ export function Chat({
             aria-label={`Ask Aegent about this chat with ${thread.title}`}
             title="Ask Aegent about this chat"
             style={{
-              all: "unset", cursor: "pointer",
+              all: "unset", cursor: "pointer", flex: "0 0 auto",
               width: 36, height: 36, minWidth: 36, borderRadius: 10,
               background: "linear-gradient(135deg, var(--violet), var(--aqua))",
               color: "#10132a",
@@ -268,7 +280,11 @@ export function Chat({
             <Icon.agent />
           </button>
         )}
-        <span className="tag ok">end-to-end</span>
+        {/* The end-to-end tag is informational only — hide it on narrow
+            phones where every pixel in the top bar matters. The tag's
+            meaning is already carried by Aegent's brand promise and the
+            E2E claim in Settings. */}
+        <span className="tag ok hide-sm" style={{ flex: "0 0 auto" }}>end-to-end</span>
       </div>
 
       {fromAgent && onBackToAgent && (
@@ -355,6 +371,7 @@ export function Chat({
                 isMine={isMine}
                 isGroup={thread.isGroup}
                 senderName={peers.get(m.senderId) ?? "Someone"}
+                senderAvatar={peerAvatars.get(m.senderId) ?? null}
                 peers={peers}
                 showAvatar={!consecutive}
                 onReact={(e) => react(m, e)}

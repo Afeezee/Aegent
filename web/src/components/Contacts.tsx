@@ -92,6 +92,7 @@ export function ContactsSheet({
             handle={c.handle}
             subline={c.phone || c.email}
             online={c.online}
+            avatar={c.avatar ?? null}
             onOpen={() => { onOpenThread(c.id); onClose(); }}
             onSave={() => saveContactToPhone({
               displayName: c.displayName, handle: c.handle, email: c.email, phone: c.phone,
@@ -107,6 +108,7 @@ export function ContactsSheet({
                 name={u.displayName} handle={u.handle}
                 subline={u.phone || u.email}
                 online={u.presence?.online}
+                avatar={u.avatar ?? null}
                 onOpen={() => addAndOpen(u)}
                 onSave={() => saveContactToPhone({
                   displayName: u.displayName, handle: u.handle, email: u.email, phone: u.phone,
@@ -139,15 +141,16 @@ function sortRows(rows: ContactRow[], sort: ContactSort): ContactRow[] {
 }
 
 function ContactRow({
-  name, handle, subline, online, onOpen, onSave,
+  name, handle, subline, online, avatar, onOpen, onSave,
 }: {
   name: string; handle: string; subline?: string | null; online?: boolean;
+  avatar?: string | null;
   onOpen: () => void; onSave: () => void;
 }) {
   return (
     <motion.div whileHover={{ x: 2 }}
       style={{ display: "flex", alignItems: "center", gap: 10, padding: 10, borderRadius: 10 }}>
-      <Avatar name={name} size="sm" online={online} />
+      <Avatar name={name} src={avatar} size="sm" online={online} />
       <button onClick={onOpen}
         style={{
           flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none",

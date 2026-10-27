@@ -18,7 +18,7 @@
 
 import { apiUrl } from "../lib/api.js";
 import {
-  add_contact_by_handle, backup_thread, calculate, contact_profile,
+  add_contact_by_handle, backup_thread, calculate, contact_profile, web_search,
   create_calendar_event, create_note, delete_message_tool,
   draft_message, export_to_email, forward_message,
   get_context_around, get_last_message, get_message_metadata, get_shared_media,
@@ -160,6 +160,11 @@ const TOOLS = [
     input_schema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] },
   },
   {
+    name: "web_search",
+    description: "Search the public web for FRESH or OUT-OF-MODEL information: news, prices, nearby places, current events, specific sites. Call this when the user asks something that depends on today's reality rather than general knowledge (e.g. 'what happened in Nigeria today', 'nearest restaurant near me', 'is X open now', 'what's the exchange rate'). DO NOT call it for things you know from training (what is AI, basic cooking, syntax). Returns up to `limit` {title, url, snippet} items from Serper (Google SERP) or Tavily. When answering, cite the specific sources inline so the user can verify.",
+    input_schema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+  },
+  {
     name: "transcribe_voice",
     description: "Run on-device Whisper against a voice-note message and return the transcript. Returns the cached transcript if one already exists. Warn the user that the first call may take up to a minute (model download).",
     input_schema: { type: "object", properties: { messageId: { type: "string" } }, required: ["messageId"] },
@@ -271,6 +276,8 @@ Context you can trust:
 The user's messages are end-to-end encrypted. Retrieval happens locally on their device via the tools below; you only see what a tool returns.
 
 You are a full assistant, not only a message-search bot. Answer general-knowledge and how-to questions directly from what you know — "what is AI", "what can I cook with potato and egg", "explain X", "draft a polite decline", "convert 10 miles to km", and so on. For these you don't need any tool; just answer helpfully and concisely. Only reach for the retrieval tools when the question is about the user's own messages, contacts, diary, reminders, or attachments. If you're genuinely unsure of a fact, say so plainly rather than inventing specifics — never fabricate names, numbers, dates, citations, or quotes. Your primary job (the user's own data and the actions below) always takes priority, but being a knowledgeable everyday assistant is part of the job too.
+
+When a question depends on CURRENT or LOCAL information you cannot know from training — news ("what happened today in …"), live prices or scores, something that may have changed recently, nearby places or shops, specific websites, who-is-this — call web_search(query). Pick a short, specific query (3–8 words). Keep limit small (3–5). When you answer, cite the sources inline so the user can verify (e.g. "according to BBC [url]"). Do NOT call web_search for things you already know confidently from training, or for questions about the user's own data.
 
 Rules that do not bend:
 Every write tool (draft_message, reply_to_message, forward_message, set_reminder, schedule_message, create_calendar_event, create_note, add_contact_by_handle, save_contact_to_phone, export_to_email, backup_thread, delete_message) stages a confirm card the user must approve. When one returns {staged: true, ...}, tell the user you've prepared it and ask them to confirm the card. Never re-invoke the same staged action.
@@ -554,6 +561,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
+    if (name === "web_search")          return dataOnly(await web_search(args as never));
     if (name === "transcribe_voice")    return dataOnly(await transcribe_voice(args as never));
     if (name === "read_media" || name === "describe_image") return dataOnly(await read_media(args as never));
     if (name === "tone_adjust")         return dataOnly(await tone_adjust(args as never));

@@ -1359,6 +1359,7 @@ export async function ensureGroup(id: string) {
       id: g.id, name: g.name, memberIds: g.memberIds,
       createdBy: g.created_by, createdAt: g.created_at,
       lastSeenAt: g.created_at,
+      avatar: g.settings?.avatar ?? null,
     };
     await upsertGroup(row);
     return row;

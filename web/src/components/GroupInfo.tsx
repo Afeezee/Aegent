@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar, Button, Icon, Modal, toast } from "./ui.js";
 import { api, siteUrl, type GroupDetail, type GroupMember } from "../lib/api.js";
-import { getContact, listContacts, type ContactRow } from "../lib/store.js";
+import { getContact, getGroup, listContacts, upsertGroup, type ContactRow } from "../lib/store.js";
 import { currentSession, ensureContact } from "../lib/session.js";
 import { shareInvite } from "../lib/contacts-integration.js";
 import { grantHistoryTo, rotateAfterDeparture } from "../lib/groupkeys.js";
@@ -34,6 +34,20 @@ export function GroupInfo({
     try {
       const d = await api.getGroup(groupId);
       setDetail(d);
+      // Keep the local groups table in sync with the server's view so
+      // the sidebar / chat header pick up name + avatar changes without
+      // waiting for the user to reopen the chat.
+      try {
+        const existing = await getGroup(groupId);
+        if (existing) {
+          await upsertGroup({
+            ...existing,
+            name: d.name,
+            memberIds: d.memberIds,
+            avatar: d.settings?.avatar ?? null,
+          });
+        }
+      } catch { /* non-fatal */ }
       const map: Record<string, string> = {};
       for (const m of d.members ?? []) {
         if (m.id === me) { map[m.id] = "You"; continue; }

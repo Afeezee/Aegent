@@ -411,7 +411,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
             </button>
           </div>
           <div style={{ padding: "6px 16px 0", display: "flex", alignItems: "center", gap: 10 }}>
-            <Avatar name={me?.displayName ?? "?"} size="sm" />
+            <Avatar name={me?.displayName ?? "?"} src={(me as unknown as { avatar?: string | null })?.avatar} size="sm" />
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{me?.displayName}</div>
               <div className="small">@{me?.handle}</div>

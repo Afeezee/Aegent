@@ -23,6 +23,7 @@ export type BubbleProps = {
   isGroup: boolean;
   isMine: boolean;
   senderName: string;
+  senderAvatar?: string | null;
   peers: Map<string, string>; // userId -> display name for reactions
   onReact: (emoji: string) => void;
   onReply: () => void;
@@ -148,7 +149,7 @@ export function MessageBubble(p: BubbleProps) {
         alignItems: "flex-end",
       }}
     >
-      {!isMine && p.showAvatar && <Avatar name={p.senderName} size="sm" />}
+      {!isMine && p.showAvatar && <Avatar name={p.senderName} src={p.senderAvatar} size="sm" />}
       {!isMine && !p.showAvatar && <div style={{ width: 30 }} />}
 
       <div
