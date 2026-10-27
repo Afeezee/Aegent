@@ -36,6 +36,7 @@ export type GroupMember = {
 };
 export type GroupSettings = {
   description: string | null;
+  avatar: string | null;
   joinMode: "closed" | "invite" | "request";
   postPolicy: "all" | "admins";
   historyPolicy: "none" | "all";

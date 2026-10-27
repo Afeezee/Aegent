@@ -40,6 +40,7 @@ export type MemberRow = {
 
 export type GroupSettings = {
   description: string | null;
+  avatar: string | null;
   joinMode: "closed" | "invite" | "request";
   postPolicy: "all" | "admins";
   historyPolicy: "none" | "all";
@@ -138,14 +139,15 @@ export async function roleOf(groupId: string, userId: string): Promise<Role | nu
 
 export async function settingsOf(groupId: string): Promise<GroupSettings> {
   const g = await db.prepare(
-    `SELECT description, join_mode, post_policy, history_policy, agent_policy
+    `SELECT description, avatar_blob, join_mode, post_policy, history_policy, agent_policy
        FROM groups WHERE id = ?`,
   ).get<{
-    description: string | null; join_mode: string; post_policy: string;
+    description: string | null; avatar_blob: string | null; join_mode: string; post_policy: string;
     history_policy: string; agent_policy: string;
   }>(groupId);
   return {
     description: g?.description ?? null,
+    avatar: g?.avatar_blob ?? null,
     joinMode: (g?.join_mode as GroupSettings["joinMode"]) ?? "closed",
     postPolicy: (g?.post_policy as GroupSettings["postPolicy"]) ?? "all",
     historyPolicy: (g?.history_policy as GroupSettings["historyPolicy"]) ?? "none",
@@ -275,7 +277,7 @@ export async function unbanMember(groupId: string, userId: string): Promise<void
 // ---- group info ----
 
 export async function updateGroup(groupId: string, patch: {
-  name?: string; description?: string | null;
+  name?: string; description?: string | null; avatar?: string | null;
   joinMode?: GroupSettings["joinMode"];
   postPolicy?: GroupSettings["postPolicy"];
   historyPolicy?: GroupSettings["historyPolicy"];
@@ -286,6 +288,7 @@ export async function updateGroup(groupId: string, patch: {
   const push = (col: string, val: unknown) => { sets.push(`${col} = ?`); args.push(val); };
   if (patch.name !== undefined) push("name", patch.name);
   if (patch.description !== undefined) push("description", patch.description);
+  if (patch.avatar !== undefined) push("avatar_blob", patch.avatar);
   if (patch.joinMode !== undefined) push("join_mode", patch.joinMode);
   if (patch.postPolicy !== undefined) push("post_policy", patch.postPolicy);
   if (patch.historyPolicy !== undefined) push("history_policy", patch.historyPolicy);

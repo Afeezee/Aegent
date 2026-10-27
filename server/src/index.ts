@@ -485,6 +485,8 @@ app.patch("/api/groups/:id", authed, async (req, res) => {
     const body = z.object({
       name: z.string().min(1).max(80).optional(),
       description: z.string().max(500).nullable().optional(),
+      // Small client-resized base64 data URI, or null to clear.
+      avatar: z.string().max(400_000).nullable().optional(),
       joinMode: z.enum(["closed", "invite", "request"]).optional(),
       postPolicy: z.enum(["all", "admins"]).optional(),
       historyPolicy: z.enum(["none", "all"]).optional(),
