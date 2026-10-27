@@ -6,6 +6,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Button, Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
+import { EmojiPicker } from "./EmojiPicker.js";
 import { pickFile, uploadMedia } from "../lib/media.js";
 import { sendMedia, sendText } from "../lib/session.js";
 import { emitTyping } from "../lib/socket.js";
@@ -43,6 +44,22 @@ export function Composer({
   const audioRef = useRef<HTMLInputElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+
+  // Insert an emoji at the caret (or append) and keep focus so typing
+  // continues naturally after picking.
+  function insertEmoji(emoji: string) {
+    const el = textRef.current;
+    if (!el) { setText((t) => t + emoji); return; }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    setText((t) => t.slice(0, start) + emoji + t.slice(end));
+    queueMicrotask(() => {
+      el.focus();
+      const pos = start + emoji.length;
+      try { el.setSelectionRange(pos, pos); } catch { /* ignore */ }
+    });
+  }
 
   useEffect(() => {
     if (editing) setText(editing.body);
@@ -274,6 +291,21 @@ export function Composer({
           </AnimatePresence>
           <Button variant="icon" onClick={() => setAttachOpen((v) => !v)}
             title="Attach image, audio, or file" aria-label="Attach"><Icon.plus /></Button>
+
+          <AnimatePresence>
+            {emojiOpen && (
+              <div style={{ position: "absolute", bottom: "100%", left: 40, marginBottom: 10, zIndex: 30 }}
+                onMouseLeave={() => setEmojiOpen(false)}>
+                <EmojiPicker
+                  onPick={insertEmoji}
+                  onClose={() => setEmojiOpen(false)}
+                />
+              </div>
+            )}
+          </AnimatePresence>
+          <Button variant="icon" onClick={() => setEmojiOpen((v) => !v)}
+            title="Emoji" aria-label="Emoji"><Icon.smile /></Button>
+
           <textarea
             ref={textRef}
             rows={1}

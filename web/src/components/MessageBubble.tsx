@@ -16,6 +16,7 @@ import { Avatar, Icon } from "./ui.js";
 import type { OpenedMessage } from "../lib/store.js";
 import { MediaView } from "./MediaView.js";
 import { AbuseReportDialog } from "./ReportDialogs.js";
+import { EmojiPicker } from "./EmojiPicker.js";
 
 export type BubbleProps = {
   msg: OpenedMessage;
@@ -42,6 +43,7 @@ export function MessageBubble(p: BubbleProps) {
   const [translated, setTranslated] = useState<string | null>(null);
   const [translating, setTranslating] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   // Rehydrate any previously cached translation on mount. The Dexie
   // row survives app restarts, reloads, and reinstalls (the cache is
   // keyed to the per-user store that reopens on sign-in).
@@ -371,7 +373,24 @@ export function MessageBubble(p: BubbleProps) {
                     }}
                   >{e}</button>
                 ))}
+                {/* "+" opens the full emoji picker for any reaction. */}
+                <button
+                  onClick={() => setEmojiPickerOpen((v) => !v)}
+                  aria-label="More reactions"
+                  style={{
+                    marginLeft: "auto", padding: "4px 8px", fontSize: 16,
+                    background: "var(--glass-bg-hi)", border: "none",
+                    cursor: "pointer", borderRadius: 6, color: "var(--text-dim)",
+                  }}
+                >＋</button>
               </div>
+              {emojiPickerOpen && (
+                <div style={{ marginBottom: 6 }}>
+                  <EmojiPicker width={280}
+                    onPick={(e) => { p.onReact(e); setEmojiPickerOpen(false); setMenuOpen(false); }}
+                  />
+                </div>
+              )}
 
               <MenuItem icon={<Icon.reply />} label="Reply"
                 onClick={() => { p.onReply(); setMenuOpen(false); }} />
