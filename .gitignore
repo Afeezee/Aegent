@@ -47,3 +47,8 @@ web/android/.idea/
 # Firebase service-account keys must never be committed — env var only.
 *firebase-adminsdk*.json
 aegent-*-firebase-*.json
+
+# Secrets / local notes — never commit
+ssh
+ssh.pub
+Aegent dep.txt
