@@ -84,11 +84,37 @@ export async function objectUrlFor(ref: MediaRef): Promise<string> {
 
 // Convenience helpers for common inputs.
 
+// Above this, a photo is worth re-encoding before upload. Below it the
+// compression overhead isn't worth it (already small).
+const COMPRESS_IMAGE_OVER_BYTES = 350 * 1024;
+const MAX_IMAGE_EDGE = 1600;      // long-edge cap for sent photos
+const IMAGE_QUALITY = 0.82;
+
 export async function pickFile(file: File): Promise<PickedMedia> {
-  const buf = new Uint8Array(await file.arrayBuffer());
   const mime = file.type || guessMimeFromName(file.name) || "application/octet-stream";
   const kind = kindOf(mime, file.name);
   const filename = sanitizeFilename(file.name, mime);
+
+  // Low-bandwidth win: shrink large photos before they're encrypted and
+  // uploaded. A 6 MB phone photo becomes ~150-400 KB, which is the
+  // difference between an instant send and a minute of waiting on a
+  // weak connection. GIFs are left alone (re-encoding would kill the
+  // animation); PNGs with transparency and everything non-image pass
+  // through untouched.
+  if (kind === "image" && mime !== "image/gif" && file.size > COMPRESS_IMAGE_OVER_BYTES) {
+    try {
+      const compressed = await compressImage(file, MAX_IMAGE_EDGE, IMAGE_QUALITY);
+      if (compressed && compressed.bytes.byteLength < file.size) {
+        return {
+          bytes: compressed.bytes, mime: "image/jpeg", kind: "image",
+          filename: swapExt(filename, "jpg"),
+          width: compressed.width, height: compressed.height,
+        };
+      }
+    } catch { /* fall through to the original bytes */ }
+  }
+
+  const buf = new Uint8Array(await file.arrayBuffer());
   const base: PickedMedia = { bytes: buf, mime, kind, filename };
   if (kind === "image") {
     try {
@@ -97,6 +123,32 @@ export async function pickFile(file: File): Promise<PickedMedia> {
     } catch { /* ignore */ }
   }
   return base;
+}
+
+// Draw the image onto a canvas scaled so its long edge is <= maxEdge,
+// then export JPEG. Returns null if the browser can't decode it.
+async function compressImage(file: File, maxEdge: number, quality: number):
+  Promise<{ bytes: Uint8Array; width: number; height: number } | null> {
+  let bitmap: ImageBitmap;
+  try { bitmap = await createImageBitmap(file); } catch { return null; }
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) { bitmap.close?.(); return null; }
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close?.();
+  const blob: Blob | null = await new Promise((resolve) =>
+    canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
+  if (!blob) return null;
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), width: w, height: h };
+}
+
+function swapExt(name: string, ext: string): string {
+  const dot = name.lastIndexOf(".");
+  return (dot > 0 ? name.slice(0, dot) : name) + "." + ext;
 }
 
 // Some Android WebView flavours hand back a File object whose `name`

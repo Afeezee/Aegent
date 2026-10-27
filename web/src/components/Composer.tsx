@@ -92,24 +92,31 @@ export function Composer({
       setText("");
       return;
     }
-    setSending(true);
-    try {
-      if (editing) {
-        await onEditCommit(body);
+    if (editing) {
+      setSending(true);
+      try { await onEditCommit(body); onSent(); setText(""); }
+      catch (e) { toast(`Edit failed: ${(e as Error).message}`, "error"); }
+      finally { setSending(false); }
+      return;
+    }
+
+    // Optimistic send: clear the input and reply NOW so the composer
+    // feels instant even on a weak connection. sendText saves the
+    // message to the local store first (so it renders immediately) and
+    // the network fan-out happens in the background — on a slow link
+    // the user can keep typing instead of watching a spinner.
+    const reply = replyTo ?? undefined;
+    setText("");
+    onClearReply();
+    sendText(peerId, isGroup, body, reply)
+      .then((res) => {
+        if (!res.ok) toast(`Send failed: ${res.error}`, "error");
+        else if (res.queued) toast("Offline — queued, will send when you reconnect", "info");
         onSent();
-      } else {
-        const res = await sendText(peerId, isGroup, body, replyTo ?? undefined);
-        if (!res.ok) { toast(`Send failed: ${res.error}`, "error"); return; }
-        // Offline isn't a failure any more: the message is saved and
-        // queued, and goes out on the next reconnect.
-        if (res.queued) toast("Offline — queued, will send when you reconnect", "info");
-        onClearReply();
-        onSent();
-      }
-      setText("");
-    } catch (e) {
-      toast(`Send failed: ${(e as Error).message}`, "error");
-    } finally { setSending(false); }
+      })
+      .catch((e) => toast(`Send failed: ${(e as Error).message}`, "error"));
+    // Reflect the new message right away.
+    onSent();
   }
 
   // Server cap - 1 MB safety margin (server rejects > 20 MB with 413).
