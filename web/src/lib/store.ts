@@ -59,6 +59,15 @@ export type MediaRef = {
   // along inside the E2E-encrypted payload — server never sees it.
   // Receivers get it without having to run Whisper themselves.
   transcript?: string;
+  // "View once" media: shown to the recipient a single time, then
+  // locked behind a "Viewed" placeholder. Text view-once is sent by
+  // rendering the text to a PNG card first, so this flag covers it
+  // uniformly. Older clients that don't recognise the flag just show
+  // the content as a normal attachment — acceptable trade-off.
+  viewOnce?: boolean;
+  // Set when the user tapped to reveal a view-once attachment. Lives
+  // on the StoredMessage below too, but duplicated here so previews
+  // (ThreadList subtitle, forward preview) can decide at a glance.
 };
 
 export type StoredMessage = {
@@ -89,6 +98,11 @@ export type StoredMessage = {
   // Delivery/read state (tracked locally for the sender's UI).
   deliveredAt: number | null;
   readAt: number | null;
+  // Set when the recipient has tapped a view-once attachment and
+  // revealed its content. Lives on the message row so the "Viewed"
+  // placeholder survives reloads. Non-indexed Dexie field — added
+  // without a schema version bump, so older rows read as undefined.
+  viewedAt?: number | null;
 
   // Search index (unencrypted; the whole DB is protected by the OS
   // account, and search would be useless if we couldn't index).
@@ -760,6 +774,12 @@ export async function markThreadRead(peerId: string): Promise<string[]> {
     .and((m) => m.direction === "in" && m.readAt === null)
     .modify((m) => { m.readAt = now; toMark.push(m.id); });
   return toMark;
+}
+
+// Mark a view-once attachment as "seen" by the recipient. Permanent —
+// the next render replaces the content with the Viewed placeholder.
+export async function markMessageViewed(id: string, at = Date.now()) {
+  await requireDb().messages.update(id, { viewedAt: at });
 }
 
 export async function markDelivered(id: string, at = Date.now()) {

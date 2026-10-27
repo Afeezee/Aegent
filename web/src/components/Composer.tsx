@@ -7,9 +7,14 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Button, Icon, toast, toastDismiss, toastUpdate } from "./ui.js";
 import { EmojiPicker } from "./EmojiPicker.js";
-import { pickFile, uploadMedia } from "../lib/media.js";
+import { pickFile, textToCardImage, uploadMedia } from "../lib/media.js";
 import { sendMedia, sendText } from "../lib/session.js";
 import { emitTyping } from "../lib/socket.js";
+
+// View-once text is sent as a rendered image card. The character cap
+// keeps the card readable; longer text has to go via a normal message
+// (or the user shortens it) — surfaced in-flight before the send tries.
+const VIEW_ONCE_TEXT_CAP = 500;
 
 export type ReplyTarget = { id: string; preview: string; author: string };
 
@@ -45,6 +50,12 @@ export function Composer({
   const textRef = useRef<HTMLTextAreaElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [stickerOpen, setStickerOpen] = useState(false);
+  // Persistent view-once flag. When ON, the next send (text, photo,
+  // audio, voice) is marked media.viewOnce=true. The flag is sticky
+  // across sends so the user can send a few view-once items in a row,
+  // and only resets when they click the eye again.
+  const [viewOnce, setViewOnce] = useState(false);
 
   // Insert an emoji at the caret (or append) and keep focus so typing
   // continues naturally after picking.
@@ -100,6 +111,29 @@ export function Composer({
       return;
     }
 
+    // View-once text goes through the attachment pipeline so the
+    // "revealed → viewed" lifecycle is the same for every kind.
+    if (viewOnce) {
+      if (body.length > VIEW_ONCE_TEXT_CAP) {
+        toast(
+          `View-once text is capped at ${VIEW_ONCE_TEXT_CAP} characters — this is ${body.length}. Shorten it, or turn view-once off.`,
+          "warn",
+        );
+        return;
+      }
+      setSending(true);
+      try {
+        const picked = await textToCardImage(body);
+        const ref = await uploadMedia(picked);
+        ref.viewOnce = true;
+        const res = await sendMedia(peerId, isGroup, ref, undefined, replyTo ?? undefined);
+        if (!res.ok) toast(`Send failed: ${res.error}`, "error");
+        else { setText(""); onClearReply(); onSent(); }
+      } catch (e) { toast(`Send failed: ${(e as Error).message}`, "error"); }
+      finally { setSending(false); }
+      return;
+    }
+
     // Optimistic send: clear the input and reply NOW so the composer
     // feels instant even on a weak connection. sendText saves the
     // message to the local store first (so it renders immediately) and
@@ -117,6 +151,19 @@ export function Composer({
       .catch((e) => toast(`Send failed: ${(e as Error).message}`, "error"));
     // Reflect the new message right away.
     onSent();
+  }
+
+  // One-tap sticker send — bypasses the draft. MessageBubble renders
+  // single-emoji messages at sticker scale so no new message kind or
+  // schema change is needed.
+  async function sendSticker(emoji: string) {
+    if (sending) return;
+    setStickerOpen(false);
+    try {
+      const res = await sendText(peerId, isGroup, emoji, replyTo ?? undefined);
+      if (!res.ok) toast(`Sticker send failed: ${res.error}`, "error");
+      else { onClearReply(); onSent(); }
+    } catch (e) { toast(`Sticker send failed: ${(e as Error).message}`, "error"); }
   }
 
   // Server cap - 1 MB safety margin (server rejects > 20 MB with 413).
@@ -143,6 +190,7 @@ export function Composer({
         const pct = Math.round(frac * 100);
         toastUpdate(toastId, { text: `Uploading ${label} · ${pct}%`, progress: frac });
       });
+      if (viewOnce) ref.viewOnce = true;
       toastUpdate(toastId, { text: `Sending ${label}…`, progress: 1 });
       const res = await sendMedia(peerId, isGroup, ref, text.trim() || undefined, replyTo ?? undefined);
       if (!res.ok) {
@@ -206,6 +254,7 @@ export function Composer({
       const ref = await uploadMedia({
         bytes, mime: blob.type, kind: "voice", durationMs, filename: "voice.webm",
       });
+      if (viewOnce) ref.viewOnce = true;
       const res = await sendMedia(peerId, isGroup, ref, undefined, replyTo ?? undefined);
       if (!res.ok) toast(`Voice send failed: ${res.error}`, "error");
       else { onClearReply(); onSent(); }
@@ -310,8 +359,52 @@ export function Composer({
               </div>
             )}
           </AnimatePresence>
-          <Button variant="icon" onClick={() => setEmojiOpen((v) => !v)}
+          <Button variant="icon" onClick={() => { setEmojiOpen((v) => !v); setStickerOpen(false); }}
             title="Emoji" aria-label="Emoji"><Icon.smile /></Button>
+
+          {/* Stickers — same picker, opened straight to its sticker
+              tab, but a pick fires as a standalone message instead of
+              inserting into the draft. */}
+          <AnimatePresence>
+            {stickerOpen && (
+              <div style={{ position: "absolute", bottom: "100%", left: 80, marginBottom: 10, zIndex: 30 }}
+                onMouseLeave={() => setStickerOpen(false)}>
+                <EmojiPicker
+                  mode="sticker"
+                  width={300}
+                  onPick={sendSticker}
+                  onClose={() => setStickerOpen(false)}
+                />
+              </div>
+            )}
+          </AnimatePresence>
+          <Button variant="icon" onClick={() => { setStickerOpen((v) => !v); setEmojiOpen(false); }}
+            title="Stickers" aria-label="Stickers">
+            <span style={{ fontSize: 18, lineHeight: 1 }}>🪄</span>
+          </Button>
+
+          {/* View-once toggle. Dormant most of the time; when ON it
+              glows and sits on every send until the user clicks it
+              again. Covers text (rendered to a card), photos, audio
+              and voice notes uniformly. */}
+          <Button
+            variant="icon"
+            onClick={() => {
+              setViewOnce((v) => {
+                const next = !v;
+                if (next) toast("View-once ON — the next send disappears after it's opened", "info");
+                return next;
+              });
+            }}
+            title={viewOnce ? "View-once ON (click to turn off)" : "View once"}
+            aria-label={viewOnce ? "Turn view-once off" : "Turn view-once on"}
+            style={viewOnce ? {
+              background: "linear-gradient(135deg, var(--violet), var(--aqua))",
+              color: "#10132a",
+            } : undefined}
+          >
+            <span style={{ fontSize: 16, lineHeight: 1 }}>👁️</span>
+          </Button>
 
           <textarea
             ref={textRef}

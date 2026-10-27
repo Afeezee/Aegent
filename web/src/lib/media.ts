@@ -125,6 +125,93 @@ export async function pickFile(file: File): Promise<PickedMedia> {
   return base;
 }
 
+// Render a short message to a PNG "card" so it can be sent as an
+// image attachment (used by the view-once path for plain text: the
+// text itself vanishes once viewed, exactly like a view-once photo).
+// Kept to one card — the Composer caps at 500 chars before calling.
+export async function textToCardImage(
+  text: string,
+  opts: { maxChars?: number } = {},
+): Promise<PickedMedia> {
+  const maxChars = opts.maxChars ?? 500;
+  const body = text.length > maxChars ? text.slice(0, maxChars - 1) + "…" : text;
+  const w = 900;
+  // Height grows with wrapped line count; measured below.
+  const pad = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = 400; // placeholder, replaced after measure
+  const ctx = canvas.getContext("2d")!;
+  const font = "500 32px -apple-system, system-ui, Segoe UI, Roboto, sans-serif";
+  ctx.font = font;
+  const lineH = 44;
+  const maxLineW = w - pad * 2;
+  const words = body.split(/\s+/);
+  const lines: string[] = [];
+  let cur = "";
+  for (const word of words) {
+    const trial = cur ? cur + " " + word : word;
+    if (ctx.measureText(trial).width > maxLineW && cur) {
+      lines.push(cur); cur = word;
+    } else { cur = trial; }
+  }
+  if (cur) lines.push(cur);
+  // Honour hard newlines too.
+  const finalLines: string[] = [];
+  for (const l of lines) {
+    for (const sub of l.split("\n")) finalLines.push(sub);
+  }
+  const h = Math.max(360, pad * 2 + finalLines.length * lineH + 80);
+  canvas.width = w; canvas.height = h;
+  // Gradient background echoing the brand accent so it reads as a
+  // deliberate "card" rather than a plain screenshot.
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, "#8a7dff");
+  grad.addColorStop(1, "#17c3e6");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+  // Inner translucent plate so the text has contrast against the
+  // gradient without us having to pick colours per theme.
+  const inset = 24;
+  ctx.fillStyle = "rgba(16,19,42,0.78)";
+  roundRect(ctx, inset, inset, w - inset * 2, h - inset * 2, 28);
+  ctx.fill();
+  // Body text.
+  ctx.font = font;
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "top";
+  let y = pad;
+  for (const line of finalLines) {
+    ctx.fillText(line, pad, y);
+    y += lineH;
+  }
+  // Little footer so a saved card still carries context.
+  ctx.font = "500 16px -apple-system, system-ui, Segoe UI, Roboto, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.fillText("Aegent · view-once", pad, h - pad - 10);
+  const blob: Blob | null = await new Promise((resolve) =>
+    canvas.toBlob((b) => resolve(b), "image/png"));
+  if (!blob) throw new Error("Couldn't render text card");
+  return {
+    bytes: new Uint8Array(await blob.arrayBuffer()),
+    mime: "image/png", kind: "image", filename: "note.png",
+    width: w, height: h,
+  };
+}
+
+function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number, r: number,
+) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x,     y + h, rr);
+  ctx.arcTo(x,     y + h, x,     y,     rr);
+  ctx.arcTo(x,     y,     x + w, y,     rr);
+  ctx.closePath();
+}
+
 // Draw the image onto a canvas scaled so its long edge is <= maxEdge,
 // then export JPEG. Returns null if the browser can't decode it.
 async function compressImage(file: File, maxEdge: number, quality: number):

@@ -231,7 +231,12 @@ export function Chat({
           name={thread.title}
           group={thread.isGroup}
           online={peerMeta.contact?.online}
-          src={peerMeta.contact?.avatar}
+          // Chatting with yourself ("note to self") — the peer IS the
+          // current user, who has no contacts row, so fall back to the
+          // session's own avatar instead of showing bare initials.
+          src={peerMeta.contact?.avatar ?? (!thread.isGroup && thread.peerId === me
+            ? currentSession()?.user.avatar
+            : undefined)}
         />
         <div
           style={{ minWidth: 0, flex: 1, cursor: thread.isGroup && onOpenGroupInfo ? "pointer" : "default" }}

@@ -9,7 +9,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { grantTranslationConsent, translateText, translationConsentGranted } from "../lib/translate.js";
-import { clearTranslation, getTranslation, saveTranslation } from "../lib/store.js";
+import { clearTranslation, getTranslation, markMessageViewed, saveTranslation } from "../lib/store.js";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Avatar, Icon } from "./ui.js";
@@ -17,6 +17,25 @@ import type { OpenedMessage } from "../lib/store.js";
 import { MediaView } from "./MediaView.js";
 import { AbuseReportDialog } from "./ReportDialogs.js";
 import { EmojiPicker } from "./EmojiPicker.js";
+
+// A single emoji glyph as a message body is rendered as a sticker:
+// bigger, no bubble background. Uses grapheme segmentation so flag,
+// ZWJ-sequence and skin-tone emoji still count as one glyph.
+function isSingleEmojiMessage(s: string): boolean {
+  const trimmed = s.trim();
+  if (!trimmed || trimmed.length > 24) return false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const Seg = (Intl as any).Segmenter;
+    if (!Seg) return false;
+    const seg = new Seg(undefined, { granularity: "grapheme" });
+    const parts = Array.from(seg.segment(trimmed));
+    if (parts.length !== 1) return false;
+    const g = (parts[0] as { segment: string }).segment;
+    // Must contain at least one extended-pictographic codepoint.
+    return /\p{Extended_Pictographic}/u.test(g);
+  } catch { return false; }
+}
 
 export type BubbleProps = {
   msg: OpenedMessage;
@@ -118,6 +137,52 @@ export function MessageBubble(p: BubbleProps) {
 
   const body = msg.editedBody ?? msg.body;
   const deleted = !!msg.deletedAt;
+  // View-once reveal state. Clicking the placeholder flips `revealed`
+  // on and persists `viewedAt` so later renders show "Viewed". We
+  // don't gate the sender — they already know what they sent — but
+  // we show them a small badge so they can tell at a glance.
+  const isViewOnce = !!msg.media?.viewOnce && !deleted;
+  const alreadyViewed = !!msg.viewedAt;
+  const [revealed, setRevealed] = useState(false);
+  async function revealViewOnce() {
+    if (isMine) return; // sender always sees their own
+    setRevealed(true);
+    try { await markMessageViewed(msg.id); } catch { /* non-fatal */ }
+  }
+  // Single-emoji text? Render it as a sticker (no bubble, big glyph).
+  const stickerText = !msg.media && !deleted && body && isSingleEmojiMessage(body) ? body : null;
+
+  // Sticker — single emoji, no bubble, large glyph. Keeps the kebab
+  // menu reachable so the user can still react / reply / forward it.
+  if (stickerText && !msg.diaryRef) {
+    return (
+      <motion.div
+        ref={rowRef}
+        initial={{ opacity: 0, y: 8, scale: 0.9 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ type: "spring", stiffness: 320, damping: 22 }}
+        style={{
+          display: "flex", gap: 8, alignItems: "flex-end",
+          justifyContent: isMine ? "flex-end" : "flex-start",
+          position: "relative",
+        }}
+      >
+        {!isMine && p.showAvatar && <Avatar name={p.senderName} src={p.senderAvatar} size="sm" />}
+        {!isMine && !p.showAvatar && <div style={{ width: 30 }} />}
+        <div style={{ position: "relative" }}
+          onContextMenu={(e) => { e.preventDefault(); openMenuAt(e.clientX, e.clientY); }}>
+          <div style={{
+            fontSize: 72, lineHeight: 1, padding: "6px 4px",
+            filter: "drop-shadow(0 6px 14px rgba(0,0,0,0.22))",
+          }}>{stickerText}</div>
+          <div style={{
+            fontSize: 10, color: "var(--text-mute)", opacity: 0.7,
+            textAlign: isMine ? "right" : "left",
+          }}>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+        </div>
+      </motion.div>
+    );
+  }
 
   // A reaction to a diary entry arrives as a message whose whole content
   // is one emoji. Giving it a full bubble would bury the conversation
@@ -218,7 +283,19 @@ export function MessageBubble(p: BubbleProps) {
             <span style={{ opacity: 0.7, fontStyle: "italic" }}>Message deleted</span>
           ) : (
             <>
-              {msg.media && <MediaView media={msg.media} caption={msg.caption ?? undefined} isMine={isMine} messageId={msg.id} />}
+              {msg.media && isViewOnce ? (
+                <ViewOncePane
+                  media={msg.media}
+                  caption={msg.caption ?? undefined}
+                  isMine={isMine}
+                  messageId={msg.id}
+                  revealed={revealed || isMine}
+                  viewedAt={msg.viewedAt ?? null}
+                  onReveal={revealViewOnce}
+                />
+              ) : (
+                msg.media && <MediaView media={msg.media} caption={msg.caption ?? undefined} isMine={isMine} messageId={msg.id} />
+              )}
               {body && !msg.media && <span>{body}</span>}
               {body && msg.media && (
                 <div style={{ padding: "8px 8px 4px", fontSize: 14 }}>{body}</div>
@@ -433,6 +510,82 @@ export function MessageBubble(p: BubbleProps) {
         threadId={msg.peerId}
       />
     </motion.div>
+  );
+}
+
+// Placeholder for a view-once attachment. Three states:
+//   - sender: shows a "View once" badge and the content itself, so they
+//     have context without the "revealed" moment ever burning. (They
+//     already know what they sent.)
+//   - receiver, unrevealed: "Tap to view once" button.
+//   - receiver, revealed OR already-viewed persisted on disk: content
+//     (or "Viewed" placeholder if the per-message `viewedAt` was set in
+//     a prior session and the user navigated away — tapping again
+//     would re-reveal, which defeats the point).
+function ViewOncePane({
+  media, caption, isMine, messageId, revealed, viewedAt, onReveal,
+}: {
+  media: import("../lib/store.js").MediaRef;
+  caption?: string;
+  isMine?: boolean;
+  messageId?: string;
+  revealed: boolean;
+  viewedAt: number | null;
+  onReveal: () => void;
+}) {
+  // Already-viewed sticks across reloads: the placeholder wins.
+  if (!isMine && viewedAt && !revealed) {
+    return (
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 6, alignItems: "center",
+        padding: "22px 24px", borderRadius: 12,
+        background: "rgba(255,255,255,0.05)", border: "1px dashed var(--line-strong)",
+        color: "var(--text-dim)", fontSize: 13, minWidth: 180,
+      }}>
+        <span style={{ fontSize: 22 }}>👁️</span>
+        <span>Viewed</span>
+      </div>
+    );
+  }
+
+  if (!isMine && !revealed) {
+    return (
+      <button
+        type="button"
+        onClick={onReveal}
+        style={{
+          all: "unset", cursor: "pointer",
+          display: "flex", flexDirection: "column", gap: 8, alignItems: "center",
+          padding: "22px 24px", borderRadius: 12, minWidth: 200,
+          background: "linear-gradient(135deg, rgba(138,125,255,0.18), rgba(23,195,230,0.18))",
+          border: "1px solid var(--glass-border-hi)",
+          color: "var(--text)",
+        }}
+      >
+        <span style={{ fontSize: 28 }}>👁️</span>
+        <strong>Tap to view once</strong>
+        <span className="small" style={{ color: "var(--text-dim)" }}>
+          {media.kind === "image" ? "Photo or text card" : media.kind === "voice" ? "Voice note" : media.kind === "audio" ? "Audio" : media.kind}
+          {" • disappears after you open it"}
+        </span>
+      </button>
+    );
+  }
+
+  // Sender's own copy OR a receiver who just revealed → show content
+  // with a persistent "View once" tag so the intent is still legible.
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={{
+        position: "absolute", top: 8, left: 8, zIndex: 2,
+        padding: "2px 8px", borderRadius: 999, fontSize: 11,
+        background: "rgba(0,0,0,0.55)", color: "#fff",
+        display: "inline-flex", gap: 4, alignItems: "center",
+      }}>
+        <span>👁️</span> View once
+      </div>
+      <MediaView media={media} caption={caption} isMine={isMine} messageId={messageId} />
+    </div>
   );
 }
 

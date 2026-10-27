@@ -10,6 +10,7 @@ import {
   countPinned, deleteConversation, listThreads, MAX_PINNED,
   setThreadArchived, setThreadPinned, type Thread,
 } from "../lib/store.js";
+import { currentSession } from "../lib/session.js";
 
 export function ThreadList({
   activeId, onSelect, onCompose, onOpenSearch, refreshKey, filter = "all",
@@ -214,7 +215,7 @@ function ThreadRow({
             color: "#0f1226", display: "grid", placeItems: "center",
           }}>{selected && <Icon.check />}</span>
         )}
-        <Avatar name={t.title} group={t.isGroup} online={t.online} src={t.avatar} size="md" />
+        <Avatar name={t.title} group={t.isGroup} online={t.online} src={rowAvatar(t)} size="md" />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
             <div style={{
@@ -313,6 +314,17 @@ function EmptyThreadHint({ onCompose }: { onCompose: () => void }) {
       <Button variant="primary" onClick={onCompose}><Icon.plus /> New chat</Button>
     </motion.div>
   );
+}
+
+// A "note to self" thread's peer id IS the current user's id, which
+// never has a contacts row (contacts = other people), so t.avatar
+// comes back null and the row shows a lonely initial. Patch it with
+// the signed-in user's own profile photo so self-chats look right.
+function rowAvatar(t: Thread): string | null | undefined {
+  if (t.avatar) return t.avatar;
+  const me = currentSession()?.user;
+  if (me && !t.isGroup && t.peerId === me.id) return me.avatar ?? undefined;
+  return t.avatar;
 }
 
 function formatTime(t: number): string {

@@ -903,9 +903,10 @@ app.post("/api/ack", authed, async (req, res) => {
     const stmt = db.prepare("UPDATE messages SET delivered_at = ? WHERE id = ? AND recipient_id = ?");
     // Collect (sender_id, msg_id) for each acked envelope so we can tell
     // the SENDER their message was delivered — keyed by the sender's own
-    // msg_id, which is what their local copy is stored under. Skip
-    // self-acks (a self-echo's sender IS the recipient) so a device
-    // doesn't flash "delivered" at itself.
+    // msg_id, which is what their local copy is stored under. Self-echo
+    // acks are allowed through here on purpose: in a self-chat the user
+    // IS both sender and recipient, and suppressing the socket emit was
+    // leaving the "note to self" bubble stuck on one tick.
     const notify: Array<{ senderId: string; msgId: string }> = [];
     await db.tx(async () => {
       for (const id of ids) {
@@ -913,7 +914,7 @@ app.post("/api/ack", authed, async (req, res) => {
         const row = await db.prepare(
           "SELECT sender_id, msg_id FROM messages WHERE id = ? AND recipient_id = ?",
         ).get<{ sender_id: string; msg_id: string | null }>(id, uid);
-        if (row?.msg_id && row.sender_id !== uid) {
+        if (row?.msg_id) {
           notify.push({ senderId: row.sender_id, msgId: row.msg_id });
         }
       }
@@ -946,7 +947,8 @@ app.post("/api/read", authed, async (req, res) => {
         const row = await db.prepare(
           "SELECT sender_id FROM messages WHERE msg_id = ? AND recipient_id = ?",
         ).get<{ sender_id: string }>(msgId, uid);
-        if (row && row.sender_id !== uid) notify.push({ senderId: row.sender_id, msgId });
+        // Allow self-echo reads through: see /api/ack above for why.
+        if (row) notify.push({ senderId: row.sender_id, msgId });
       }
     });
     for (const n of notify) {
