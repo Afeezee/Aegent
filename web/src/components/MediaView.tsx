@@ -503,9 +503,22 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
     background: "rgba(255,255,255,0.08)", color: "var(--text)",
     border: "1px solid var(--line-strong)",
   };
+  // On a sent (mine) voice note the bubble is the violet gradient, and
+  // --accent-strong is itself a violet — so these action links were
+  // almost invisible against it (worse in light mode). Use the same
+  // high-contrast dark navy the transcript text uses on mine bubbles,
+  // and a muted navy for secondary actions; keep the accent link on
+  // the glass (theirs) bubble. Weight + underline make them read as
+  // tappable in either theme.
+  const linkColor = isMine ? "rgba(16,19,42,0.92)" : "var(--accent-strong)";
+  const linkDim = isMine ? "rgba(16,19,42,0.6)" : "var(--text-dim)";
   const linkBtn = (onClick: () => void, label: string, extra?: React.CSSProperties) => (
     <button type="button" onClick={onClick}
-      style={{ all: "unset", cursor: "pointer", fontSize: 11, color: "var(--accent-strong)", ...extra }}>
+      style={{
+        all: "unset", cursor: "pointer", fontSize: 11, fontWeight: 600,
+        textDecoration: "underline", textUnderlineOffset: 2,
+        color: linkColor, ...extra,
+      }}>
       {label}
     </button>
   );
@@ -571,7 +584,7 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
           <textarea autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} rows={2} style={inputStyle} />
           <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
             {linkBtn(() => void saveTranscript(), savingT ? "Saving…" : "Save correction")}
-            {linkBtn(() => { setEditing(false); setDraft(transcript); }, "Cancel", { color: "var(--text-dim)" })}
+            {linkBtn(() => { setEditing(false); setDraft(transcript); }, "Cancel", { color: linkDim })}
           </div>
         </div>
       ) : (
@@ -594,8 +607,9 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
       {translated && !editingTr && (
         <div style={{
           marginTop: 4, padding: "6px 8px", borderRadius: 8,
-          background: "rgba(255,255,255,0.08)", borderLeft: "2px solid var(--aqua)",
-          fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.4,
+          background: isMine ? "rgba(16,19,42,0.12)" : "rgba(255,255,255,0.08)",
+          borderLeft: "2px solid var(--aqua)",
+          fontSize: 12.5, color: isMine ? "rgba(16,19,42,0.82)" : "var(--text-dim)", lineHeight: 1.4,
         }}>
           {translated}
           <div style={{ marginTop: 4 }}>
@@ -608,7 +622,7 @@ function TranscriptWithTranslate({ text, isMine, messageId }: { text: string; is
           <textarea autoFocus value={trDraft} onChange={(e) => setTrDraft(e.target.value)} rows={2} style={inputStyle} />
           <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
             {linkBtn(() => void saveTr(), "Save")}
-            {linkBtn(() => setEditingTr(false), "Cancel", { color: "var(--text-dim)" })}
+            {linkBtn(() => setEditingTr(false), "Cancel", { color: linkDim })}
           </div>
         </div>
       )}
