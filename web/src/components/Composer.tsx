@@ -50,11 +50,11 @@ export function Composer({
   const textRef = useRef<HTMLTextAreaElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [stickerOpen, setStickerOpen] = useState(false);
   // Persistent view-once flag. When ON, the next send (text, photo,
   // audio, voice) is marked media.viewOnce=true. The flag is sticky
   // across sends so the user can send a few view-once items in a row,
-  // and only resets when they click the eye again.
+  // and only resets when they turn it off. Toggled from inside the
+  // attach menu so it doesn't take a slot on the toolbar.
   const [viewOnce, setViewOnce] = useState(false);
 
   // Insert an emoji at the caret (or append) and keep focus so typing
@@ -158,7 +158,7 @@ export function Composer({
   // schema change is needed.
   async function sendSticker(emoji: string) {
     if (sending) return;
-    setStickerOpen(false);
+    setEmojiOpen(false);
     try {
       const res = await sendText(peerId, isGroup, emoji, replyTo ?? undefined);
       if (!res.ok) toast(`Sticker send failed: ${res.error}`, "error");
@@ -326,85 +326,89 @@ export function Composer({
                 className="glass"
                 style={{
                   position: "absolute", bottom: "100%", left: 0, marginBottom: 10,
-                  padding: 6, borderRadius: 14, display: "flex", gap: 4, zIndex: 20,
+                  padding: 8, borderRadius: 14, display: "flex", flexDirection: "column",
+                  gap: 6, zIndex: 20, minWidth: 220,
                 }}
                 onMouseLeave={() => setAttachOpen(false)}
               >
-                <AttachOption label="Photo" title="Send a photo or image"
-                  onClick={() => { setAttachOpen(false); imageRef.current?.click(); }}>
-                  <Icon.photo />
-                </AttachOption>
-                <AttachOption label="Audio" title="Send an audio file"
-                  onClick={() => { setAttachOpen(false); audioRef.current?.click(); }}>
-                  <Icon.play />
-                </AttachOption>
-                <AttachOption label="File" title="Send any file"
-                  onClick={() => { setAttachOpen(false); fileRef.current?.click(); }}>
-                  <Icon.paperclip />
-                </AttachOption>
+                {/* View-once chip lives inside the attach menu so the
+                    toolbar below stays short on narrow phones. Sticky
+                    across sends until the user turns it off — glow +
+                    "On" label make its armed state obvious at a glance. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewOnce((v) => {
+                      const next = !v;
+                      if (next) toast("View-once ON — the next send disappears after it's opened", "info");
+                      return next;
+                    });
+                  }}
+                  aria-pressed={viewOnce}
+                  style={{
+                    all: "unset", cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 10,
+                    padding: "8px 10px", minHeight: 40, borderRadius: 10,
+                    background: viewOnce
+                      ? "linear-gradient(135deg, rgba(138,125,255,0.35), rgba(23,195,230,0.35))"
+                      : "transparent",
+                    border: `1px solid ${viewOnce ? "var(--accent)" : "var(--line)"}`,
+                    color: "var(--text)", fontSize: 13,
+                  }}
+                >
+                  <Icon.viewOnce />
+                  <span style={{ flex: 1 }}>View once</span>
+                  <span className="small" style={{ color: viewOnce ? "var(--text)" : "var(--text-mute)" }}>
+                    {viewOnce ? "On" : "Off"}
+                  </span>
+                </button>
+                <div style={{ height: 1, background: "var(--line)", margin: "2px 0" }} />
+                <div style={{ display: "flex", gap: 4 }}>
+                  <AttachOption label="Photo" title="Send a photo or image"
+                    onClick={() => { setAttachOpen(false); imageRef.current?.click(); }}>
+                    <Icon.photo />
+                  </AttachOption>
+                  <AttachOption label="Audio" title="Send an audio file"
+                    onClick={() => { setAttachOpen(false); audioRef.current?.click(); }}>
+                    <Icon.play />
+                  </AttachOption>
+                  <AttachOption label="File" title="Send any file"
+                    onClick={() => { setAttachOpen(false); fileRef.current?.click(); }}>
+                    <Icon.paperclip />
+                  </AttachOption>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
           <Button variant="icon" onClick={() => setAttachOpen((v) => !v)}
-            title="Attach image, audio, or file" aria-label="Attach"><Icon.plus /></Button>
+            title="Attach image, audio, or file — or turn on view-once" aria-label="Attach"
+            style={viewOnce ? {
+              // Faint accent ring so the user can see view-once is
+              // armed even with the attach menu closed.
+              boxShadow: "inset 0 0 0 1.5px var(--accent)",
+            } : undefined}>
+            <Icon.plus />
+          </Button>
 
+          {/* One picker handles emoji AND stickers via dual callbacks.
+              Picks in the Stickers tab fire as a standalone message;
+              picks in every other tab insert into the draft. Saves
+              the toolbar an entire button and leaves more room for
+              the text input on narrow phones. */}
           <AnimatePresence>
             {emojiOpen && (
               <div style={{ position: "absolute", bottom: "100%", left: 40, marginBottom: 10, zIndex: 30 }}
                 onMouseLeave={() => setEmojiOpen(false)}>
                 <EmojiPicker
                   onPick={insertEmoji}
+                  onPickSticker={sendSticker}
                   onClose={() => setEmojiOpen(false)}
                 />
               </div>
             )}
           </AnimatePresence>
-          <Button variant="icon" onClick={() => { setEmojiOpen((v) => !v); setStickerOpen(false); }}
-            title="Emoji" aria-label="Emoji"><Icon.smile /></Button>
-
-          {/* Stickers — same picker, opened straight to its sticker
-              tab, but a pick fires as a standalone message instead of
-              inserting into the draft. */}
-          <AnimatePresence>
-            {stickerOpen && (
-              <div style={{ position: "absolute", bottom: "100%", left: 80, marginBottom: 10, zIndex: 30 }}
-                onMouseLeave={() => setStickerOpen(false)}>
-                <EmojiPicker
-                  mode="sticker"
-                  width={300}
-                  onPick={sendSticker}
-                  onClose={() => setStickerOpen(false)}
-                />
-              </div>
-            )}
-          </AnimatePresence>
-          <Button variant="icon" onClick={() => { setStickerOpen((v) => !v); setEmojiOpen(false); }}
-            title="Stickers" aria-label="Stickers">
-            <Icon.sticker />
-          </Button>
-
-          {/* View-once toggle. Dormant most of the time; when ON it
-              glows and sits on every send until the user clicks it
-              again. Covers text (rendered to a card), photos, audio
-              and voice notes uniformly. */}
-          <Button
-            variant="icon"
-            onClick={() => {
-              setViewOnce((v) => {
-                const next = !v;
-                if (next) toast("View-once ON — the next send disappears after it's opened", "info");
-                return next;
-              });
-            }}
-            title={viewOnce ? "View-once ON (click to turn off)" : "View once"}
-            aria-label={viewOnce ? "Turn view-once off" : "Turn view-once on"}
-            style={viewOnce ? {
-              background: "linear-gradient(135deg, var(--violet), var(--aqua))",
-              color: "#10132a",
-            } : undefined}
-          >
-            <Icon.viewOnce />
-          </Button>
+          <Button variant="icon" onClick={() => setEmojiOpen((v) => !v)}
+            title="Emoji & stickers" aria-label="Emoji and stickers"><Icon.smile /></Button>
 
           <textarea
             ref={textRef}

@@ -79,11 +79,18 @@ function pushRecent(e: string) {
 }
 
 export function EmojiPicker({
-  onPick, onClose, width = 320, mode = "emoji",
+  onPick, onPickSticker, onClose, width = 320, mode = "emoji",
 }: {
-  onPick: (emoji: string) => void; onClose?: () => void; width?: number;
-  // "sticker" opens on the sticker tab and renders bigger cells. The
-  // callback shape is the same — the host decides what to do with it.
+  onPick: (emoji: string) => void;
+  // Optional separate callback for picks from the Stickers tab. When
+  // present, a sticker-tab pick calls this instead of `onPick` so the
+  // Composer can send it as a standalone message while keeping the
+  // ordinary emoji tabs inserting into the draft. One picker, two
+  // behaviours — frees up a toolbar slot.
+  onPickSticker?: (emoji: string) => void;
+  onClose?: () => void; width?: number;
+  // "sticker" just opens on the sticker tab; it does NOT change which
+  // callback fires. The two callbacks above do that.
   mode?: "emoji" | "sticker";
 }) {
   // -2 is the virtual "Stickers" tab. -1 is Recent. 0..N are CATEGORIES.
@@ -137,7 +144,12 @@ export function EmojiPicker({
         )}
         {shown.map((e, i) => (
           <button key={`${e}-${i}`}
-            onClick={() => { onPick(e); pushRecent(e); onClose?.(); }}
+            onClick={() => {
+              if (isStickerView && onPickSticker) onPickSticker(e);
+              else onPick(e);
+              pushRecent(e);
+              onClose?.();
+            }}
             aria-label={`${isStickerView ? "Sticker" : "Emoji"} ${e}`}
             style={{
               all: "unset", cursor: "pointer",
