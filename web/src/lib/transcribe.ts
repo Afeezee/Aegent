@@ -35,18 +35,22 @@ async function loadPipeline(onProgress?: ProgressCb) {
     const { pipeline, env } = await import("@huggingface/transformers");
     env.allowLocalModels = false;
     env.useBrowserCache = true;
-    // dtype: previously set to "q8" for a smaller (~40 MB) model, but
-    // the ONNX runtime shipped with @huggingface/transformers 4.x
-    // rejects some q8-quantised whisper checkpoints with
-    // "Missing required scale ... embed_tokens.weight_merged_0_scale".
-    // Fall back to fp32 (~150 MB one-time download, then browser
-    // cache). If a specific device pulls down bandwidth is tight,
-    // switch encoder to q4 and decoder to fp32 which is the mixed
-    // combo transformers.js recommends for Whisper — but we'd need to
-    // verify against the same runtime version first.
+    // dtype: use the mixed combo transformers.js recommends for
+    // Whisper on low-bandwidth devices — q4 encoder (big chunk,
+    // tolerates aggressive quantisation) + fp32 decoder (where WER
+    // is most sensitive). Drops the one-time download from ~150 MB
+    // (pure fp32) to ~35–45 MB.
+    //
+    // Pure q8 was tried earlier and failed on this ONNX runtime with
+    // "Missing required scale ... embed_tokens.weight_merged_0_scale"
+    // because q8 quantises the decoder embeddings too. Splitting
+    // encoder/decoder sidesteps that: the decoder stays at fp32 and
+    // the broken merged-scale path never runs. If a device somehow
+    // can't load this combo, the catch below surfaces a tagged
+    // error and the user still sees a readable failure.
     return await pipeline("automatic-speech-recognition", DEFAULT_MODEL, {
       progress_callback: onProgress,
-      dtype: "fp32",
+      dtype: { encoder_model: "q4", decoder_model_merged: "fp32" },
     });
   } catch (e) {
     throw new TranscribeError("model_load", e);
