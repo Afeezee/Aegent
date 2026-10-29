@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db } from "./db.js";
 import { AuthError, ForbiddenError } from "./auth.js";
+import { COMMISSION_BPS } from "./paypal.js";
 
 type AuthedReq = Request & { userId: string };
 
@@ -277,6 +278,171 @@ export async function deleteProduct(req: AuthedReq, res: Response) {
       "UPDATE business_products SET archived_at = ? WHERE id = ?",
     ).run(Date.now(), existing.id);
     res.json({ ok: true });
+  } catch (e) { handle(res, e); }
+}
+
+// ---- earnings + payouts (Addendum A) ----
+
+type OrderRow = {
+  id: string;
+  business_id: string;
+  items_json: string;
+  total_cents: number;
+  currency: string;
+  fee_cents: number;
+  net_cents: number;
+  fee_bps: number;
+  status: string;
+  created_at: number;
+};
+
+type PayoutRow = {
+  id: string;
+  business_id: string;
+  amount_cents: number;
+  currency: string;
+  destination: string | null;
+  destination_kind: string | null;
+  status: string;
+  paypal_batch_id: string | null;
+  requested_at: number;
+  completed_at: number | null;
+};
+
+function toPayoutOut(r: PayoutRow) {
+  return {
+    id: r.id, businessId: r.business_id,
+    amountCents: r.amount_cents, currency: r.currency,
+    destination: r.destination, destinationKind: r.destination_kind,
+    status: r.status, paypalBatchId: r.paypal_batch_id,
+    requestedAt: r.requested_at, completedAt: r.completed_at,
+  };
+}
+
+// Earnings view. One query from the server's perspective is a few
+// aggregates + a bounded "recent orders" fetch — cheap even on a
+// seller with thousands of orders because of the (business_id,
+// created_at) index.
+export async function getBusinessEarnings(req: AuthedReq, res: Response) {
+  try {
+    const biz = await requireOwned(req.params.id, req.userId);
+
+    const captured = await db.prepare(
+      `SELECT COALESCE(SUM(total_cents), 0) AS gross,
+              COALESCE(SUM(fee_cents),   0) AS fee,
+              COALESCE(SUM(net_cents),   0) AS net,
+              MIN(currency)                 AS currency
+         FROM business_orders
+        WHERE business_id = ? AND status = 'captured'`,
+    ).get<{ gross: number; fee: number; net: number; currency: string | null }>(biz.id);
+
+    const payoutAgg = await db.prepare(
+      `SELECT COALESCE(SUM(CASE WHEN status = 'paid'      THEN amount_cents ELSE 0 END), 0) AS paid_out,
+              COALESCE(SUM(CASE WHEN status = 'requested' THEN amount_cents ELSE 0 END), 0) AS pending
+         FROM business_payouts
+        WHERE business_id = ?`,
+    ).get<{ paid_out: number; pending: number }>(biz.id);
+
+    const totalGross = Number(captured?.gross ?? 0);
+    const totalFee   = Number(captured?.fee   ?? 0);
+    const totalNet   = Number(captured?.net   ?? 0);
+    const paidOut    = Number(payoutAgg?.paid_out ?? 0);
+    const pending    = Number(payoutAgg?.pending  ?? 0);
+    // "Available" never goes negative — a defensive floor in case a
+    // manual DB correction ever leaves the math upside down.
+    const available  = Math.max(0, totalNet - paidOut - pending);
+
+    const recent = await db.prepare(
+      `SELECT id, business_id, items_json, total_cents, currency,
+              fee_cents, net_cents, fee_bps, status, created_at
+         FROM business_orders
+        WHERE business_id = ?
+        ORDER BY created_at DESC LIMIT 20`,
+    ).all<OrderRow>(biz.id);
+
+    res.json({
+      totalGrossCents:    totalGross,
+      totalFeeCents:      totalFee,
+      totalNetCents:      totalNet,
+      paidOutCents:       paidOut,
+      pendingPayoutCents: pending,
+      availableCents:     available,
+      currency: captured?.currency ?? "USD",
+      // The current take-rate, surfaced here so the UI can show
+      // "Aegent takes 5% per sale" without hard-coding it client-side.
+      commissionBps: COMMISSION_BPS,
+      recentOrders: recent.map((r) => ({
+        id: r.id,
+        items: safeJson(r.items_json),
+        totalCents: r.total_cents,
+        feeCents: r.fee_cents,
+        netCents: r.net_cents,
+        feeBps:   r.fee_bps,
+        currency: r.currency,
+        status:   r.status,
+        createdAt: Number(r.created_at),
+      })),
+    });
+  } catch (e) { handle(res, e); }
+}
+
+const payoutRequestSchema = z.object({
+  amountCents: z.number().int().positive().optional(),
+  destination: z.string().trim().min(1).max(200),
+  destinationKind: z.enum(["paypal"]).default("paypal"),
+});
+
+// Record a payout request. Does NOT move money; the follow-up PayPal
+// Payouts call will flip status to 'paid' later. Guarded by the same
+// available-balance arithmetic as the Earnings view so a seller can't
+// request more than they've actually earned.
+export async function requestPayout(req: AuthedReq, res: Response) {
+  try {
+    const biz = await requireOwned(req.params.id, req.userId);
+    const body = payoutRequestSchema.parse(req.body);
+
+    // Reuse the earnings math inline — cheaper than re-fetching the
+    // whole response, and keeps the two paths in agreement.
+    const net = await db.prepare(
+      "SELECT COALESCE(SUM(net_cents), 0) AS net, MIN(currency) AS currency FROM business_orders WHERE business_id = ? AND status = 'captured'",
+    ).get<{ net: number; currency: string | null }>(biz.id);
+    const payoutAgg = await db.prepare(
+      "SELECT COALESCE(SUM(amount_cents), 0) AS used FROM business_payouts WHERE business_id = ? AND status IN ('paid','requested')",
+    ).get<{ used: number }>(biz.id);
+    const available = Math.max(0, Number(net?.net ?? 0) - Number(payoutAgg?.used ?? 0));
+    const amount = body.amountCents ?? available;
+    if (amount <= 0) {
+      return res.status(400).json({ error: "no_balance", message: "Nothing available to pay out yet." });
+    }
+    if (amount > available) {
+      return res.status(400).json({
+        error: "insufficient_balance",
+        message: `Only ${(available / 100).toFixed(2)} available; you asked for ${(amount / 100).toFixed(2)}.`,
+      });
+    }
+
+    const id = randomUUID();
+    const now = Date.now();
+    await db.prepare(
+      `INSERT INTO business_payouts
+         (id, business_id, amount_cents, currency, destination, destination_kind,
+          status, paypal_batch_id, requested_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'requested', NULL, ?, NULL)`,
+    ).run(id, biz.id, amount, net?.currency ?? "USD", body.destination, body.destinationKind, now);
+
+    const row = await db.prepare("SELECT * FROM business_payouts WHERE id = ?").get<PayoutRow>(id);
+    res.json(toPayoutOut(row!));
+  } catch (e) { handle(res, e); }
+}
+
+export async function listPayouts(req: AuthedReq, res: Response) {
+  try {
+    const biz = await requireOwned(req.params.id, req.userId);
+    const rows = await db.prepare(
+      `SELECT * FROM business_payouts WHERE business_id = ?
+        ORDER BY requested_at DESC LIMIT 50`,
+    ).all<PayoutRow>(biz.id);
+    res.json(rows.map(toPayoutOut));
   } catch (e) { handle(res, e); }
 }
 

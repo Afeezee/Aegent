@@ -23,10 +23,12 @@
 // agent (with the catalogue in scope) + the anchored product strip do
 // the rest. This page is strictly "I am the owner, I manage mine."
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Avatar, Button, Icon, toast, toastDismiss, toastUpdate } from "../components/ui.js";
-import { api, type BusinessDetail, type ProductApi } from "../lib/api.js";
+import {
+  api, type BusinessDetail, type EarningsResponse, type PayoutRow, type ProductApi,
+} from "../lib/api.js";
 import { pickFile, uploadMedia } from "../lib/media.js";
 import type { MediaRef } from "../lib/store.js";
 
@@ -77,6 +79,8 @@ export function Business() {
   return (
     <div style={{ padding: "20px 22px", overflowY: "auto", height: "100%" }}>
       <ProfileHeader biz={biz} onEdit={() => setEditing(true)} />
+
+      <EarningsPanel businessId={biz.id} />
 
       <div style={{ marginTop: 24, display: "flex", alignItems: "center", gap: 10 }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>Catalogue</h2>
@@ -456,4 +460,234 @@ export function formatMoney(cents: number, currency: string): string {
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
   }
+}
+
+// Seller-only earnings dashboard. Three visible units:
+//   1. Headline numbers (available / earned / commission / pending).
+//   2. Request-payout action (collects PayPal email lazily on first use).
+//   3. Payout history + recent-orders table.
+// Collapsed by default so a seller landing on the Business page sees
+// the catalogue first; one tap expands the numbers. Loads earnings
+// data on expand so a seller with no sales yet pays nothing to render.
+function EarningsPanel({ businessId }: { businessId: string }) {
+  const [open, setOpen] = useState(false);
+  const [earnings, setEarnings] = useState<EarningsResponse | null>(null);
+  const [payouts, setPayouts] = useState<PayoutRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [payoutOpen, setPayoutOpen] = useState(false);
+
+  const reload = useCallback(async () => {
+    setLoading(true); setErr(null);
+    try {
+      const [e, p] = await Promise.all([
+        api.getBusinessEarnings(businessId),
+        api.listPayouts(businessId),
+      ]);
+      setEarnings(e); setPayouts(p);
+    } catch (ex) { setErr((ex as Error).message); }
+    finally { setLoading(false); }
+  }, [businessId]);
+
+  useEffect(() => { if (open) void reload(); }, [open, reload]);
+
+  const commissionPct = earnings ? (earnings.commissionBps / 100).toFixed(1).replace(/\.0$/, "") : "5";
+
+  return (
+    <div className="glass" style={{ marginTop: 16, padding: 14, borderRadius: 14 }}>
+      <button
+        type="button" onClick={() => setOpen((v) => !v)}
+        style={{
+          all: "unset", cursor: "pointer", width: "100%",
+          display: "flex", alignItems: "center", gap: 10,
+        }}
+      >
+        <h2 style={{ margin: 0, fontSize: 18, flex: 1 }}>Earnings</h2>
+        {earnings && (
+          <span className="small" style={{ color: "var(--text-dim)" }}>
+            Available {formatMoney(earnings.availableCents, earnings.currency)}
+          </span>
+        )}
+        <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}>
+          <Icon.chevron />
+        </span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 14 }}>
+          {loading && <div className="small" style={{ color: "var(--text-mute)" }}>Loading…</div>}
+          {err && (
+            <div className="small" style={{ color: "var(--danger)" }}>
+              Couldn't load earnings: {err}
+              <Button size="small" variant="ghost" onClick={() => void reload()}>Retry</Button>
+            </div>
+          )}
+          {earnings && (
+            <>
+              <div style={{
+                display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10,
+              }}>
+                <Stat label="Available to withdraw" value={formatMoney(earnings.availableCents, earnings.currency)} big />
+                <Stat label="Total earned" value={formatMoney(earnings.totalNetCents, earnings.currency)} />
+                <Stat label={`Aegent fee (${commissionPct}%)`} value={formatMoney(earnings.totalFeeCents, earnings.currency)} dim />
+                <Stat label="Pending payout" value={formatMoney(earnings.pendingPayoutCents, earnings.currency)} dim />
+              </div>
+              <div className="small" style={{ color: "var(--text-dim)", lineHeight: 1.5 }}>
+                Aegent takes a flat <strong>{commissionPct}%</strong> of each captured sale and is the merchant of record on PayPal. The rest is yours; request a payout any time.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <Button variant="primary" onClick={() => setPayoutOpen((v) => !v)}
+                  disabled={earnings.availableCents <= 0}>
+                  <Icon.send /> Request payout
+                </Button>
+                {earnings.availableCents <= 0 && (
+                  <span className="small" style={{ color: "var(--text-mute)", alignSelf: "center" }}>
+                    Nothing available yet — your first captured sale will land here.
+                  </span>
+                )}
+              </div>
+              {payoutOpen && (
+                <PayoutForm
+                  businessId={businessId}
+                  maxCents={earnings.availableCents}
+                  currency={earnings.currency}
+                  onCancel={() => setPayoutOpen(false)}
+                  onDone={async () => { setPayoutOpen(false); await reload(); }}
+                />
+              )}
+              {payouts.length > 0 && (
+                <div>
+                  <div className="small" style={{ color: "var(--text-mute)", marginBottom: 6 }}>Payout history</div>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {payouts.map((p) => (
+                      <div key={p.id} style={{
+                        display: "flex", alignItems: "center", gap: 10, padding: "6px 10px",
+                        borderRadius: 10, background: "var(--glass-bg-hi)",
+                      }}>
+                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {formatMoney(p.amountCents, p.currency)}
+                          {p.destination ? ` → ${p.destination}` : ""}
+                        </span>
+                        <span className="small" style={{ color: p.status === "paid" ? "var(--ok)" : "var(--text-dim)" }}>
+                          {p.status}
+                        </span>
+                        <span className="small" style={{ color: "var(--text-mute)" }}>
+                          {new Date(p.requestedAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {earnings.recentOrders.length > 0 && (
+                <div>
+                  <div className="small" style={{ color: "var(--text-mute)", marginBottom: 6 }}>Recent orders</div>
+                  <div style={{ display: "grid", gap: 4 }}>
+                    {earnings.recentOrders.map((o) => (
+                      <OrderLine key={o.id} order={o} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, big, dim }: { label: string; value: string; big?: boolean; dim?: boolean }) {
+  return (
+    <div style={{
+      padding: 10, borderRadius: 10,
+      background: big
+        ? "linear-gradient(135deg, rgba(138,125,255,0.18), rgba(23,195,230,0.12))"
+        : "var(--glass-bg-hi)",
+      border: "1px solid var(--glass-border-hi)",
+    }}>
+      <div className="small" style={{ color: "var(--text-dim)" }}>{label}</div>
+      <div style={{
+        fontSize: big ? 22 : 16, fontWeight: 700, marginTop: 2,
+        color: dim ? "var(--text-dim)" : "var(--text)",
+      }}>{value}</div>
+    </div>
+  );
+}
+
+function OrderLine({ order }: { order: import("../lib/api.js").EarningsOrderRow }) {
+  // items_json is an array of {name, qty, unitPriceCents}; summarise.
+  const items = Array.isArray(order.items) ? order.items : [];
+  const label = items.map((it) => {
+    const i = it as { qty?: number; name?: string };
+    return `${i.qty ?? 1}× ${i.name ?? "item"}`;
+  }).join(", ") || "(no items)";
+  const captured = order.status === "captured";
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10, padding: "6px 10px",
+      borderRadius: 10, background: "var(--glass-bg-hi)",
+      opacity: captured ? 1 : 0.6,
+    }}>
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+        {label}
+      </span>
+      <span className="small" style={{ color: "var(--text-dim)" }}>
+        gross {formatMoney(order.totalCents, order.currency)}
+      </span>
+      <span className="small" style={{ color: captured ? "var(--accent-strong)" : "var(--text-mute)" }}>
+        you {formatMoney(order.netCents, order.currency)}
+      </span>
+      {!captured && <span className="small" style={{ color: "var(--text-mute)" }}>{order.status}</span>}
+    </div>
+  );
+}
+
+function PayoutForm({
+  businessId, maxCents, currency, onCancel, onDone,
+}: {
+  businessId: string;
+  maxCents: number;
+  currency: string;
+  onCancel: () => void;
+  onDone: () => void | Promise<void>;
+}) {
+  const [dest, setDest] = useState("");
+  const [amountStr, setAmountStr] = useState((maxCents / 100).toFixed(2));
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    const d = dest.trim();
+    if (!d) { toast("Add a PayPal email.", "warn"); return; }
+    const cents = Math.round(parseFloat(amountStr) * 100);
+    if (!Number.isFinite(cents) || cents <= 0) { toast("Enter a valid amount.", "warn"); return; }
+    if (cents > maxCents) { toast(`Only ${formatMoney(maxCents, currency)} available.`, "warn"); return; }
+    setBusy(true);
+    try {
+      await api.requestPayout(businessId, { amountCents: cents, destination: d, destinationKind: "paypal" });
+      toast("Payout requested", "ok");
+      await onDone();
+    } catch (e) { toast(`Couldn't request payout: ${(e as Error).message}`, "error"); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="glass" style={{ padding: 12, borderRadius: 12, border: "1px solid var(--accent)" }}>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>Request a payout</div>
+      <label className="small" style={{ color: "var(--text-dim)" }}>PayPal email</label>
+      <input value={dest} onChange={(e) => setDest(e.target.value)} type="email"
+        placeholder="you@example.com" style={{ width: "100%", marginBottom: 8 }} />
+      <label className="small" style={{ color: "var(--text-dim)" }}>Amount ({currency})</label>
+      <input value={amountStr} onChange={(e) => setAmountStr(e.target.value)}
+        inputMode="decimal" style={{ width: "100%", marginBottom: 8 }} />
+      <div className="small" style={{ color: "var(--text-dim)", marginBottom: 10 }}>
+        Max available: {formatMoney(maxCents, currency)}. This records the request on your account; actual PayPal payout wiring is coming — for now the amount moves from Available to Pending.
+      </div>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button variant="primary" onClick={submit} disabled={busy || !dest.trim()}>
+          {busy ? "Submitting…" : "Request"}
+        </Button>
+      </div>
+    </div>
+  );
 }

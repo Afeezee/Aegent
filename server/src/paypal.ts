@@ -44,6 +44,15 @@ export function paypalEnabled(): boolean {
   return !!(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
 }
 
+// Aegent's cut of every captured order, in basis points (1/100th of a
+// percent). 500 = 5%. Deliberately low to minimise seller friction and
+// shown openly in each seller's Earnings view — no hidden fees. If this
+// ever needs to vary per-business, promote it to a column on
+// `businesses` and read it per-order at create time. For now it's one
+// visible number in one place, which is what a hackathon demo should
+// show. Compare: Shopify ~2.9% + 30¢, Gumroad 10%, Etsy 6.5% + listing.
+export const COMMISSION_BPS = 500;
+
 // Module-level cache for the OAuth2 access token. PayPal access tokens
 // expire in ~9 hours; cache with a 5s skew so a mid-flight request
 // doesn't race the expiry.
@@ -125,6 +134,13 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     const totalCents = resolved.reduce((s, it) => s + it.unitPriceCents * it.qty, 0);
     const activeCurrency = currency ?? "USD";
 
+    // Commission split, frozen on the row. The seller sees this exact
+    // breakdown in their Earnings view. PayPal still charges the full
+    // totalCents to the buyer; this is purely an internal ledger
+    // between Aegent (merchant of record) and the seller.
+    const feeCents = Math.floor(totalCents * COMMISSION_BPS / 10000);
+    const netCents = totalCents - feeCents;
+
     // Insert the local audit row BEFORE calling PayPal, so a timeout
     // between create-order and our row-insert never leaves a PayPal
     // order with no local counterpart.
@@ -132,9 +148,15 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     const now = Date.now();
     await db.prepare(
       `INSERT INTO business_orders
-         (id, business_id, buyer_id, items_json, total_cents, currency, paypal_order_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, 'created', ?, NULL)`,
-    ).run(orderId, biz.id, req.userId, JSON.stringify(resolved), totalCents, activeCurrency, now);
+         (id, business_id, buyer_id, items_json, total_cents, currency,
+          fee_cents, net_cents, fee_bps,
+          paypal_order_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'created', ?, NULL)`,
+    ).run(
+      orderId, biz.id, req.userId, JSON.stringify(resolved), totalCents, activeCurrency,
+      feeCents, netCents, COMMISSION_BPS,
+      now,
+    );
 
     // Create the PayPal order. intent CAPTURE lets us capture
     // immediately after the buyer approves; no separate authorize step.

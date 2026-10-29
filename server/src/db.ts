@@ -505,6 +505,27 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_orders_buyer
     ON business_orders(buyer_id, created_at);
 
+  -- Payout ledger. One row per "I want my money, please" request. Status
+  -- starts at 'requested' and flips to 'paid' when (and only when) a
+  -- PayPal Payouts call lands — until that integration ships, the row
+  -- lives at 'requested' and the Earnings view surfaces the pending
+  -- balance. paypal_batch_id captures PayPal's own payout-batch id for
+  -- the audit trail once the call wires up.
+  CREATE TABLE IF NOT EXISTS business_payouts (
+    id                TEXT PRIMARY KEY,
+    business_id       TEXT NOT NULL REFERENCES businesses(id),
+    amount_cents      INTEGER NOT NULL,
+    currency          TEXT NOT NULL,
+    destination       TEXT,
+    destination_kind  TEXT,
+    status            TEXT NOT NULL DEFAULT 'requested',
+    paypal_batch_id   TEXT,
+    requested_at      ${BIG} NOT NULL,
+    completed_at      ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_payouts_business
+    ON business_payouts(business_id, requested_at);
+
   -- Group moderation.
   --
   -- Invite tokens are stored hashed, the same shape refresh tokens use:
@@ -745,6 +766,14 @@ const ADDED_COLUMNS: AddedColumn[] = [
   { table: "users", name: "avatar", ddl: "ALTER TABLE users ADD COLUMN avatar TEXT" },
   { table: "users", name: "status_text", ddl: "ALTER TABLE users ADD COLUMN status_text TEXT" },
   { table: "users", name: "status_until", ddl: "ALTER TABLE users ADD COLUMN status_until BIGINT" },
+  // Commerce Layer Addendum A: commission split on each captured order.
+  // These columns are additive — existing rows safely default to a 0 fee
+  // (no commission on orders that pre-date the feature), so no backfill
+  // is needed. fee_bps is stored per-row so a later rate change doesn't
+  // retroactively rewrite history.
+  { table: "business_orders", name: "fee_cents", ddl: "ALTER TABLE business_orders ADD COLUMN fee_cents INTEGER NOT NULL DEFAULT 0" },
+  { table: "business_orders", name: "net_cents", ddl: "ALTER TABLE business_orders ADD COLUMN net_cents INTEGER NOT NULL DEFAULT 0" },
+  { table: "business_orders", name: "fee_bps", ddl: "ALTER TABLE business_orders ADD COLUMN fee_bps INTEGER NOT NULL DEFAULT 0" },
 ];
 
 export async function initSchema(): Promise<void> {

@@ -292,6 +292,45 @@ export type ProductApi = {
 
 export type BusinessDetail = BusinessApi & { products?: ProductApi[] };
 
+// Earnings snapshot for a business's owner. One request, all the
+// numbers a seller cares about + their last 20 orders. Shaped so the
+// client renders without any arithmetic — server-side ledger is the
+// source of truth.
+export type EarningsOrderRow = {
+  id: string;
+  items: unknown; // frozen snapshot from items_json
+  totalCents: number;
+  feeCents: number;
+  netCents: number;
+  feeBps: number;
+  currency: string;
+  status: string;
+  createdAt: number;
+};
+export type EarningsResponse = {
+  totalGrossCents: number;
+  totalFeeCents: number;
+  totalNetCents: number;
+  paidOutCents: number;
+  pendingPayoutCents: number;
+  availableCents: number;
+  currency: string;
+  commissionBps: number;
+  recentOrders: EarningsOrderRow[];
+};
+export type PayoutRow = {
+  id: string;
+  businessId: string;
+  amountCents: number;
+  currency: string;
+  destination: string | null;
+  destinationKind: string | null;
+  status: "requested" | "paid" | "failed" | string;
+  paypalBatchId: string | null;
+  requestedAt: number;
+  completedAt: number | null;
+};
+
 export type RecoveryChallenge = {
   challengeId: string;
   serverPublicKey: string;
@@ -536,6 +575,20 @@ export const api = {
       `/api/checkout/orders/${encodeURIComponent(orderId)}/capture`,
       { method: "POST", body: "{}" },
     ),
+  // ---- earnings + payouts ----
+  // The seller's view of what Aegent (merchant of record) owes them.
+  // The buyer never touches these endpoints.
+  getBusinessEarnings: (id: string) =>
+    req<EarningsResponse>(`/api/business/${encodeURIComponent(id)}/earnings`),
+  requestPayout: (id: string, body: {
+    amountCents?: number;
+    destination: string;
+    destinationKind: "paypal";
+  }) => req<PayoutRow>(`/api/business/${encodeURIComponent(id)}/payout`, {
+    method: "POST", body: JSON.stringify(body),
+  }),
+  listPayouts: (id: string) =>
+    req<PayoutRow[]>(`/api/business/${encodeURIComponent(id)}/payouts`),
   // Exact reconciliation pair: every envelope id the relay holds for us,
   // and retrieval of specific envelopes by id.
   inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),

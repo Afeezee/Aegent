@@ -57,7 +57,8 @@ import {
 } from "./discover.js";
 import {
   addProduct, createOrUpdateBusiness, deleteProduct,
-  getBusinessByOwner, getBusinessPublic, getMyBusiness, updateProduct,
+  getBusinessByOwner, getBusinessEarnings, getBusinessPublic, getMyBusiness,
+  listPayouts, requestPayout, updateProduct,
 } from "./business.js";
 import {
   captureCheckoutOrder, createCheckoutOrder, listMyOrders, paypalEnabled,
@@ -1257,6 +1258,12 @@ app.patch("/api/business/:id/products/:productId", authed, (req, res) =>
   updateProduct(req as AuthedReq, res));
 app.delete("/api/business/:id/products/:productId", authed, (req, res) =>
   deleteProduct(req as AuthedReq, res));
+app.get("/api/business/:id/earnings", authed, (req, res) =>
+  getBusinessEarnings(req as AuthedReq, res));
+app.post("/api/business/:id/payout", authed, (req, res) =>
+  requestPayout(req as AuthedReq, res));
+app.get("/api/business/:id/payouts", authed, (req, res) =>
+  listPayouts(req as AuthedReq, res));
 
 // ---- Checkout (PayPal sandbox proxy) ----
 app.post("/api/checkout/orders", authed, (req, res) =>
