@@ -41,6 +41,8 @@ type ProductRow = {
   price_cents: number;
   currency: string;
   image_json: string | null;
+  extra_images_json: string | null;
+  delivery_text: string | null;
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
@@ -67,6 +69,8 @@ export type ProductOut = {
   priceCents: number;
   currency: string;
   image: unknown | null;
+  extraImages: unknown[];       // never null — empty array if none, so client loops safely
+  deliveryText: string | null;
   createdAt: number;
   updatedAt: number | null;
 };
@@ -79,10 +83,13 @@ function toBusinessOut(r: BusinessRow): BusinessOut {
   };
 }
 function toProductOut(r: ProductRow): ProductOut {
+  const extras = r.extra_images_json ? safeJson(r.extra_images_json) : null;
   return {
     id: r.id, businessId: r.business_id, name: r.name, description: r.description,
     priceCents: r.price_cents, currency: r.currency,
     image: r.image_json ? safeJson(r.image_json) : null,
+    extraImages: Array.isArray(extras) ? extras : [],
+    deliveryText: r.delivery_text,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -212,6 +219,12 @@ const productSchema = z.object({
   priceCents: z.number().int().nonnegative().max(10_000_000),
   currency: z.string().trim().length(3).toUpperCase().optional(),
   image: mediaRefSchema.optional().nullable(),
+  // Up to 7 additional images (cover + 7 = 8 total, matching the diary
+  // album cap already in play — a buyer scrolling through "all photos"
+  // of a product is doing the same thing a reader is doing with a
+  // multi-photo diary entry, so one limit covers both).
+  extraImages: z.array(mediaRefSchema).max(7).optional().nullable(),
+  deliveryText: z.string().trim().max(500).optional().nullable(),
 });
 
 export async function addProduct(req: AuthedReq, res: Response) {
@@ -222,12 +235,16 @@ export async function addProduct(req: AuthedReq, res: Response) {
     const now = Date.now();
     await db.prepare(
       `INSERT INTO business_products
-         (id, business_id, name, description, price_cents, currency, image_json, created_at, updated_at, archived_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+         (id, business_id, name, description, price_cents, currency,
+          image_json, extra_images_json, delivery_text,
+          created_at, updated_at, archived_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
     ).run(
       id, req.params.id, body.name, body.description ?? null,
       body.priceCents, body.currency ?? "USD",
       body.image ? JSON.stringify(body.image) : null,
+      body.extraImages && body.extraImages.length > 0 ? JSON.stringify(body.extraImages) : null,
+      body.deliveryText ?? null,
       now,
     );
     const row = await db.prepare("SELECT * FROM business_products WHERE id = ?")
@@ -253,11 +270,18 @@ export async function updateProduct(req: AuthedReq, res: Response) {
     const currency = body.currency ?? existing.currency;
     const imageJson = body.image === undefined ? existing.image_json
       : body.image === null ? null : JSON.stringify(body.image);
+    const extraJson = body.extraImages === undefined ? existing.extra_images_json
+      : (body.extraImages === null || body.extraImages.length === 0)
+        ? null
+        : JSON.stringify(body.extraImages);
+    const delivery = body.deliveryText === undefined ? existing.delivery_text
+      : body.deliveryText === null ? null : body.deliveryText;
     await db.prepare(
       `UPDATE business_products
-          SET name = ?, description = ?, price_cents = ?, currency = ?, image_json = ?, updated_at = ?
+          SET name = ?, description = ?, price_cents = ?, currency = ?,
+              image_json = ?, extra_images_json = ?, delivery_text = ?, updated_at = ?
         WHERE id = ?`,
-    ).run(name, desc, price, currency, imageJson, Date.now(), existing.id);
+    ).run(name, desc, price, currency, imageJson, extraJson, delivery, Date.now(), existing.id);
     const row = await db.prepare("SELECT * FROM business_products WHERE id = ?")
       .get<ProductRow>(existing.id);
     res.json(toProductOut(row!));

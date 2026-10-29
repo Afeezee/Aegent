@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import { Avatar, Button, Icon } from "../components/ui.js";
 import { MediaView } from "../components/MediaView.js";
 import { fetchDiscoverFeed, type DiscoverPost } from "../lib/discover.js";
+import { productAlbum, ProductLightbox } from "./Business.js";
 
 function relTime(ts: number): string {
   const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
@@ -42,7 +43,11 @@ function linkify(text: string): (string | JSX.Element)[] {
   return parts;
 }
 
-export function Discover({ onMessage }: { onMessage: (authorId: string) => void }) {
+// `onMessage` now receives the full post so the host (Home) can
+// pre-fill the DM composer with a quoted reference to what the user
+// tapped — a product name + price for an ad, a text excerpt for a
+// personal post. The host decides exactly how to render the quote.
+export function Discover({ onMessage }: { onMessage: (post: DiscoverPost) => void }) {
   const [posts, setPosts] = useState<DiscoverPost[]>([]);
   const [before, setBefore] = useState<number | undefined>(undefined);
   const [done, setDone] = useState(false);
@@ -120,7 +125,7 @@ export function Discover({ onMessage }: { onMessage: (authorId: string) => void 
   );
 }
 
-function DiscoverCard({ post, onMessage }: { post: DiscoverPost; onMessage: (authorId: string) => void }) {
+function DiscoverCard({ post, onMessage }: { post: DiscoverPost; onMessage: (post: DiscoverPost) => void }) {
   // Business ads look visibly different from personal posts: a small
   // "Business" tag, product image prominent, name + price, and a
   // "Message {BusinessName}" CTA. Same openThread-based "slide into
@@ -147,7 +152,7 @@ function DiscoverCard({ post, onMessage }: { post: DiscoverPost; onMessage: (aut
           <div className="small">@{post.author.handle} · {relTime(post.createdAt)}</div>
         </div>
         <Button size="small" variant="primary" style={{ marginLeft: "auto" }}
-          onClick={() => onMessage(post.authorId)}>
+          onClick={() => onMessage(post)}>
           <Icon.send /> Message
         </Button>
       </header>
@@ -179,18 +184,20 @@ function BusinessAdCard({
   post, onMessage,
 }: {
   post: Extract<DiscoverPost, { adKind: "business_ad" }>;
-  onMessage: (authorId: string) => void;
+  onMessage: (post: DiscoverPost) => void;
 }) {
-  const image = post.product.image as import("../lib/store.js").MediaRef | null;
+  const album = productAlbum(post.product);
+  const cover = album[0] ?? null;
   const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState(false);
   useEffect(() => {
-    if (!image) { setImgUrl(null); return; }
+    if (!cover) { setImgUrl(null); return; }
     let live = true;
-    import("../lib/media.js").then((m) => m.objectUrlFor(image))
+    import("../lib/media.js").then((m) => m.objectUrlFor(cover))
       .then((u) => { if (live) setImgUrl(u); })
       .catch(() => { if (live) setImgUrl(null); });
     return () => { live = false; };
-  }, [image?.blobId]);
+  }, [cover?.blobId]);
   const price = `${(post.product.priceCents / 100).toFixed(2)} ${post.product.currency}`;
   return (
     <motion.article
@@ -219,23 +226,41 @@ function BusinessAdCard({
         }}>Business</span>
       </header>
       {imgUrl && (
-        <div style={{ borderRadius: 12, overflow: "hidden", maxHeight: 320 }}>
+        <button type="button" onClick={() => setLightbox(true)}
+          aria-label={album.length > 1 ? `View ${album.length} photos` : "View photo"}
+          style={{
+            all: "unset", cursor: "zoom-in", position: "relative",
+            borderRadius: 12, overflow: "hidden", maxHeight: 320, display: "block",
+          }}>
           <img src={imgUrl} alt={post.product.name}
             style={{ width: "100%", height: "auto", display: "block", objectFit: "cover" }} />
-        </div>
+          {album.length > 1 && (
+            <span style={{
+              position: "absolute", right: 10, bottom: 10,
+              padding: "3px 9px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+              background: "rgba(0,0,0,0.65)", color: "#fff",
+            }}>+{album.length - 1} more</span>
+          )}
+        </button>
       )}
       <div style={{ padding: "0 4px" }}>
         <div style={{ fontSize: 16, fontWeight: 600 }}>{post.product.name}</div>
         <div style={{ fontSize: 15, color: "var(--accent-strong)", marginTop: 2 }}>{price}</div>
+        {post.product.deliveryText && (
+          <div className="small" style={{ color: "var(--text-dim)", marginTop: 4 }}>
+            🚚 {post.product.deliveryText}
+          </div>
+        )}
         {post.product.description && (
           <div className="small" style={{ color: "var(--text-dim)", marginTop: 6, lineHeight: 1.4 }}>
             {post.product.description}
           </div>
         )}
       </div>
-      <Button variant="primary" style={{ marginTop: 4 }} onClick={() => onMessage(post.authorId)}>
+      <Button variant="primary" style={{ marginTop: 4 }} onClick={() => onMessage(post)}>
         <Icon.send /> Message {post.businessName}
       </Button>
+      {lightbox && <ProductLightbox images={album} onClose={() => setLightbox(false)} />}
     </motion.article>
   );
 }

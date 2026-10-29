@@ -288,20 +288,33 @@ function ProductRow({
     );
   }
 
+  const album = productAlbum(product);
+  const [lightbox, setLightbox] = useState(false);
   return (
     <div className="glass" style={{
       padding: 12, borderRadius: 12,
       display: "flex", gap: 12, alignItems: "center",
     }}>
-      <div style={{
-        width: 64, height: 64, borderRadius: 10, overflow: "hidden",
-        background: "var(--glass-bg-hi)", flexShrink: 0,
-        display: "grid", placeItems: "center",
-      }}>
+      <button type="button" onClick={() => album.length > 0 && setLightbox(true)}
+        aria-label={album.length > 1 ? `View ${album.length} photos` : "View photo"}
+        style={{
+          all: "unset", cursor: album.length > 0 ? "zoom-in" : "default",
+          position: "relative",
+          width: 64, height: 64, borderRadius: 10, overflow: "hidden",
+          background: "var(--glass-bg-hi)", flexShrink: 0,
+          display: "grid", placeItems: "center",
+        }}>
         {url
           ? <img src={url} alt={product.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           : <Icon.photo />}
-      </div>
+        {album.length > 1 && (
+          <span style={{
+            position: "absolute", right: 3, bottom: 3,
+            padding: "1px 6px", borderRadius: 999, fontSize: 10, fontWeight: 700,
+            background: "rgba(0,0,0,0.65)", color: "#fff",
+          }}>+{album.length - 1}</span>
+        )}
+      </button>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {product.name}
@@ -309,6 +322,11 @@ function ProductRow({
         <div className="small" style={{ color: "var(--accent-strong)" }}>
           {formatMoney(product.priceCents, product.currency)}
         </div>
+        {product.deliveryText && (
+          <div className="small" style={{ color: "var(--text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            🚚 {product.deliveryText}
+          </div>
+        )}
         {product.description && (
           <div className="small" style={{ color: "var(--text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {product.description}
@@ -317,9 +335,29 @@ function ProductRow({
       </div>
       <Button variant="ghost" onClick={() => setEditing(true)}><Icon.edit /></Button>
       <Button variant="ghost" onClick={() => void del()}><Icon.trash /></Button>
+      {lightbox && (
+        <ProductLightbox images={album} onClose={() => setLightbox(false)} />
+      )}
     </div>
   );
 }
+
+// Up to 8 images per product (1 cover + 7 extras). Mirrors the diary
+// album cap so a buyer scrolling through a product and a reader
+// scrolling through a diary entry hit the same ceiling.
+const MAX_PRODUCT_IMAGES = 8;
+
+// Common delivery options. The seller picks one as a starting point;
+// the "Custom…" option opens a free-text field so they can describe
+// anything else ("Pickup only — Yaba, Lagos", "Ships Mon/Wed", etc.).
+// The field is one column server-side (delivery_text) — this UI just
+// nudges toward answers that are useful on the buyer's side.
+const DELIVERY_PRESETS = [
+  { value: "Delivery included", label: "Delivery included" },
+  { value: "Buyer pays delivery", label: "Buyer pays delivery" },
+  { value: "Digital — no delivery needed", label: "Digital (no delivery)" },
+  { value: "Pickup only", label: "Pickup only" },
+] as const;
 
 function ProductForm({
   businessId, initial, onCancel, onSaved,
@@ -331,49 +369,88 @@ function ProductForm({
 }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [desc, setDesc] = useState(initial?.description ?? "");
-  // Store price as a string in state so the user can type freely —
-  // parse on save. Keeps the input focused on cents to avoid any
-  // float-rounding surprises in the server-side total.
+  // Price as a string so the user can type freely with or without
+  // thousands separators / currency symbols — normalise on save.
   const [priceStr, setPriceStr] = useState(
     initial ? (initial.priceCents / 100).toFixed(2) : "",
   );
   const [currency, setCurrency] = useState(initial?.currency ?? "USD");
-  const [image, setImage] = useState<MediaRef | null>((initial?.image as MediaRef | null) ?? null);
+  // Cover + extras kept as ONE array in form state; index 0 is the
+  // cover, the rest are the carousel tail. Simpler than tracking the
+  // cover and extras separately; we split them on save for the API.
+  const [images, setImages] = useState<MediaRef[]>(() => {
+    const cover = (initial?.image as MediaRef | null) ?? null;
+    const extras = ((initial?.extraImages as MediaRef[] | undefined) ?? []);
+    return cover ? [cover, ...extras] : [];
+  });
+  const [delivery, setDelivery] = useState<string>(initial?.deliveryText ?? "");
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  async function pickImage(file: File) {
-    const id = toast("Encrypting image…", "info", { sticky: true });
-    try {
-      const picked = await pickFile(file);
-      const media = await uploadMedia(picked,
-        (frac) => toastUpdate(id, { text: `Uploading · ${Math.round(frac * 100)}%`, progress: frac }));
-      setImage(media);
-      toastUpdate(id, { text: "Image ready", kind: "ok", sticky: false, progress: undefined });
-      setTimeout(() => toastDismiss(id), 1500);
-    } catch (e) {
-      toastUpdate(id, { text: `Couldn't upload: ${(e as Error).message}`, kind: "error", sticky: false, progress: undefined });
+  async function pickImages(files: FileList) {
+    const list = Array.from(files).slice(0, MAX_PRODUCT_IMAGES - images.length);
+    if (list.length === 0) {
+      toast(`Max ${MAX_PRODUCT_IMAGES} images per product.`, "warn");
+      return;
     }
+    const toastId = toast(list.length > 1 ? `Encrypting ${list.length} images…` : "Encrypting image…", "info", { sticky: true });
+    try {
+      const uploaded: MediaRef[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const picked = await pickFile(list[i]);
+        const media = await uploadMedia(picked, (frac) => {
+          const overall = ((i + frac) / list.length) * 100;
+          toastUpdate(toastId, { text: `Uploading · ${Math.round(overall)}%`, progress: (i + frac) / list.length });
+        });
+        uploaded.push(media);
+      }
+      setImages((xs) => [...xs, ...uploaded]);
+      toastUpdate(toastId, {
+        text: uploaded.length > 1 ? `${uploaded.length} images added` : "Image ready",
+        kind: "ok", sticky: false, progress: undefined,
+      });
+      setTimeout(() => toastDismiss(toastId), 1500);
+    } catch (e) {
+      toastUpdate(toastId, { text: `Couldn't upload: ${(e as Error).message}`, kind: "error", sticky: false, progress: undefined });
+    }
+  }
+
+  function removeImageAt(i: number) {
+    setImages((xs) => xs.filter((_, j) => j !== i));
+  }
+  function makeCover(i: number) {
+    if (i === 0) return;
+    setImages((xs) => {
+      const next = xs.slice();
+      const [picked] = next.splice(i, 1);
+      next.unshift(picked);
+      return next;
+    });
   }
 
   async function save() {
     const n = name.trim();
-    const cents = Math.round(parseFloat(priceStr) * 100);
+    const cents = parsePriceToCents(priceStr);
     if (!n) { toast("Give the product a name.", "warn"); return; }
-    if (!Number.isFinite(cents) || cents < 0) { toast("Enter a valid price.", "warn"); return; }
+    if (cents === null) { toast("Enter a valid price — e.g. 1999.99 or 1,999.99.", "warn"); return; }
+    const cover = images[0] ?? null;
+    const extras = images.slice(1);
     setBusy(true);
     try {
+      const payload = {
+        name: n,
+        description: desc.trim() || null,
+        priceCents: cents,
+        currency,
+        image: cover,
+        extraImages: extras,
+        deliveryText: delivery.trim() || null,
+      };
       if (initial) {
-        await api.updateProduct(businessId, initial.id, {
-          name: n, description: desc.trim() || null,
-          priceCents: cents, currency, image,
-        });
+        await api.updateProduct(businessId, initial.id, payload);
         toast("Product updated", "ok");
       } else {
-        await api.addProduct(businessId, {
-          name: n, description: desc.trim() || null,
-          priceCents: cents, currency, image,
-        });
+        await api.addProduct(businessId, payload);
         toast("Product added", "ok");
       }
       await onSaved();
@@ -386,30 +463,68 @@ function ProductForm({
       <h3 style={{ margin: "0 0 10px", fontSize: 16 }}>
         {initial ? "Edit product" : "New product"}
       </h3>
-      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 10 }}>
-        <div style={{
-          width: 72, height: 72, borderRadius: 10, overflow: "hidden",
-          background: "var(--glass-bg-hi)", flexShrink: 0,
-          display: "grid", placeItems: "center",
-        }}>
-          {image
-            ? <ProductImagePreview media={image} />
-            : <Icon.photo />}
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <input ref={fileRef} type="file" accept="image/*" hidden
-            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void pickImage(f); }} />
-          <Button variant="ghost" onClick={() => fileRef.current?.click()}>
-            <Icon.photo /> {image ? "Change" : "Add image"}
-          </Button>
-          {image && <Button variant="ghost" onClick={() => setImage(null)}>Remove</Button>}
-        </div>
+
+      {/* Image strip: cover (left) + extras + an "Add" tile. Tap any
+          non-cover image to promote it to cover; tap × to remove. */}
+      <div style={{
+        display: "flex", gap: 8, overflowX: "auto",
+        padding: "4px 0 10px", marginBottom: 6,
+      }}>
+        {images.map((img, i) => (
+          <div key={img.blobId} style={{
+            position: "relative", width: 80, height: 80, borderRadius: 10, overflow: "hidden",
+            background: "var(--glass-bg-hi)", flexShrink: 0,
+            border: i === 0 ? "2px solid var(--accent)" : "1px solid var(--line)",
+          }}>
+            <button type="button"
+              onClick={() => makeCover(i)}
+              aria-label={i === 0 ? "Cover image" : "Make this the cover"}
+              title={i === 0 ? "Cover" : "Tap to make cover"}
+              style={{ all: "unset", cursor: i === 0 ? "default" : "pointer", width: "100%", height: "100%", display: "block" }}>
+              <ProductImagePreview media={img} />
+            </button>
+            {i === 0 && (
+              <span style={{
+                position: "absolute", top: 3, left: 3,
+                padding: "1px 6px", borderRadius: 999, fontSize: 9.5, fontWeight: 700,
+                background: "var(--accent)", color: "#10132a",
+              }}>COVER</span>
+            )}
+            <button type="button" onClick={() => removeImageAt(i)} aria-label="Remove image"
+              style={{
+                all: "unset", cursor: "pointer", position: "absolute", top: 2, right: 2,
+                width: 20, height: 20, borderRadius: 999, display: "grid", placeItems: "center",
+                background: "rgba(0,0,0,0.55)", color: "#fff", fontSize: 12,
+              }}>×</button>
+          </div>
+        ))}
+        {images.length < MAX_PRODUCT_IMAGES && (
+          <button type="button" onClick={() => fileRef.current?.click()}
+            aria-label="Add image"
+            style={{
+              all: "unset", cursor: "pointer",
+              width: 80, height: 80, borderRadius: 10, flexShrink: 0,
+              background: "var(--glass-bg-hi)", border: "1px dashed var(--line-strong)",
+              display: "grid", placeItems: "center", color: "var(--text-dim)", fontSize: 13,
+            }}>
+            <div style={{ textAlign: "center", lineHeight: 1.2 }}>
+              <div style={{ fontSize: 20 }}>＋</div>
+              <div style={{ fontSize: 10 }}>Add</div>
+            </div>
+          </button>
+        )}
       </div>
+      <input ref={fileRef} type="file" accept="image/*" multiple hidden
+        onChange={(e) => { const fs = e.target.files; e.target.value = ""; if (fs && fs.length) void pickImages(fs); }} />
+      <div className="small" style={{ color: "var(--text-mute)", marginBottom: 10 }}>
+        First image is the cover shoppers see in Discover. Tap another to promote it. Up to {MAX_PRODUCT_IMAGES} images; buyers swipe through them.
+      </div>
+
       <label className="small" style={{ color: "var(--text-dim)" }}>Name</label>
       <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200}
         placeholder="e.g. Hand-knit beanie" style={{ width: "100%", marginBottom: 10 }} />
 
-      <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 10, marginBottom: 4 }}>
         <div style={{ flex: 2 }}>
           <label className="small" style={{ color: "var(--text-dim)" }}>Price</label>
           <input value={priceStr} onChange={(e) => setPriceStr(e.target.value)}
@@ -418,15 +533,43 @@ function ProductForm({
         </div>
         <div style={{ flex: 1 }}>
           <label className="small" style={{ color: "var(--text-dim)" }}>Currency</label>
-          <input value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-            maxLength={3} style={{ width: "100%", textTransform: "uppercase" }} />
+          <CurrencySelect value={currency} onChange={setCurrency} />
         </div>
       </div>
+      <div className="small" style={{ color: "var(--text-mute)", marginBottom: 10, lineHeight: 1.4 }}>
+        Commas optional. Use a <strong>period</strong> for the decimal — e.g.{" "}
+        <code>1999.99</code> or <code>1,999.99</code>. Preview:{" "}
+        <strong>{previewMoney(priceStr, currency)}</strong>.
+      </div>
+
+      {/* Delivery — presets + a nudge-only free text. One column
+          server-side; this UI just helps the seller write something a
+          buyer can act on. */}
+      <label className="small" style={{ color: "var(--text-dim)" }}>Delivery</label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+        {DELIVERY_PRESETS.map((p) => (
+          <button key={p.value} type="button" onClick={() => setDelivery(p.value)}
+            aria-pressed={delivery === p.value}
+            style={{
+              all: "unset", cursor: "pointer",
+              padding: "6px 10px", borderRadius: 999, fontSize: 12,
+              background: delivery === p.value ? "rgba(138,125,255,0.18)" : "transparent",
+              border: `1px solid ${delivery === p.value ? "var(--accent)" : "var(--line)"}`,
+              color: delivery === p.value ? "var(--text)" : "var(--text-dim)",
+            }}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+      <input value={delivery} onChange={(e) => setDelivery(e.target.value)}
+        placeholder="Or describe it: 'Ships Mon/Wed, 2–3 days, Lagos'"
+        maxLength={500}
+        style={{ width: "100%", marginBottom: 10 }} />
 
       <label className="small" style={{ color: "var(--text-dim)" }}>Description</label>
       <textarea value={desc} onChange={(e) => setDesc(e.target.value)}
-        rows={2} maxLength={2000}
-        placeholder="What the buyer gets."
+        rows={3} maxLength={2000}
+        placeholder="What the buyer gets — size, materials, quantity. Delivery goes above."
         style={{ width: "100%", marginBottom: 12, resize: "vertical" }} />
 
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -435,6 +578,175 @@ function ProductForm({
           {busy ? "Saving…" : initial ? "Save changes" : "Add product"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+// Normalises what the seller typed into integer cents, or null if it's
+// unparseable. Accepts "1999", "1999.99", "1,999.99", "$1,999.99" —
+// strips currency symbols, strips thousands separators, requires a
+// period for the decimal. Returns null for anything else (callers show
+// a toast with the rule).
+function parsePriceToCents(input: string): number | null {
+  const trimmed = input.replace(/[\s,]/g, "").replace(/[^\d.-]/g, "");
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+// Live preview rendered under the price input so the seller sees
+// exactly what buyers will see. "—" when the input isn't a number yet.
+function previewMoney(input: string, currency: string): string {
+  const cents = parsePriceToCents(input);
+  if (cents === null) return "—";
+  return formatMoney(cents, currency);
+}
+
+// ISO 4217 currency codes the dropdown offers. Not every valid code —
+// a curated set weighted toward Africa + the major reserve currencies
+// so the picker opens on something a Nigerian seller probably wants
+// without scrolling. "Add your own" is covered by typing a 3-letter
+// code into the search box; the server accepts any 3-letter string.
+const CURRENCIES: Array<{ code: string; name: string }> = [
+  { code: "NGN", name: "Nigerian Naira" },
+  { code: "USD", name: "US Dollar" },
+  { code: "EUR", name: "Euro" },
+  { code: "GBP", name: "British Pound" },
+  { code: "GHS", name: "Ghanaian Cedi" },
+  { code: "KES", name: "Kenyan Shilling" },
+  { code: "ZAR", name: "South African Rand" },
+  { code: "EGP", name: "Egyptian Pound" },
+  { code: "XOF", name: "West African CFA Franc" },
+  { code: "XAF", name: "Central African CFA Franc" },
+  { code: "MAD", name: "Moroccan Dirham" },
+  { code: "TND", name: "Tunisian Dinar" },
+  { code: "DZD", name: "Algerian Dinar" },
+  { code: "UGX", name: "Ugandan Shilling" },
+  { code: "TZS", name: "Tanzanian Shilling" },
+  { code: "RWF", name: "Rwandan Franc" },
+  { code: "ETB", name: "Ethiopian Birr" },
+  { code: "SLL", name: "Sierra Leonean Leone" },
+  { code: "ZMW", name: "Zambian Kwacha" },
+  { code: "MWK", name: "Malawian Kwacha" },
+  { code: "CAD", name: "Canadian Dollar" },
+  { code: "AUD", name: "Australian Dollar" },
+  { code: "NZD", name: "New Zealand Dollar" },
+  { code: "JPY", name: "Japanese Yen" },
+  { code: "CNY", name: "Chinese Yuan" },
+  { code: "INR", name: "Indian Rupee" },
+  { code: "BRL", name: "Brazilian Real" },
+  { code: "MXN", name: "Mexican Peso" },
+  { code: "ARS", name: "Argentine Peso" },
+  { code: "CHF", name: "Swiss Franc" },
+  { code: "SEK", name: "Swedish Krona" },
+  { code: "NOK", name: "Norwegian Krone" },
+  { code: "DKK", name: "Danish Krone" },
+  { code: "PLN", name: "Polish Zloty" },
+  { code: "AED", name: "UAE Dirham" },
+  { code: "SAR", name: "Saudi Riyal" },
+  { code: "QAR", name: "Qatari Riyal" },
+  { code: "TRY", name: "Turkish Lira" },
+  { code: "HKD", name: "Hong Kong Dollar" },
+  { code: "SGD", name: "Singapore Dollar" },
+  { code: "KRW", name: "South Korean Won" },
+  { code: "THB", name: "Thai Baht" },
+  { code: "IDR", name: "Indonesian Rupiah" },
+  { code: "MYR", name: "Malaysian Ringgit" },
+  { code: "PHP", name: "Philippine Peso" },
+  { code: "PKR", name: "Pakistani Rupee" },
+  { code: "BDT", name: "Bangladeshi Taka" },
+];
+
+// Searchable currency picker. Click opens a filterable list; type to
+// narrow by code OR name ("naira" or "NGN" both land on the same
+// row). Keyboard-friendly for desktop, tap-friendly for phone. Accepts
+// any 3-letter string the seller types — "Enter" commits whatever is
+// in the search field so a rare currency not in the preset list still
+// works without us shipping the full ISO 4217 catalogue.
+function CurrencySelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? CURRENCIES.filter((c) =>
+        c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q))
+    : CURRENCIES;
+
+  function commit(code: string) {
+    const up = code.trim().toUpperCase();
+    if (up.length === 3) onChange(up);
+    setOpen(false);
+    setQuery("");
+  }
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        aria-haspopup="listbox" aria-expanded={open}
+        style={{
+          all: "unset", cursor: "pointer", width: "100%", boxSizing: "border-box",
+          padding: "8px 10px", borderRadius: 10, border: "1px solid var(--line)",
+          background: "var(--glass-bg-hi)", color: "var(--text)",
+          display: "flex", alignItems: "center", gap: 6,
+        }}>
+        <strong>{value}</strong>
+        <span style={{ marginLeft: "auto", opacity: 0.6, fontSize: 12 }}>▾</span>
+      </button>
+      {open && (
+        <div className="glass" style={{
+          position: "absolute", left: 0, right: 0, top: "calc(100% + 4px)",
+          zIndex: 20, padding: 6, borderRadius: 10,
+          display: "flex", flexDirection: "column", gap: 4,
+          border: "1px solid var(--glass-border-hi)",
+          boxShadow: "0 10px 24px rgba(0,0,0,0.2)",
+          maxHeight: 280, overflow: "hidden",
+        }}>
+          <input autoFocus value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (filtered.length > 0) commit(filtered[0].code);
+                else commit(query);
+              }
+            }}
+            placeholder="Search by code or name — e.g. naira, NGN"
+            style={{ padding: "6px 8px", fontSize: 13 }} />
+          <div style={{ overflowY: "auto", maxHeight: 220, display: "flex", flexDirection: "column" }}>
+            {filtered.length === 0 && (
+              <div className="small" style={{ padding: 10, color: "var(--text-mute)", textAlign: "center" }}>
+                Press Enter to use "{query.toUpperCase()}" anyway.
+              </div>
+            )}
+            {filtered.map((c) => (
+              <button key={c.code} type="button" onClick={() => commit(c.code)}
+                style={{
+                  all: "unset", cursor: "pointer",
+                  padding: "7px 8px", borderRadius: 8,
+                  display: "flex", alignItems: "center", gap: 10,
+                  background: c.code === value ? "rgba(138,125,255,0.14)" : "transparent",
+                }}
+                onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = "var(--glass-bg-hi)"; }}
+                onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = c.code === value ? "rgba(138,125,255,0.14)" : "transparent"; }}>
+                <strong style={{ width: 42 }}>{c.code}</strong>
+                <span className="small" style={{ color: "var(--text-dim)" }}>{c.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -450,6 +762,34 @@ function ProductImagePreview({ media }: { media: MediaRef }) {
   }, [media.blobId]);
   if (!url) return <Icon.photo />;
   return <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
+}
+
+// Flatten the cover + extras into one swipeable album, filtering nulls
+// so callers can loop safely. Exported so Discover/Chat anchor-strip
+// callers can share the same ordering rule.
+export function productAlbum(p: ProductApi): MediaRef[] {
+  const out: MediaRef[] = [];
+  if (p.image) out.push(p.image as MediaRef);
+  for (const x of (p.extraImages ?? []) as MediaRef[]) if (x) out.push(x);
+  return out;
+}
+
+// Thin wrapper around MediaView's AlbumLightbox so Business.tsx (and
+// soon Discover + Chat anchor strip) don't each import MediaView
+// directly. Opens on index 0 — the cover.
+export function ProductLightbox({ images, onClose }: { images: MediaRef[]; onClose: () => void }) {
+  // Lazy-import to keep MediaView out of the Business bundle on first
+  // paint — the user has to tap a photo before this ever loads.
+  const [Comp, setComp] = useState<React.ComponentType<{ images: MediaRef[]; index: number; onClose: () => void }> | null>(null);
+  useEffect(() => {
+    let live = true;
+    import("../components/MediaView.js").then((m) => {
+      if (live) setComp(() => m.AlbumLightbox);
+    });
+    return () => { live = false; };
+  }, []);
+  if (!Comp) return null;
+  return <Comp images={images} index={0} onClose={onClose} />;
 }
 
 // Formats a cents amount as a localised currency string. Falls back

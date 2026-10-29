@@ -105,6 +105,13 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   const [anchoredProduct, setAnchoredProduct] = useState<
     { peerId: string; product: import("../lib/api.js").ProductApi } | null
   >(null);
+  // One-shot composer pre-fill, keyed by peerId. Set by the Discover
+  // "Message" action so the DM opens with a quoted reference to what
+  // the user tapped. Chat/Composer consume it once and the parent
+  // clears it so a later chat open doesn't re-fill the draft.
+  const [pendingDraft, setPendingDraft] = useState<
+    { peerId: string; text: string } | null
+  >(null);
 
   useEffect(() => {
     (async () => {
@@ -355,6 +362,11 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
                 ? anchoredProduct.product : null}
               onAnchorProduct={(p) =>
                 setAnchoredProduct(p ? { peerId: thread.peerId, product: p } : null)}
+              // Composer-prefill (Discover → DM quote). Consumed once;
+              // Chat calls onDraftConsumed after setting it so we clear
+              // state and later chat opens don't resurrect the draft.
+              initialDraft={pendingDraft?.peerId === thread.peerId ? pendingDraft.text : null}
+              onDraftConsumed={() => setPendingDraft(null)}
             />
           </ErrorBoundary>
         </motion.div>
@@ -396,7 +408,14 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
         </Glass>
       ) : dest === "discover" ? (
         <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <Discover onMessage={(authorId) => { void openThread(authorId, false).then(() => setDest("chats")); }} />
+          <Discover onMessage={(post) => {
+            // Pre-fill the composer with a quote of what the user
+            // tapped: product name + price for a business ad, text
+            // excerpt for a personal post. Set BEFORE opening the
+            // thread so Chat's first render already sees it.
+            setPendingDraft({ peerId: post.authorId, text: draftForDiscover(post) });
+            void openThread(post.authorId, false).then(() => setDest("chats"));
+          }} />
         </Glass>
       ) : (
       <>
@@ -573,6 +592,37 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
       {tourOpen && <WelcomeTour onDone={() => setTourOpen(false)} />}
     </div>
   );
+}
+
+// Format a quoted-reply pre-fill for the composer when the user taps
+// Message on a Discover card. Mirrors how a human would open a cold
+// DM: a short greeting plus a > quote line so the recipient can see
+// what the sender is referring to without having to open Discover.
+function draftForDiscover(post: import("../lib/discover.js").DiscoverPost): string {
+  if (post.adKind === "business_ad") {
+    const price = `${(post.product.priceCents / 100).toFixed(2)} ${post.product.currency}`;
+    const lines = [
+      `> ${post.product.name} — ${price}`,
+      post.product.description ? `> ${excerpt(post.product.description, 160)}` : null,
+      "",
+      `Hi ${post.businessName}! I saw this on Discover — is it still available?`,
+    ].filter(Boolean) as string[];
+    return lines.join("\n");
+  }
+  // Personal post. Kind-dependent prefix so a one-emoji sticker post
+  // doesn't look weirdly quoted.
+  if (post.kind === "text" && post.text) {
+    return `> ${excerpt(post.text, 240)}\n\nHi ${post.author.displayName}, saw your post on Discover —`;
+  }
+  if (post.kind === "voice") return `Hi ${post.author.displayName}, listened to your voice note on Discover —`;
+  if (post.kind === "image") return `Hi ${post.author.displayName}, saw your photo on Discover —`;
+  return `Hi ${post.author.displayName}, saw your post on Discover —`;
+}
+
+function excerpt(s: string, max: number): string {
+  const trimmed = s.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= max) return trimmed;
+  return trimmed.slice(0, max - 1) + "…";
 }
 
 function EmptyRight({ onCompose }: { onCompose: () => void }) {

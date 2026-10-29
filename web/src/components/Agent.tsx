@@ -477,6 +477,45 @@ function ConfirmCard({
   );
 }
 
+// Dedicated error renderer. The common error shape thrown from
+// callTurn is "<status> <body>" where body is JSON from the server;
+// if the status is 429 we show a friendlier quota card than a red
+// error banner, since "no more agent messages today" isn't a bug.
+function ErrorCard({ text }: { text: string }) {
+  const base: React.CSSProperties = {
+    padding: "12px 14px", borderRadius: 12, fontSize: 14, whiteSpace: "pre-wrap",
+  };
+  // "429 {...json...}" shape from callTurn. Parse out the useful bits.
+  const m = /^429\s+(\{.*\})/s.exec(text);
+  if (m) {
+    let parsed: { message?: string; limit?: number; resetsAt?: number } = {};
+    try { parsed = JSON.parse(m[1]); } catch { /* fall through to generic */ }
+    const limit = parsed.limit ?? 10;
+    const resetAt = parsed.resetsAt
+      ? new Date(parsed.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", weekday: "short" })
+      : "tomorrow";
+    return (
+      <div style={{
+        ...base,
+        background: "linear-gradient(135deg, rgba(138,125,255,0.14), rgba(23,195,230,0.10))",
+        border: "1px solid var(--glass-border-hi)",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 20 }}>⏳</span>
+          <strong>You've used today's {limit} agent messages.</strong>
+        </div>
+        <div className="small" style={{ color: "var(--text-dim)", lineHeight: 1.4 }}>
+          Your daily cap resets at {resetAt}. Come back then — or in the next release you'll be able to top up with credits.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ ...base, color: "var(--danger)", border: "1px solid var(--danger)" }}>{text}</div>
+  );
+}
+
 function renderMsg(
   m: UiMsg,
   confirm: (id: string, a: PendingAction) => void,
@@ -509,9 +548,7 @@ function renderMsg(
         {m.used && m.used > 0 && <UsedMessages count={m.used} items={m.usedItems ?? []} />}
       </div>
     );
-    case "error": return (
-      <div key={m.id} style={{ ...base, color: "var(--danger)", border: "1px solid var(--danger)", whiteSpace: "pre-wrap" }}>{m.text}</div>
-    );
+    case "error": return <ErrorCard key={m.id} text={m.text} />;
     case "results": return (
       <div key={m.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {m.items.slice(0, 8).map((r) => (

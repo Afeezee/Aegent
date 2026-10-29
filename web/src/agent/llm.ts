@@ -482,9 +482,13 @@ export async function* runLlm(
   resetAgentUsage();
   const systemForThisAsk = BASE_PROMPT + contextSuffix;
 
+  // `turn === 0` is the first LLM call that follows the user's actual
+  // message; every subsequent iteration is a tool-use continuation.
+  // The server counts quota by turnStart === true, so one user message
+  // = at most one unit of quota regardless of how many tools fire.
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let resp: Response;
-    try { resp = await callTurn(messages, systemForThisAsk); }
+    try { resp = await callTurn(messages, systemForThisAsk, turn === 0); }
     catch (e) { yield { kind: "error", text: `LLM: ${(e as Error).message}` }; return; }
 
     messages.push({ role: "assistant", content: resp.content });
@@ -578,7 +582,7 @@ export async function* runLlm(
   yield { kind: "reply", text: "(Reached turn limit — try asking again in one step.)" };
 }
 
-async function callTurn(messages: Message[], system: string): Promise<Response> {
+async function callTurn(messages: Message[], system: string, turnStart: boolean): Promise<Response> {
   const r = await fetch(apiUrl("/api/agent/turn"), {
     method: "POST",
     headers: {
@@ -590,11 +594,18 @@ async function callTurn(messages: Message[], system: string): Promise<Response> 
       messages,
       tools: TOOLS,
       max_tokens: 1024,
+      // True only on the first LLM call for a fresh user message.
+      // Server uses this to count quota by user message, not by every
+      // tool-use round-trip the agent happens to make.
+      turnStart,
     }),
   });
   if (!r.ok) {
     const body = await r.text().catch(() => "");
-    throw new Error(`${r.status} ${body.slice(0, 240)}`);
+    // Preserve the status prefix so the panel can recognise 429 and
+    // show the "quota exceeded" card instead of a generic error. The
+    // body (JSON from the server) rides along.
+    throw new Error(`${r.status} ${body.slice(0, 400)}`);
   }
   return (await r.json()) as Response;
 }

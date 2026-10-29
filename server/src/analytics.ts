@@ -152,7 +152,12 @@ function truncate(s: string | null | undefined, max: number): string | null {
 // moment the fetch returns, nothing of substance is kept.
 // -----------------------------------------------------------------------------
 
-export type AgentOutcome = "ok" | "rate_limited" | "error";
+// "ok_continuation" is a successful tool-use follow-up call that
+// belongs to a user message already counted by its own "ok" row — the
+// quota view ignores it when summing today's usage, so one question
+// that chains several tool calls still only burns one of the user's
+// ten daily messages.
+export type AgentOutcome = "ok" | "ok_continuation" | "rate_limited" | "error";
 
 export async function logAgentEvent(input: {
   userId: string;

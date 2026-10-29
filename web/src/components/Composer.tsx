@@ -20,7 +20,7 @@ export type ReplyTarget = { id: string; preview: string; author: string };
 
 export function Composer({
   peerId, isGroup, replyTo, onClearReply, editing, onCancelEdit, onEditCommit, onSent,
-  onInvokeAgent,
+  onInvokeAgent, initialDraft, onDraftConsumed,
 }: {
   peerId: string;
   isGroup: boolean;
@@ -39,6 +39,12 @@ export function Composer({
   // populated and the active chat in context. Keeps users in the
   // chat flow instead of making them hunt for the Æ icon.
   onInvokeAgent?: (query: string) => void;
+  // One-shot composer pre-fill (e.g. Discover → DM quote). Written
+  // into the text input exactly once per non-null value — subsequent
+  // keystrokes aren't clobbered. `onDraftConsumed` lets the parent
+  // clear its source state so a later chat open doesn't re-fill.
+  initialDraft?: string | null;
+  onDraftConsumed?: () => void;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -76,6 +82,23 @@ export function Composer({
     if (editing) setText(editing.body);
     textRef.current?.focus();
   }, [editing?.id]);
+
+  // One-shot composer pre-fill (e.g. Discover → DM "quote the post").
+  // Runs once per non-null value — never clobbers subsequent user
+  // keystrokes. Caret parked at the end so the user can keep typing
+  // after the pre-filled quote block.
+  useEffect(() => {
+    if (!initialDraft) return;
+    setText(initialDraft);
+    queueMicrotask(() => {
+      const el = textRef.current;
+      if (!el) return;
+      el.focus();
+      try { el.setSelectionRange(initialDraft.length, initialDraft.length); } catch { /* ignore */ }
+    });
+    onDraftConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDraft]);
 
   // Autosize
   useEffect(() => {

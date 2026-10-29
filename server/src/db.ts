@@ -774,6 +774,17 @@ const ADDED_COLUMNS: AddedColumn[] = [
   { table: "business_orders", name: "fee_cents", ddl: "ALTER TABLE business_orders ADD COLUMN fee_cents INTEGER NOT NULL DEFAULT 0" },
   { table: "business_orders", name: "net_cents", ddl: "ALTER TABLE business_orders ADD COLUMN net_cents INTEGER NOT NULL DEFAULT 0" },
   { table: "business_orders", name: "fee_bps", ddl: "ALTER TABLE business_orders ADD COLUMN fee_bps INTEGER NOT NULL DEFAULT 0" },
+  // Multiple product images: image_json stays the COVER (first image
+  // in listings, Discover ad thumbnail, anchor-strip thumbnail);
+  // extra_images_json holds a JSON MediaRef[] of the rest. The album
+  // viewer concatenates them with the cover at index 0. Keeping the
+  // cover column means existing rows don't need any backfill.
+  { table: "business_products", name: "extra_images_json", ddl: "ALTER TABLE business_products ADD COLUMN extra_images_json TEXT" },
+  // Delivery info — free text, with the UI nudging common choices
+  // (Included / Buyer pays / Digital / Pickup / Custom). Kept as one
+  // column so the pitch "what the buyer gets, delivery included" lives
+  // in one place and renders in one line on the product card.
+  { table: "business_products", name: "delivery_text", ddl: "ALTER TABLE business_products ADD COLUMN delivery_text TEXT" },
 ];
 
 export async function initSchema(): Promise<void> {

@@ -285,7 +285,9 @@ export type ProductApi = {
   description: string | null;
   priceCents: number;
   currency: string;
-  image: unknown | null;
+  image: unknown | null;              // cover image (first slide); null if the product has none
+  extraImages: unknown[];              // additional images; always an array, possibly empty
+  deliveryText: string | null;         // e.g. "Delivery included · 2–3 days"
   createdAt: number;
   updatedAt: number | null;
 };
@@ -546,11 +548,13 @@ export const api = {
   addProduct: (businessId: string, p: {
     name: string; description?: string | null; priceCents: number;
     currency?: string; image?: unknown | null;
+    extraImages?: unknown[] | null; deliveryText?: string | null;
   }) => req<ProductApi>(`/api/business/${encodeURIComponent(businessId)}/products`, {
     method: "POST", body: JSON.stringify(p),
   }),
   updateProduct: (businessId: string, productId: string, patch: Partial<{
-    name: string; description: string | null; priceCents: number; currency: string; image: unknown | null;
+    name: string; description: string | null; priceCents: number; currency: string;
+    image: unknown | null; extraImages: unknown[] | null; deliveryText: string | null;
   }>) => req<ProductApi>(
     `/api/business/${encodeURIComponent(businessId)}/products/${encodeURIComponent(productId)}`,
     { method: "PATCH", body: JSON.stringify(patch) },

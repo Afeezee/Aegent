@@ -21,6 +21,7 @@ export function Chat({
   thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
   highlightMsgId, fromAgent, onBackToAgent, onInvokeAgent,
   anchoredProduct, onAnchorProduct,
+  initialDraft, onDraftConsumed,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
@@ -40,6 +41,12 @@ export function Chat({
   // scrolling the message stream.
   anchoredProduct?: import("../lib/api.js").ProductApi | null;
   onAnchorProduct?: (p: import("../lib/api.js").ProductApi | null) => void;
+  // One-shot pre-fill for the composer. Set when the user opens this
+  // chat via Discover → Message, with a quoted excerpt of the tapped
+  // post. Composer sets it as its initial draft; the parent calls
+  // onDraftConsumed afterwards so the next chat open starts fresh.
+  initialDraft?: string | null;
+  onDraftConsumed?: () => void;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -466,6 +473,8 @@ export function Chat({
         onEditCommit={commitEdit}
         onSent={onSent}
         onInvokeAgent={onInvokeAgent}
+        initialDraft={initialDraft ?? null}
+        onDraftConsumed={onDraftConsumed}
       />
     </div>
   );

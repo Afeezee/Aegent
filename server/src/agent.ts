@@ -33,21 +33,6 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
     });
   }
 
-  // Daily cap: admins bypass; everyone else gets 10/day. We log the
-  // rate-limit outcome too so the dashboard can see cap pressure.
-  const admin = await isAdmin(req.userId);
-  if (!admin) {
-    const usage = await agentUsageToday(req.userId);
-    if (usage.used >= usage.limit) {
-      await logAgentEvent({ userId: req.userId, outcome: "rate_limited" });
-      return res.status(429).json({
-        error: "rate_limited",
-        message: `You've hit today's agent limit (${usage.limit}). Resets at ${new Date(usage.resetsAt).toISOString()}.`,
-        used: usage.used, limit: usage.limit, resetsAt: usage.resetsAt,
-      });
-    }
-  }
-
   const body = req.body as {
     model?: string;
     system?: string;
@@ -55,7 +40,32 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
     tools?: Array<{ name: string; description: string; input_schema: unknown }>;
     max_tokens?: number;
     temperature?: number;
+    // Flag the client sets on the FIRST LLM call that follows a fresh
+    // user utterance (tool-use follow-up turns leave it false). Quota
+    // now counts user messages, not every LLM round-trip — otherwise
+    // one question that happened to call three tools burned three of
+    // the user's ten daily quota.
+    turnStart?: boolean;
   };
+
+  // Daily cap: admins bypass; everyone else gets 10/day. We log the
+  // rate-limit outcome too so the dashboard can see cap pressure.
+  // Only ENFORCE the cap on turnStart calls (one per user message) —
+  // tool-use continuations always get to finish the turn once started,
+  // so the agent never leaves the user mid-answer because an internal
+  // loop happened to tip them over.
+  const admin = await isAdmin(req.userId);
+  if (!admin && body.turnStart === true) {
+    const usage = await agentUsageToday(req.userId);
+    if (usage.used >= usage.limit) {
+      await logAgentEvent({ userId: req.userId, outcome: "rate_limited" });
+      return res.status(429).json({
+        error: "rate_limited",
+        message: `You've used your ${usage.limit} agent messages for today. Resets at ${new Date(usage.resetsAt).toISOString()}.`,
+        used: usage.used, limit: usage.limit, resetsAt: usage.resetsAt,
+      });
+    }
+  }
 
   if (!Array.isArray(body?.messages) || body.messages.length === 0) {
     return res.status(400).json({ error: "bad_request", message: "messages required" });
@@ -94,9 +104,18 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
     // Log the outcome (metadata only, no response body). Anthropic
     // returns 400/429/5xx with its own shapes we pass through — treat
     // any non-2xx as an error for quota-accounting purposes.
+    //
+    // Only count "ok" outcomes toward quota on turnStart calls — the
+    // UI shows "N of 10 messages today" and that should mean user
+    // messages, not every tool-use round-trip the agent made beneath
+    // one of them. Errors on continuation calls still get logged so
+    // the dashboard sees them, but with a non-counted outcome.
+    const isCountable = body.turnStart === true;
     await logAgentEvent({
       userId: req.userId,
-      outcome: upstream.ok ? "ok" : "error",
+      outcome: upstream.ok
+        ? (isCountable ? "ok" : "ok_continuation")
+        : "error",
       approxCharsIn,
     });
     // Pass through the API's response verbatim (status + body). Errors from
