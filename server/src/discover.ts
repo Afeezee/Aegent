@@ -100,6 +100,44 @@ export async function discoverFeed(
   ).all<DiscoverFeedRow>(...args);
 }
 
+// Mixed feed: personal public posts + one ad per business (newest
+// product). Returns a single list sorted by created_at DESC, each
+// item tagged with `source` so the caller/UI can render differently.
+//
+// Why a server-side union instead of merging two client-side lists:
+// keyset pagination (`before`) stays correct across pages — a client
+// merge would risk interleaving errors as the two streams drift.
+import { discoverBusinessAds, type BusinessAdFeedRow } from "./business.js";
+
+export type MixedFeedItem =
+  | { source: "post"; row: DiscoverFeedRow }
+  | { source: "business_ad"; row: BusinessAdFeedRow };
+
+export async function discoverMixedFeed(
+  viewerId: string, opts: { before?: number; limit?: number },
+): Promise<MixedFeedItem[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 30, 1), MAX_DISCOVER_FEED);
+  // Over-fetch each side by the full page so the merge has enough
+  // candidates even if one side dominates the recency ordering.
+  const [posts, ads] = await Promise.all([
+    discoverFeed(viewerId, { before: opts.before, limit }),
+    discoverBusinessAds(viewerId, { before: opts.before, limit }),
+  ]);
+  const merged: MixedFeedItem[] = [
+    ...posts.map((r) => ({ source: "post" as const, row: r })),
+    ...ads.map((r) => ({ source: "business_ad" as const, row: r })),
+  ];
+  merged.sort((a, b) => {
+    const ca = a.source === "post" ? a.row.created_at : a.row.created_at;
+    const cb = b.source === "post" ? b.row.created_at : b.row.created_at;
+    if (cb !== ca) return cb - ca;
+    const ia = a.source === "post" ? a.row.id : a.row.product_id;
+    const ib = b.source === "post" ? b.row.id : b.row.product_id;
+    return ib.localeCompare(ia);
+  });
+  return merged.slice(0, limit);
+}
+
 // Pull a post from the feed. The diary entry it came from is independent
 // and is deleted through its own path; this only removes the public copy.
 export async function unpublishPublic(authorId: string, postId: string): Promise<void> {

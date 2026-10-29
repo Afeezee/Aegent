@@ -121,6 +121,13 @@ export function Discover({ onMessage }: { onMessage: (authorId: string) => void 
 }
 
 function DiscoverCard({ post, onMessage }: { post: DiscoverPost; onMessage: (authorId: string) => void }) {
+  // Business ads look visibly different from personal posts: a small
+  // "Business" tag, product image prominent, name + price, and a
+  // "Message {BusinessName}" CTA. Same openThread-based "slide into
+  // DM" plumbing — the id passed is the business owner's user id.
+  if (post.adKind === "business_ad") {
+    return <BusinessAdCard post={post} onMessage={onMessage} />;
+  }
   return (
     <motion.article
       initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
@@ -164,6 +171,71 @@ function DiscoverCard({ post, onMessage }: { post: DiscoverPost; onMessage: (aut
       ) : (
         <div className="small" style={{ color: "var(--text-dim)" }}>(media unavailable)</div>
       )}
+    </motion.article>
+  );
+}
+
+function BusinessAdCard({
+  post, onMessage,
+}: {
+  post: Extract<DiscoverPost, { adKind: "business_ad" }>;
+  onMessage: (authorId: string) => void;
+}) {
+  const image = post.product.image as import("../lib/store.js").MediaRef | null;
+  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!image) { setImgUrl(null); return; }
+    let live = true;
+    import("../lib/media.js").then((m) => m.objectUrlFor(image))
+      .then((u) => { if (live) setImgUrl(u); })
+      .catch(() => { if (live) setImgUrl(null); });
+    return () => { live = false; };
+  }, [image?.blobId]);
+  const price = `${(post.product.priceCents / 100).toFixed(2)} ${post.product.currency}`;
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+      className="glass"
+      style={{
+        scrollSnapAlign: "start",
+        borderRadius: 18, padding: 14, display: "flex", flexDirection: "column", gap: 12,
+        border: "1px solid var(--accent)",
+        background: "linear-gradient(135deg, rgba(138,125,255,0.08), rgba(23,195,230,0.06))",
+      }}
+    >
+      <header style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <Avatar name={post.author.displayName} src={post.author.avatar ?? undefined} size="sm" />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontWeight: 650, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {post.businessName}
+          </div>
+          <div className="small">@{post.author.handle} · {relTime(post.createdAt)}</div>
+        </div>
+        <span style={{
+          fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase",
+          padding: "3px 8px", borderRadius: 999,
+          background: "linear-gradient(135deg, var(--violet), var(--aqua))",
+          color: "#10132a",
+        }}>Business</span>
+      </header>
+      {imgUrl && (
+        <div style={{ borderRadius: 12, overflow: "hidden", maxHeight: 320 }}>
+          <img src={imgUrl} alt={post.product.name}
+            style={{ width: "100%", height: "auto", display: "block", objectFit: "cover" }} />
+        </div>
+      )}
+      <div style={{ padding: "0 4px" }}>
+        <div style={{ fontSize: 16, fontWeight: 600 }}>{post.product.name}</div>
+        <div style={{ fontSize: 15, color: "var(--accent-strong)", marginTop: 2 }}>{price}</div>
+        {post.product.description && (
+          <div className="small" style={{ color: "var(--text-dim)", marginTop: 6, lineHeight: 1.4 }}>
+            {post.product.description}
+          </div>
+        )}
+      </div>
+      <Button variant="primary" style={{ marginTop: 4 }} onClick={() => onMessage(post.authorId)}>
+        <Icon.send /> Message {post.businessName}
+      </Button>
     </motion.article>
   );
 }

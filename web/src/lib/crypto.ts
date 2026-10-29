@@ -58,7 +58,12 @@ export function newKdfSalt(): Uint8Array {
 export async function deriveKey(
   password: string,
   salt: Uint8Array,
-  context: "priv-wrap" | "local-store" | "rec-wrap",
+  // "checkout-pin" is the fourth context: a short, numeric PIN the
+  // buyer enters locally to confirm an agentic checkout. Same KDF,
+  // same primitives, same "derive → attempt-unwrap a canary → catch
+  // failure" verification pattern login already uses. The PIN itself
+  // never leaves the device.
+  context: "priv-wrap" | "local-store" | "rec-wrap" | "checkout-pin",
 ): Promise<Uint8Array> {
   const raw = await argon2id({
     password: `${context}:${password}`,

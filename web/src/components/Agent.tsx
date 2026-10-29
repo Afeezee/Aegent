@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Avatar, Button, Icon, toast } from "./ui.js";
+import { CheckoutPinPrompt } from "./CheckoutPinPrompt.js";
 import { runAgent, type AgentEvent, type ConvTurn } from "../agent/loop.js";
 import { executePending, type PendingAction } from "../agent/tools.js";
 import { isSpeechSupported, startSpeech, type SpeechSession } from "../lib/speech.js";
@@ -404,6 +405,78 @@ export function AgentSheet({
   );
 }
 
+// Dedicated component so the confirm flow can hold its own local
+// state (notably the PIN-prompt for order confirmations). Non-order
+// confirms keep the original two-button Cancel/Confirm shape; the
+// "order" kind swaps Confirm for a Pay button that opens the PIN gate
+// inline.
+function ConfirmCard({
+  msg, onConfirm, onCancel,
+}: {
+  msg: Extract<UiMsg, { kind: "confirm" }>;
+  onConfirm: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const [pinOpen, setPinOpen] = useState(false);
+  const isOrder = msg.action.kind === "order";
+
+  if (msg.resolved === "sent") {
+    return (
+      <div className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 6 }}>{msg.explain}</div>
+        <div className="small" style={{ color: "var(--ok)" }}>✓ done</div>
+      </div>
+    );
+  }
+  if (msg.resolved === "cancelled") {
+    return (
+      <div className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
+        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 6 }}>{msg.explain}</div>
+        <div className="small">cancelled</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
+      <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 6 }}>{msg.explain}</div>
+      <div style={{
+        background: "var(--ink-2)", border: "1px solid var(--line)", borderRadius: 10,
+        padding: 10, fontSize: 13, whiteSpace: "pre-wrap", marginBottom: 8,
+      }}>{previewOf(msg.action)}</div>
+      {(msg.action.kind === "email" || msg.action.kind === "schedule_backup") && (
+        <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 8 }}>
+          Email is not end-to-end encrypted the way Aegent messages are.
+        </div>
+      )}
+      {isOrder && (
+        <div className="small" style={{
+          marginBottom: 8, padding: "6px 10px", borderRadius: 8,
+          background: "rgba(23,195,230,0.08)", color: "var(--text-dim)",
+          border: "1px solid var(--glass-border-hi)",
+        }}>
+          Secured by a local Checkout PIN — PayPal and Aegent's server never see it.
+        </div>
+      )}
+      {pinOpen && isOrder ? (
+        <CheckoutPinPrompt
+          title="Confirm with your Checkout PIN"
+          subtitle="Verified locally — PayPal only runs after you pass this."
+          onCancel={() => setPinOpen(false)}
+          onConfirm={async () => { setPinOpen(false); await onConfirm(); }}
+        />
+      ) : (
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <Button size="small" variant="ghost" onClick={onCancel}>Cancel</Button>
+          {isOrder
+            ? <Button size="small" variant="primary" onClick={() => setPinOpen(true)}>Pay</Button>
+            : <Button size="small" variant="primary" onClick={() => onConfirm()}>Confirm</Button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderMsg(
   m: UiMsg,
   confirm: (id: string, a: PendingAction) => void,
@@ -452,26 +525,11 @@ function renderMsg(
       </div>
     );
     case "confirm": return (
-      <div key={m.id} className="glass" style={{ padding: 12, borderRadius: 12, borderColor: "var(--accent)" }}>
-        <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 6 }}>{m.explain}</div>
-        <div style={{
-          background: "var(--ink-2)", border: "1px solid var(--line)", borderRadius: 10,
-          padding: 10, fontSize: 13, whiteSpace: "pre-wrap", marginBottom: 8,
-        }}>{previewOf(m.action)}</div>
-        {(m.action.kind === "email" || m.action.kind === "schedule_backup") && (
-          <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: 8 }}>
-            Email is not end-to-end encrypted the way Aegent messages are.
-          </div>
-        )}
-        {m.resolved === "sent" ? <div className="small" style={{ color: "var(--ok)" }}>✓ done</div>
-          : m.resolved === "cancelled" ? <div className="small">cancelled</div>
-          : (
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <Button size="small" variant="ghost" onClick={() => cancel(m.id)}>Cancel</Button>
-              <Button size="small" variant="primary" onClick={() => confirm(m.id, m.action)}>Confirm</Button>
-            </div>
-          )}
-      </div>
+      <ConfirmCard
+        key={m.id} msg={m}
+        onConfirm={() => confirm(m.id, m.action)}
+        onCancel={() => cancel(m.id)}
+      />
     );
   }
 }
@@ -496,6 +554,12 @@ function previewOf(a: PendingAction): string {
       return `Save ${a.displayName} to your phone Contacts\n@${a.handle}${a.phone ? `\n${a.phone}` : ""}${a.email ? `\n${a.email}` : ""}`;
     case "schedule_backup":
       return `Back up ${a.peerLabel} to ${a.recipientEmail}\nAt: ${new Date(a.whenIso).toLocaleString()}${a.note ? `\n\n${a.note}` : ""}`;
+    case "order": {
+      const lines = a.items.map((it) =>
+        `${it.qty}× ${it.name}  —  ${(it.unitPriceCents / 100).toFixed(2)} ${a.currency}`);
+      const total = `${(a.totalCents / 100).toFixed(2)} ${a.currency}`;
+      return `From: ${a.businessName}\n${lines.join("\n")}\n────────\nTotal: ${total}`;
+    }
     default: return "";
   }
 }

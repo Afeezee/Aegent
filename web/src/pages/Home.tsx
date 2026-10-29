@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Avatar, Button, ErrorBoundary, Glass, Icon } from "../components/ui.js";
 import { NavRail, TabBar, type Dest } from "../components/TabBar.js";
 import { Diary } from "./Diary.js";
+import { Business } from "./Business.js";
 import { Discover } from "./Discover.js";
 import { Chat } from "../components/Chat.js";
 import { ThreadList } from "../components/ThreadList.js";
@@ -89,10 +90,21 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
   // the cheapest reason to come back to the app.
   const [diaryUnread, setDiaryUnread] = useState(0);
 
-  // Which top-level destination is showing. Chats and Groups share one
-  // list (groups already flow through listThreads) and differ only by
-  // filter; Diary is its own surface.
+  // Which top-level destination is showing. Groups is no longer its
+  // own nav tab — it's a sub-tab inside "chats" (chatsTab below).
+  // Business/Diary/Discover each own a full-width panel.
   const [dest, setDest] = useState<Dest>("chats");
+  // Within the Chats destination, which filter is showing (direct vs
+  // group threads). Lives here because ThreadList already derives its
+  // filter from Home's state, and shoving a new wrapper component in
+  // just to hold two booleans would be ceremony.
+  const [chatsTab, setChatsTab] = useState<"chats" | "groups">("chats");
+  // Which product (if any) is "anchored" to the top of a chat so the
+  // buyer doesn't lose it scrolling. Keyed by peerId so switching to
+  // another chat doesn't leak another business's product.
+  const [anchoredProduct, setAnchoredProduct] = useState<
+    { peerId: string; product: import("../lib/api.js").ProductApi } | null
+  >(null);
 
   useEffect(() => {
     (async () => {
@@ -337,6 +349,12 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
               onBackToAgent={() => { setCameFromAgent(false); setAgentOpen(true); }}
               onInvokeAgent={(q) => { setPendingAgentQuery(q); setAgentOpen(true); }}
               onOpenGroupInfo={() => setGroupInfoFor(thread.peerId)}
+              // Keyed per-peer so switching chats doesn't leak another
+              // business's anchored product into this one.
+              anchoredProduct={anchoredProduct?.peerId === thread.peerId
+                ? anchoredProduct.product : null}
+              onAnchorProduct={(p) =>
+                setAnchoredProduct(p ? { peerId: thread.peerId, product: p } : null)}
             />
           </ErrorBoundary>
         </motion.div>
@@ -350,7 +368,7 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
     <div style={{
       display: "grid",
       gridTemplateColumns: bp === "sm" ? "1fr"
-        : dest === "diary" || dest === "discover" ? "64px 1fr"
+        : dest === "diary" || dest === "discover" || dest === "business" ? "64px 1fr"
         : "64px 320px 1fr",
       height: "var(--app-h)",
       // On a phone with a chat open the conversation goes full-bleed —
@@ -372,6 +390,10 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
 
       {dest === "diary" ? (
         <Diary refreshKey={refresh} />
+      ) : dest === "business" ? (
+        <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <Business />
+        </Glass>
       ) : dest === "discover" ? (
         <Glass raised style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
           <Discover onMessage={(authorId) => { void openThread(authorId, false).then(() => setDest("chats")); }} />
@@ -440,9 +462,33 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
               </span>
             </div>
           )}
+          {/* Chats / Groups segmented control. Groups collapsed into
+              this destination so the top-level nav can hold a Business
+              slot instead. The filter is a local sub-tab, not part of
+              the Dest type — ThreadList already takes a plain
+              "all"|"group" filter, so nothing else cares. */}
+          <div style={{ padding: "4px 16px 0", display: "flex", gap: 6 }}>
+            {(["chats", "groups"] as const).map((t) => (
+              <button key={t} type="button"
+                onClick={() => setChatsTab(t)}
+                aria-pressed={chatsTab === t}
+                style={{
+                  all: "unset", cursor: "pointer", flex: 1,
+                  textAlign: "center", padding: "7px 10px", borderRadius: 10,
+                  fontSize: 13, fontWeight: 600,
+                  color: chatsTab === t ? "var(--text)" : "var(--text-dim)",
+                  background: chatsTab === t ? "rgba(138,125,255,0.16)" : "transparent",
+                  border: `1px solid ${chatsTab === t ? "var(--glass-border-hi)" : "var(--line)"}`,
+                  transition: "background .15s var(--ease), color .15s var(--ease)",
+                }}
+              >
+                {t === "chats" ? "Chats" : "Groups"}
+              </button>
+            ))}
+          </div>
           <div style={{ flex: 1, minHeight: 0, marginTop: 4 }}>
             <ThreadList
-              filter={dest === "groups" ? "group" : "all"}
+              filter={chatsTab === "groups" ? "group" : "all"}
               activeId={thread?.peerId ?? null}
               onSelect={setThread}
               onCompose={() => setCompose(true)}
@@ -476,7 +522,8 @@ export function Home({ onSignedOut }: { onSignedOut: () => void }) {
           area applied so the Android nav bar doesn't clip it either.
       */}
       <AnimatePresence>
-        {!agentOpen && bp === "sm" && !thread && dest !== "diary" && (
+        {!agentOpen && bp === "sm" && !thread
+          && dest !== "diary" && dest !== "discover" && dest !== "business" && (
           <motion.button
             initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.6, opacity: 0 }}
             whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}

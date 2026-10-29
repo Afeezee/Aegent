@@ -20,6 +20,7 @@ import {
 export function Chat({
   thread, onOpenForward, onOpenGroupInfo, onBack, refreshKey, onSent,
   highlightMsgId, fromAgent, onBackToAgent, onInvokeAgent,
+  anchoredProduct, onAnchorProduct,
 }: {
   thread: Thread;
   onOpenForward: (msg: OpenedMessage) => void;
@@ -33,6 +34,12 @@ export function Chat({
   // Pass-through for the /agent slash command in Composer — opens
   // the agent sheet in Home with the query pre-populated.
   onInvokeAgent?: (query: string) => void;
+  // "Anchored" product — the product the buyer is currently focused on
+  // in a business chat. Shown as a top-pinned strip under the chat
+  // header so a buyer can glance back at image/name/price without
+  // scrolling the message stream.
+  anchoredProduct?: import("../lib/api.js").ProductApi | null;
+  onAnchorProduct?: (p: import("../lib/api.js").ProductApi | null) => void;
 }) {
   const [msgs, setMsgs] = useState<OpenedMessage[]>([]);
   const [peers, setPeers] = useState<Map<string, string>>(new Map());
@@ -311,6 +318,21 @@ export function Chat({
         </button>
       )}
 
+      {anchoredProduct && (
+        <AnchoredProductStrip
+          product={anchoredProduct}
+          stackedBelow={!!(fromAgent && onBackToAgent)}
+          onUnpin={() => onAnchorProduct?.(null)}
+          onBuy={() => {
+            // Pre-fill the agent sheet with a buy prompt that names the
+            // anchored product by id. The agent will then call
+            // draft_order with that exact id — anchor state stays as a
+            // UI hint, not a hidden parameter.
+            onInvokeAgent?.(`Buy 1× ${anchoredProduct.name} (productId: ${anchoredProduct.id}) from this chat`);
+          }}
+        />
+      )}
+
       <div
         ref={streamRef}
         onScroll={(e) => {
@@ -445,6 +467,72 @@ export function Chat({
         onSent={onSent}
         onInvokeAgent={onInvokeAgent}
       />
+    </div>
+  );
+}
+
+// Top-pinned product strip for a business chat. Mirrors the "Back to
+// agent" pill's absolute-positioning so it doesn't push the message
+// stream around. Stacked below the Back-to-agent pill when both show.
+function AnchoredProductStrip({
+  product, onUnpin, onBuy, stackedBelow,
+}: {
+  product: import("../lib/api.js").ProductApi;
+  onUnpin: () => void;
+  onBuy: () => void;
+  stackedBelow: boolean;
+}) {
+  const image = product.image as import("../lib/store.js").MediaRef | null;
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!image) { setUrl(null); return; }
+    let live = true;
+    import("../lib/media.js").then((m) => m.objectUrlFor(image))
+      .then((u) => { if (live) setUrl(u); })
+      .catch(() => { if (live) setUrl(null); });
+    return () => { live = false; };
+  }, [image?.blobId]);
+  const price = `${(product.priceCents / 100).toFixed(2)} ${product.currency}`;
+  return (
+    <div
+      style={{
+        position: "absolute", zIndex: 49, left: 10, right: 10,
+        top: stackedBelow ? "calc(var(--safe-top) + 114px)" : "calc(var(--safe-top) + 70px)",
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "8px 10px",
+        borderRadius: 14,
+        background: "var(--glass-bg-hi)",
+        border: "1px solid var(--glass-border-hi)",
+        boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
+      }}
+    >
+      <div style={{
+        width: 44, height: 44, borderRadius: 10, overflow: "hidden",
+        background: "var(--ink-2)", flexShrink: 0,
+        display: "grid", placeItems: "center",
+      }}>
+        {url
+          ? <img src={url} alt={product.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          : <Icon.photo />}
+      </div>
+      <div style={{ minWidth: 0, flex: 1, lineHeight: 1.2 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {product.name}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--accent-strong)" }}>{price}</div>
+      </div>
+      <Button size="small" variant="primary" onClick={onBuy}>Buy</Button>
+      <button
+        type="button" onClick={onUnpin} aria-label="Unpin product"
+        style={{
+          all: "unset", cursor: "pointer",
+          width: 28, height: 28, borderRadius: 999,
+          display: "grid", placeItems: "center",
+          color: "var(--text-dim)",
+        }}
+      >
+        <Icon.x />
+      </button>
     </div>
   );
 }

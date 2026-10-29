@@ -241,8 +241,56 @@ export type DiscoverPostApi = {
   media: unknown | null;
   createdAt: number;
   author: { id: string; displayName: string; handle: string; publicKey: string; avatar: string | null };
+  // Discriminant for the merged feed. undefined on a personal post.
+  adKind?: undefined;
 };
-export type DiscoverFeedResponse = { posts: DiscoverPostApi[]; nextBefore: number | null };
+
+// Business-ad row in the merged Discover feed. Carries a nested
+// `product` so a card can render thumbnail/name/price without a second
+// round trip, plus the business owner's user id as `authorId` so the
+// existing "Message" button auto-opens the right DM.
+export type DiscoverAdApi = {
+  adKind: "business_ad";
+  id: string;                       // product id
+  businessId: string;
+  businessOwnerId: string;
+  businessName: string;
+  product: ProductApi;
+  createdAt: number;
+  authorId: string;                 // = businessOwnerId, for compatibility with the Message button
+  author: { id: string; displayName: string; handle: string; publicKey: string; avatar: string | null };
+};
+
+export type DiscoverFeedItemApi = DiscoverPostApi | DiscoverAdApi;
+export type DiscoverFeedResponse = { posts: DiscoverFeedItemApi[]; nextBefore: number | null };
+
+// ---- businesses ----
+
+export type BusinessApi = {
+  id: string;
+  ownerId: string;
+  name: string;
+  description: string | null;
+  // Public MediaRef (plaintext with content key in the clear) — kept
+  // loose here because callers import MediaRef from lib/store.js.
+  avatar: unknown | null;
+  createdAt: number;
+  updatedAt: number | null;
+};
+
+export type ProductApi = {
+  id: string;
+  businessId: string;
+  name: string;
+  description: string | null;
+  priceCents: number;
+  currency: string;
+  image: unknown | null;
+  createdAt: number;
+  updatedAt: number | null;
+};
+
+export type BusinessDetail = BusinessApi & { products?: ProductApi[] };
 
 export type RecoveryChallenge = {
   challengeId: string;
@@ -444,6 +492,50 @@ export const api = {
   discoverDelete: (id: string) => req<{ ok: true }>(
     `/api/discover/${encodeURIComponent(id)}`, { method: "DELETE" },
   ),
+  // ---- business profile + catalogue ----
+  getMyBusiness: () => req<BusinessDetail | null>("/api/business/me"),
+  createOrUpdateBusiness: (patch: { name: string; description?: string | null; avatar?: unknown | null }) =>
+    req<BusinessApi>("/api/business/profile", {
+      method: "POST", body: JSON.stringify(patch),
+    }),
+  getBusiness: (id: string) =>
+    req<BusinessDetail>(`/api/business/${encodeURIComponent(id)}`),
+  // Agent uses this to detect "does the peer of the active chat run a
+  // business" without needing a free-text search path.
+  getBusinessByOwner: (userId: string) =>
+    req<BusinessDetail | null>(`/api/business/by-owner/${encodeURIComponent(userId)}`),
+  addProduct: (businessId: string, p: {
+    name: string; description?: string | null; priceCents: number;
+    currency?: string; image?: unknown | null;
+  }) => req<ProductApi>(`/api/business/${encodeURIComponent(businessId)}/products`, {
+    method: "POST", body: JSON.stringify(p),
+  }),
+  updateProduct: (businessId: string, productId: string, patch: Partial<{
+    name: string; description: string | null; priceCents: number; currency: string; image: unknown | null;
+  }>) => req<ProductApi>(
+    `/api/business/${encodeURIComponent(businessId)}/products/${encodeURIComponent(productId)}`,
+    { method: "PATCH", body: JSON.stringify(patch) },
+  ),
+  deleteProduct: (businessId: string, productId: string) =>
+    req<{ ok: true }>(
+      `/api/business/${encodeURIComponent(businessId)}/products/${encodeURIComponent(productId)}`,
+      { method: "DELETE" },
+    ),
+  // ---- checkout (PayPal sandbox proxy) ----
+  // The CheckoutPIN gate on the client runs BEFORE this call fires —
+  // the PIN itself never crosses the wire. The server recomputes the
+  // total from the catalogue; the client-sent total is never trusted.
+  createCheckoutOrder: (body: {
+    businessId: string;
+    items: Array<{ productId: string; qty: number }>;
+  }) => req<{
+    orderId: string; paypalOrderId: string; approveUrl: string | null; status: string;
+  }>("/api/checkout/orders", { method: "POST", body: JSON.stringify(body) }),
+  captureCheckoutOrder: (orderId: string) =>
+    req<{ ok: boolean; status: string }>(
+      `/api/checkout/orders/${encodeURIComponent(orderId)}/capture`,
+      { method: "POST", body: "{}" },
+    ),
   // Exact reconciliation pair: every envelope id the relay holds for us,
   // and retrieval of specific envelopes by id.
   inboxIds: () => req<{ ids: string[]; truncated: boolean }>("/api/inbox/ids"),

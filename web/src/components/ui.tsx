@@ -414,4 +414,21 @@ export const Icon = {
     <path d="M2.5 10S5.2 5 10 5s7.5 5 7.5 5-2.7 5-7.5 5-7.5-5-7.5-5z" />
     <circle cx="10" cy="10" r="2.2" />
   </>),
+  // Business/storefront: a shop awning over a doorway. Reads as "trade"
+  // rather than "wallet" so it stays coherent with the Discover and
+  // Diary glyphs (buildings/surfaces, not money).
+  business: () => ico(<>
+    <path d="M3 7l1.5-3h11L17 7" />
+    <path d="M3 7v9a1 1 0 001 1h12a1 1 0 001-1V7" />
+    <path d="M8 17v-5h4v5" />
+  </>),
+  // Pin used specifically for the anchored product strip. Simpler than
+  // the "pinned chat" push-pin — a thumbtack silhouette is clearer at
+  // 16px than a repurposed location pin.
+  anchor: () => ico(<>
+    <path d="M10 3v9" />
+    <path d="M6 7l4-4 4 4" />
+    <path d="M5 14h10" />
+    <path d="M7 17l3-3 3 3" />
+  </>),
 };

@@ -53,8 +53,15 @@ import {
   publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
 } from "./diary.js";
 import {
-  MAX_DISCOVER_TEXT, discoverFeed, publishPublic, unpublishPublic,
+  MAX_DISCOVER_TEXT, discoverMixedFeed, publishPublic, unpublishPublic,
 } from "./discover.js";
+import {
+  addProduct, createOrUpdateBusiness, deleteProduct,
+  getBusinessByOwner, getBusinessPublic, getMyBusiness, updateProduct,
+} from "./business.js";
+import {
+  captureCheckoutOrder, createCheckoutOrder, listMyOrders, paypalEnabled,
+} from "./paypal.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentQuota, agentTurn } from "./agent.js";
 import { webSearch, webSearchEnabled } from "./websearch.js";
@@ -85,6 +92,7 @@ app.get("/healthz", (_req, res) => res.json({
   // Lets the client gate the agent's "web_search" tool so the LLM only
   // sees it when a provider is actually wired on the server.
   webSearch: webSearchEnabled(),
+  paypal: paypalEnabled(),
   db: db.backend,
 }));
 
@@ -1176,22 +1184,54 @@ app.post("/api/discover", authed, async (req, res) => {
 
 app.get("/api/discover/feed", authed, async (req, res) => {
   try {
-    const rows = await discoverFeed((req as AuthedReq).userId, {
+    const items = await discoverMixedFeed((req as AuthedReq).userId, {
       before: Number(req.query.before ?? 0) || undefined,
       limit: Number(req.query.limit ?? 30) || 30,
     });
-    res.json({
-      posts: rows.map((r) => ({
-        id: r.id, authorId: r.author_id, kind: r.kind,
-        text: r.text, media: r.media_json ? JSON.parse(r.media_json) : null,
+    // One response shape, discriminated by `adKind`. Personal posts
+    // keep their existing fields; business ads carry a nested
+    // `product` so a card can render thumbnail/name/price without a
+    // second round trip.
+    const posts = items.map((it) => {
+      if (it.source === "post") {
+        const r = it.row;
+        return {
+          id: r.id, authorId: r.author_id, kind: r.kind,
+          text: r.text, media: r.media_json ? JSON.parse(r.media_json) : null,
+          createdAt: Number(r.created_at),
+          author: {
+            id: r.author_id, displayName: r.display_name, handle: r.handle,
+            publicKey: r.public_key, avatar: r.avatar ?? null,
+          },
+        };
+      }
+      const r = it.row;
+      return {
+        adKind: "business_ad" as const,
+        id: r.product_id,
+        businessId: r.business_id,
+        businessOwnerId: r.owner_id,
+        businessName: r.business_name,
+        product: {
+          id: r.product_id, businessId: r.business_id, name: r.product_name,
+          description: r.description, priceCents: r.price_cents, currency: r.currency,
+          image: r.image_json ? JSON.parse(r.image_json) : null,
+          createdAt: Number(r.created_at), updatedAt: null,
+        },
         createdAt: Number(r.created_at),
+        // Author profile — the business owner. UI reuses the standard
+        // Discover-card header with this.
+        authorId: r.owner_id,
         author: {
-          id: r.author_id, displayName: r.display_name, handle: r.handle,
+          id: r.owner_id, displayName: r.display_name, handle: r.handle,
           publicKey: r.public_key, avatar: r.avatar ?? null,
         },
-      })),
-      nextBefore: rows.length ? Number(rows[rows.length - 1].created_at) : null,
+      };
     });
+    const oldest = items.length
+      ? Math.min(...items.map((it) => Number(it.row.created_at)))
+      : null;
+    res.json({ posts, nextBefore: oldest });
   } catch (e) { handleError(res, e); }
 });
 
@@ -1201,6 +1241,30 @@ app.delete("/api/discover/:id", authed, async (req, res) => {
     res.json({ ok: true });
   } catch (e) { handleError(res, e); }
 });
+
+// ---- Business profile + catalogue ----
+app.get("/api/business/me", authed, (req, res) =>
+  getMyBusiness(req as AuthedReq, res));
+app.post("/api/business/profile", authed, (req, res) =>
+  createOrUpdateBusiness(req as AuthedReq, res));
+app.get("/api/business/by-owner/:userId", authed, (req, res) =>
+  getBusinessByOwner(req as AuthedReq, res));
+app.get("/api/business/:id", authed, (req, res) =>
+  getBusinessPublic(req as AuthedReq, res));
+app.post("/api/business/:id/products", authed, (req, res) =>
+  addProduct(req as AuthedReq, res));
+app.patch("/api/business/:id/products/:productId", authed, (req, res) =>
+  updateProduct(req as AuthedReq, res));
+app.delete("/api/business/:id/products/:productId", authed, (req, res) =>
+  deleteProduct(req as AuthedReq, res));
+
+// ---- Checkout (PayPal sandbox proxy) ----
+app.post("/api/checkout/orders", authed, (req, res) =>
+  createCheckoutOrder(req as AuthedReq, res));
+app.post("/api/checkout/orders/:id/capture", authed, (req, res) =>
+  captureCheckoutOrder(req as AuthedReq, res));
+app.get("/api/checkout/orders/mine", authed, (req, res) =>
+  listMyOrders(req as AuthedReq, res));
 
 // ---- WebSocket relay ----
 

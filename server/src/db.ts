@@ -440,6 +440,71 @@ const SCHEMA = `
     post_id  TEXT NOT NULL REFERENCES discover_posts(id)
   );
 
+  -- Business profiles.
+  --
+  -- A business is a separate entity from a user (mirrors the way the
+  -- "groups" table is its own entity rather than a flag on "users"),
+  -- owned 1:1 by a user for MVP — the UNIQUE on owner_id enforces
+  -- that. A business DM is a normal 1:1 thread with the owner's user
+  -- id as peer; nothing in the message/thread rail cares about the
+  -- business row, so no new thread kind is needed.
+  --
+  -- avatar_json is a plaintext MediaRef, like discover_posts.media_json:
+  -- the business profile is public by definition (ads surface in the
+  -- global Discover feed) so the content key sits in the clear.
+  CREATE TABLE IF NOT EXISTS businesses (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT NOT NULL UNIQUE REFERENCES users(id),
+    name          TEXT NOT NULL,
+    description   TEXT,
+    avatar_json   TEXT,
+    created_at    ${BIG} NOT NULL,
+    updated_at    ${BIG},
+    archived_at   ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_businesses_owner ON businesses(owner_id);
+
+  -- Products in a business's catalogue. image_json follows the discover
+  -- "public MediaRef in the clear" pattern. Soft-deleted via archived_at
+  -- so an existing order's items_json still resolves if the business
+  -- later removes the product.
+  CREATE TABLE IF NOT EXISTS business_products (
+    id             TEXT PRIMARY KEY,
+    business_id    TEXT NOT NULL REFERENCES businesses(id),
+    name           TEXT NOT NULL,
+    description    TEXT,
+    price_cents    INTEGER NOT NULL,
+    currency       TEXT NOT NULL DEFAULT 'USD',
+    image_json     TEXT,
+    created_at     ${BIG} NOT NULL,
+    updated_at     ${BIG},
+    archived_at    ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_products_business
+    ON business_products(business_id, archived_at, created_at);
+
+  -- Local audit trail of checkout attempts, independent of PayPal's own
+  -- records. The server is the source of truth for price — we recompute
+  -- the total from business_products at order-create time and never
+  -- trust a client-sent amount. items_json freezes the sold-at snapshot
+  -- so a later price edit doesn't rewrite history.
+  CREATE TABLE IF NOT EXISTS business_orders (
+    id                TEXT PRIMARY KEY,
+    business_id       TEXT NOT NULL REFERENCES businesses(id),
+    buyer_id          TEXT NOT NULL REFERENCES users(id),
+    items_json        TEXT NOT NULL,
+    total_cents       INTEGER NOT NULL,
+    currency          TEXT NOT NULL,
+    paypal_order_id   TEXT,
+    status            TEXT NOT NULL DEFAULT 'created',
+    created_at        ${BIG} NOT NULL,
+    updated_at        ${BIG}
+  );
+  CREATE INDEX IF NOT EXISTS idx_orders_business
+    ON business_orders(business_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_orders_buyer
+    ON business_orders(buyer_id, created_at);
+
   -- Group moderation.
   --
   -- Invite tokens are stored hashed, the same shape refresh tokens use:

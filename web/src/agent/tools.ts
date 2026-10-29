@@ -76,7 +76,21 @@ export type PendingAction =
   | { kind: "calendar_event"; title: string; whenIso: string; durationMin: number; notes?: string }
   | { kind: "add_contact"; handle: string; displayName: string; explain: string }
   | { kind: "save_contact_to_phone"; displayName: string; handle: string; email: string; phone: string | null }
-  | { kind: "schedule_backup"; peerId: string; peerLabel: string; recipientEmail: string; whenIso: string; note?: string };
+  | { kind: "schedule_backup"; peerId: string; peerLabel: string; recipientEmail: string; whenIso: string; note?: string }
+  // Agentic checkout — the buyer confirmed they want to purchase from
+  // this chat's business. The confirm card for this kind requires the
+  // user to pass a LOCAL Checkout PIN before executePending runs; the
+  // PIN itself never crosses into executePending or any API call. See
+  // CheckoutPinPrompt.tsx.
+  | {
+      kind: "order";
+      businessId: string;
+      businessName: string;
+      businessOwnerId: string;
+      items: Array<{ productId: string; name: string; qty: number; unitPriceCents: number }>;
+      totalCents: number;
+      currency: string;
+    };
 
 export type ToolResult =
   | { ok: true; kind: "data"; value: unknown }
@@ -514,7 +528,8 @@ export async function diary_stats(_args: Record<string, never> = {}): Promise<To
 // ---- discover (public feed) ----
 
 // Public posts from across the app — people the user may not know,
-// aggregated from diary entries their authors chose to make public.
+// aggregated from diary entries their authors chose to make public,
+// plus business ads from catalogues the Discover feed now surfaces.
 // Read-only and already-public, so no consent gate.
 export async function list_discover(args: { limit?: number } = {}): Promise<ToolResult> {
   const { fetchDiscoverFeed } = await import("../lib/discover.js");
@@ -522,16 +537,150 @@ export async function list_discover(args: { limit?: number } = {}): Promise<Tool
   const page = await fetchDiscoverFeed(undefined, limit);
   return {
     ok: true, kind: "data",
-    value: page.posts.map((p) => ({
-      id: p.id,
-      author: p.author.displayName,
-      handle: p.author.handle,
-      authorId: p.authorId,
-      kind: p.kind,
-      text: p.text ?? (p.kind === "voice" ? "(voice note)" : p.kind === "image" ? "(image)" : ""),
-      at: new Date(p.createdAt).toISOString(),
-    })),
+    value: page.posts.map((p) => {
+      if (p.adKind === "business_ad") {
+        return {
+          id: p.id,
+          source: "business_ad" as const,
+          businessId: p.businessId,
+          businessName: p.businessName,
+          businessOwnerId: p.businessOwnerId,
+          author: p.author.displayName,
+          handle: p.author.handle,
+          authorId: p.authorId,
+          kind: "product",
+          text: `${p.product.name} — ${(p.product.priceCents / 100).toFixed(2)} ${p.product.currency}`,
+          at: new Date(p.createdAt).toISOString(),
+        };
+      }
+      return {
+        id: p.id,
+        source: "post" as const,
+        author: p.author.displayName,
+        handle: p.author.handle,
+        authorId: p.authorId,
+        kind: p.kind,
+        text: p.text ?? (p.kind === "voice" ? "(voice note)" : p.kind === "image" ? "(image)" : ""),
+        at: new Date(p.createdAt).toISOString(),
+      };
+    }),
   };
+}
+
+// ---- business catalogue (per-chat agent Q&A) ----
+//
+// Scoped to one business: callers (the LLM) must pass the businessId
+// they picked up from the per-turn thread-context ("the peer of this
+// chat runs business X"), never a free-text business name. This
+// prevents cross-business catalogue leakage: there's no path from an
+// unresolved name here to an arbitrary other business's data.
+export async function search_business_catalogue(args: {
+  businessId: string; query?: string; limit?: number;
+}): Promise<ToolResult> {
+  if (!args.businessId) return { ok: false, error: "business_id_required" };
+  const detail = await api.getBusiness(args.businessId);
+  if (!detail) return { ok: false, error: "business_not_found" };
+  const products = detail.products ?? [];
+  const q = (args.query ?? "").trim().toLowerCase();
+  const matches = q
+    ? products.filter((p) =>
+        p.name.toLowerCase().includes(q)
+        || (p.description ?? "").toLowerCase().includes(q))
+    : products;
+  const limit = Math.min(50, Math.max(1, args.limit ?? 20));
+  return {
+    ok: true, kind: "data",
+    value: {
+      businessId: detail.id,
+      businessName: detail.name,
+      description: detail.description,
+      products: matches.slice(0, limit).map((p) => ({
+        id: p.id, name: p.name,
+        description: p.description,
+        priceCents: p.priceCents,
+        currency: p.currency,
+        price: `${(p.priceCents / 100).toFixed(2)} ${p.currency}`,
+      })),
+    },
+  };
+}
+
+// ---- draft order (confirm-gated write) ----
+//
+// Modeled on forward_message: validate inputs, resolve display labels,
+// build a human-readable explain string, return a pending action —
+// executes nothing. The actual PayPal call fires only after the user
+// passes the local Checkout PIN gate and taps Pay, which runs
+// executePending's "order" branch (below).
+export async function draft_order(args: {
+  businessId: string;
+  items: Array<{ productId: string; qty: number }>;
+}): Promise<ToolResult> {
+  if (!args.businessId) return { ok: false, error: "business_id_required" };
+  if (!args.items || args.items.length === 0) return { ok: false, error: "no_items" };
+  const detail = await api.getBusiness(args.businessId);
+  if (!detail) return { ok: false, error: "business_not_found" };
+  const resolved: Array<{ productId: string; name: string; qty: number; unitPriceCents: number }> = [];
+  let currency: string | null = null;
+  for (const it of args.items) {
+    const p = detail.products?.find((pp) => pp.id === it.productId);
+    if (!p) return { ok: false, error: `unknown_product:${it.productId}` };
+    if (!Number.isFinite(it.qty) || it.qty < 1) return { ok: false, error: "bad_qty" };
+    if (!currency) currency = p.currency;
+    else if (currency !== p.currency) return { ok: false, error: "mixed_currency" };
+    resolved.push({
+      productId: p.id, name: p.name, qty: Math.floor(it.qty),
+      unitPriceCents: p.priceCents,
+    });
+  }
+  const totalCents = resolved.reduce((s, it) => s + it.unitPriceCents * it.qty, 0);
+  const activeCurrency = currency ?? "USD";
+  const itemLabel = resolved.map((r) => `${r.qty}× ${r.name}`).join(", ");
+  const total = `${(totalCents / 100).toFixed(2)} ${activeCurrency}`;
+  return {
+    ok: true, kind: "pending",
+    action: {
+      kind: "order",
+      businessId: detail.id,
+      businessName: detail.name,
+      businessOwnerId: detail.ownerId,
+      items: resolved,
+      totalCents,
+      currency: activeCurrency,
+    },
+    explain: `Order ${itemLabel} from ${detail.name} — total ${total}?`,
+  };
+}
+
+// Open PayPal's hosted approval page and resolve once the buyer
+// returns to the app. Simplest viable mechanism per the plan:
+// visibility-change triggers the resolve, since a capture call against
+// an unapproved order fails cleanly on the server side anyway. A
+// future deep-link return (`aegent://checkout/return`) is a nicer
+// upgrade but not required for MVP and touches native Capacitor config.
+async function openApprovalAndWaitForReturn(url: string): Promise<void> {
+  window.open(url, "_blank", "noopener,noreferrer");
+  // If the pop-up got blocked, the user will still see nothing happen
+  // in-tab — but then the capture call below will also fail cleanly
+  // with a 4xx and surface a toast. That's an acceptable failure mode
+  // for the hackathon demo.
+  await new Promise<void>((resolve) => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        document.removeEventListener("visibilitychange", onVis);
+        // Small delay so the window has a tick to settle before we
+        // kick off the capture round-trip.
+        setTimeout(resolve, 400);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    // Safety net: time out after 3 minutes so an abandoned approval
+    // doesn't leave this promise forever pending.
+    setTimeout(() => {
+      document.removeEventListener("visibilitychange", onVis);
+      resolve();
+    }, 180_000);
+  });
 }
 
 // ---- translation ----
@@ -1592,6 +1741,31 @@ export async function executePending(action: PendingAction) {
       email: action.email, phone: action.phone,
     });
     return { ok: true } as const;
+  }
+
+  // Agentic checkout. By the time we're here, the UI has already made
+  // the user pass the local Checkout PIN gate — the PIN is NOT in
+  // `action` and never reaches this function. The server recomputes
+  // the total from the catalogue, so items[].unitPriceCents in the
+  // action is for display only (used by draft_order's explain string);
+  // only productId + qty are the authoritative inputs to the PayPal
+  // call. See server/src/paypal.ts for why Aegent is the merchant of
+  // record for the MVP sandbox demo.
+  if (action.kind === "order") {
+    try {
+      const created = await api.createCheckoutOrder({
+        businessId: action.businessId,
+        items: action.items.map((i) => ({ productId: i.productId, qty: i.qty })),
+      });
+      if (created.approveUrl) {
+        await openApprovalAndWaitForReturn(created.approveUrl);
+      }
+      const res = await api.captureCheckoutOrder(created.orderId);
+      if (!res.ok) return { ok: false, error: `capture_${res.status}` } as const;
+      return { ok: true, orderId: created.orderId, status: res.status } as const;
+    } catch (e) {
+      return { ok: false, error: `checkout_failed: ${(e as Error).message}` } as const;
+    }
   }
   return { ok: false, error: "unknown_action" } as const;
 }

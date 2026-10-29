@@ -11,11 +11,14 @@
 import { motion } from "framer-motion";
 import { Icon } from "./ui.js";
 
-export type Dest = "chats" | "groups" | "diary" | "discover";
+// Groups is no longer a top-level destination — it lives as an
+// internal tab inside "chats", so a Business slot can take its place
+// in the nav without stacking a fifth icon on narrow phones.
+export type Dest = "chats" | "business" | "diary" | "discover";
 
 const DESTS: Array<{ id: Dest; label: string; icon: () => JSX.Element }> = [
   { id: "chats", label: "Chats", icon: Icon.chat },
-  { id: "groups", label: "Groups", icon: Icon.users },
+  { id: "business", label: "Business", icon: Icon.business },
   { id: "diary", label: "Diary", icon: Icon.diary },
   { id: "discover", label: "Discover", icon: Icon.compass },
 ];

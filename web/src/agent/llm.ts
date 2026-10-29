@@ -32,6 +32,8 @@ import {
   diary_stats, get_diary_entry, list_diary_recent, search_diary,
   // Discover (public feed) + translation.
   list_discover, translate_text,
+  // Business catalogue + agentic checkout.
+  draft_order, search_business_catalogue,
   type PendingAction,
 } from "./tools.js";
 import type { AgentEvent } from "./loop.js";
@@ -155,6 +157,39 @@ const TOOLS = [
     name: "translate_text",
     description: "Translate a piece of text into a target language (ISO code like 'es','fr','yo'; defaults to the user's own language). Use when the user asks to translate a message, a transcript, or any text, or wants something said in another language.",
     input_schema: { type: "object", properties: { text: { type: "string" }, target: { type: "string" } }, required: ["text"] },
+  },
+  {
+    name: "search_business_catalogue",
+    description: "List or search a specific business's products — name, price, description. Returns {businessId, businessName, description, products:[{id,name,description,priceCents,currency,price}]}. ONLY call this with the businessId of the business the CURRENT chat is with (the per-turn thread context tells you when the peer runs a business). Never answer catalogue questions from general knowledge or from another business's data. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        query: { type: "string" },
+        limit: { type: "number" },
+      },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "draft_order",
+    description: "Stage an order for the buyer to confirm. Call ONLY when the user has clearly decided to purchase one or more specific products from the active business chat (e.g. 'I'll take two of X', 'buy the Y'). NEVER call speculatively while still answering 'what do you sell' style questions. Builds an itemized confirm card showing items + total; the actual PayPal call fires only after the buyer confirms AND passes a local Checkout PIN gate (handled in the UI, not here). Returns {staged: true, ...} on success — tell the user you've prepared it and ask them to confirm.",
+    input_schema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string" },
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { productId: { type: "string" }, qty: { type: "number" } },
+            required: ["productId", "qty"],
+          },
+          minItems: 1,
+        },
+      },
+      required: ["businessId", "items"],
+    },
   },
   {
     name: "resolve_target",
@@ -292,7 +327,10 @@ You are a full assistant, not only a message-search bot. Answer general-knowledg
 When a question depends on CURRENT or LOCAL information you cannot know from training — news ("what happened today in …"), live prices or scores, something that may have changed recently, nearby places or shops, specific websites, who-is-this — call web_search(query). Pick a short, specific query (3–8 words). Keep limit small (3–5). When you answer, cite the sources inline so the user can verify (e.g. "according to BBC [url]"). Do NOT call web_search for things you already know confidently from training, or for questions about the user's own data.
 
 Rules that do not bend:
-Every write tool (draft_message, reply_to_message, forward_message, set_reminder, schedule_message, create_calendar_event, create_note, add_contact_by_handle, save_contact_to_phone, export_to_email, backup_thread, delete_message) stages a confirm card the user must approve. When one returns {staged: true, ...}, tell the user you've prepared it and ask them to confirm the card. Never re-invoke the same staged action.
+Every write tool (draft_message, reply_to_message, forward_message, set_reminder, schedule_message, create_calendar_event, create_note, add_contact_by_handle, save_contact_to_phone, export_to_email, backup_thread, delete_message, draft_order) stages a confirm card the user must approve. When one returns {staged: true, ...}, tell the user you've prepared it and ask them to confirm the card. Never re-invoke the same staged action.
+
+Business chats:
+When the active thread's peer runs a business (the context section below says "runs business: ..."), use search_business_catalogue(businessId) to answer product questions — "what do you sell", "how much is X", "do you have Y". ONLY use that chat's businessId; never guess another business's id and never answer catalogue questions from general knowledge. Call draft_order only when the user has clearly decided to buy specific items ("I'll take 2 of X", "buy the Y"), never speculatively while still just browsing. The draft_order card is PIN-gated — tell the user they'll need to enter their Checkout PIN to complete the purchase.
 
 Read-then-write pattern:
 Prefer resolve_target before drafting/forwarding/scheduling to get a stable id from a fuzzy name.
@@ -358,6 +396,19 @@ async function buildContextSuffix(): Promise<string> {
     }
     if (ACTIVE_THREAD) {
       lines.push(`- Active thread right now: "${ACTIVE_THREAD.label}" (peerId: ${ACTIVE_THREAD.peerId}${ACTIVE_THREAD.isGroup ? ", group" : ""}). Default unqualified references to this one.`);
+      // Does the active thread's peer run a business? Lookup is a
+      // single API call per turn — spares the agent a round-trip and
+      // tells it the one businessId it's allowed to query. Best-effort:
+      // a lookup failure doesn't break the turn.
+      if (!ACTIVE_THREAD.isGroup) {
+        try {
+          const { api } = await import("../lib/api.js");
+          const biz = await api.getBusinessByOwner(ACTIVE_THREAD.peerId);
+          if (biz) {
+            lines.push(`- This chat's peer runs business: "${biz.name}" (businessId: ${biz.id}). Use search_business_catalogue with THIS id for any product question in this chat; use draft_order with THIS id to stage a purchase.`);
+          }
+        } catch { /* best-effort */ }
+      }
     }
     return "\n\n" + lines.join("\n");
   } catch {
@@ -572,6 +623,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "diary_stats")         return dataOnly(await diary_stats());
     if (name === "list_discover")       return dataOnly(await list_discover(args as never));
     if (name === "translate_text")      return dataOnly(await translate_text(args as never));
+    if (name === "search_business_catalogue") return dataOnly(await search_business_catalogue(args as never));
     if (name === "resolve_target")      return { forClaude: (await resolveTarget(String(args.name ?? ""))) ?? { error: "not_found" } };
     if (name === "contact_profile")     return dataOnly(await contact_profile(args as never));
     if (name === "calculate")           return dataOnly(await calculate(args as never));
@@ -595,6 +647,7 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<{ f
     if (name === "export_to_email")     return stageResult(await export_to_email(args as never));
     if (name === "backup_thread")       return stageResult(await backup_thread(args as never));
     if (name === "schedule_backup")     return stageResult(await schedule_backup(args as never));
+    if (name === "draft_order")         return stageResult(await draft_order(args as never));
     return { forClaude: { error: `unknown tool ${name}` } };
   } catch (e) {
     return { forClaude: { error: (e as Error).message } };
