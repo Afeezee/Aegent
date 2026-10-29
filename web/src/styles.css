@@ -270,6 +270,27 @@ button:focus-visible, .btn:focus-visible {
 .btn.small { padding: 6px 10px; font-size: 13px; border-radius: 10px; }
 .btn.pill { border-radius: 999px; }
 
+/* ---- welcome tour ---- */
+/* Theme-aware modal scrim: deep in dark, a soft veil in light so the
+   first-run gate never reads as a dark slab over a light OS. */
+.tour-scrim { background: rgba(6, 8, 20, 0.62); }
+:root[data-theme="light"] .tour-scrim { background: rgba(26, 34, 60, 0.30); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) .tour-scrim {
+    background: rgba(26, 34, 60, 0.30);
+  }
+}
+/* Primary CTA with an explicit, opaque gradient. The shared .btn.primary
+   gradient fails to paint inside a backdrop-filter ancestor on the
+   Android WebView (only its shadow survives), so the tour uses a solid
+   surface card and this class rather than .glass + .btn.primary. */
+.tour-cta {
+  background: linear-gradient(135deg, var(--violet), var(--violet-2));
+  color: #10132a; font-weight: 650; border: none;
+  box-shadow: 0 10px 26px rgba(138, 125, 255, 0.4);
+}
+.tour-cta:hover:not(:disabled) { filter: brightness(1.06); background: linear-gradient(135deg, var(--violet), var(--violet-2)); }
+
 input, textarea, select {
   font: inherit;
   color: var(--text);

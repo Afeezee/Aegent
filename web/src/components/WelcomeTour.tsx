@@ -161,12 +161,16 @@ export function WelcomeTour({ onDone }: { onDone: () => void }) {
 
   // Priority-rules sweep: ≥44px targets, aria-labels, semantic colors
   // only, SVG icons (no emoji), transform/opacity-only motion,
-  // reduced-motion respected via useReducedMotion.
+  // reduced-motion respected via useReducedMotion. The card is an
+  // OPAQUE surface (--sheet-bg) rather than .glass: a backdrop-filter
+  // ancestor was dropping the primary button's gradient on the Android
+  // WebView and reading grey in light mode. Opaque fixes both.
   return (
     <AnimatePresence>
       <motion.div
         key="tour"
-        initial={reduce ? { opacity: 0 } : { opacity: 0 }}
+        className="tour-scrim"
+        initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         transition={{ duration: 0.2 }}
@@ -175,94 +179,134 @@ export function WelcomeTour({ onDone }: { onDone: () => void }) {
         aria-label={`Welcome tour step ${step + 1} of ${STEPS.length}`}
         style={{
           position: "fixed", inset: 0, zIndex: 500,
-          background: "rgba(5, 7, 20, 0.72)",
-          backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+          backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)",
           display: "flex", alignItems: "safe center", justifyContent: "center",
-          padding: "calc(24px + var(--safe-top)) 20px calc(24px + var(--safe-bottom))",
+          padding: "calc(24px + var(--safe-top)) 18px calc(24px + var(--safe-bottom))",
           overflowY: "auto",
         }}
       >
         <motion.div
-          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-          className="glass"
+          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 18, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
           style={{
-            width: "min(500px, 100%)", padding: 28, borderRadius: 22,
-            display: "flex", flexDirection: "column", gap: 20,
+            position: "relative",
+            width: "min(460px, 100%)", borderRadius: 24,
+            background: "var(--sheet-bg)",
+            border: "1px solid var(--glass-border-hi)",
+            boxShadow: "var(--shadow-lg)",
+            display: "flex", flexDirection: "column",
+            overflow: "hidden",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", minHeight: 36 }}>
-            <div style={{ display: "flex", gap: 6 }} aria-hidden>
-              {STEPS.map((_, i) => (
-                <span key={i} style={{
-                  width: i === step ? 22 : 8, height: 8, borderRadius: 999,
-                  background: i === step ? "var(--accent)" : "var(--line-strong)",
-                  transition: "width .3s var(--ease), background .3s var(--ease)",
-                }} />
-              ))}
+          {/* Brand accent strip — a thin gradient hairline at the very
+              top ties the gate to Aegent's identity without shouting. */}
+          <div aria-hidden style={{
+            height: 4, flexShrink: 0,
+            background: "linear-gradient(90deg, var(--violet), var(--aqua), var(--pink))",
+          }} />
+
+          <div style={{ padding: "22px 26px 26px", display: "flex", flexDirection: "column", gap: 22 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", minHeight: 36 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }} aria-hidden>
+                {STEPS.map((_, i) => (
+                  <span key={i} style={{
+                    width: i === step ? 24 : 7, height: 7, borderRadius: 999,
+                    background: i === step
+                      ? "linear-gradient(90deg, var(--violet), var(--aqua))"
+                      : "var(--line-strong)",
+                    transition: "width .32s var(--ease), background .32s var(--ease)",
+                  }} />
+                ))}
+              </div>
+              {!s.critical ? (
+                <button
+                  type="button"
+                  onClick={skip}
+                  aria-label="Skip the welcome tour"
+                  style={{
+                    all: "unset", cursor: "pointer", padding: "8px 12px", minHeight: 36,
+                    color: "var(--text-mute)", fontSize: 13.5, fontWeight: 550, borderRadius: 10,
+                  }}
+                >
+                  Skip
+                </button>
+              ) : (
+                <span style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                  color: "var(--amber)", padding: "4px 10px", borderRadius: 999,
+                  background: "rgba(255, 196, 110, 0.12)", border: "1px solid rgba(255, 196, 110, 0.28)",
+                }}>Please read</span>
+              )}
             </div>
-            {!s.critical && (
-              <button
-                type="button"
-                onClick={skip}
-                aria-label="Skip the welcome tour"
-                style={{
-                  all: "unset", cursor: "pointer", padding: "8px 12px", minHeight: 36,
-                  color: "var(--text-dim)", fontSize: 13, borderRadius: 10,
-                }}
+
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={step}
+                initial={reduce ? { opacity: 0 } : { opacity: 0, x: 18 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={reduce ? { opacity: 0 } : { opacity: 0, x: -18 }}
+                transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                style={{ display: "flex", flexDirection: "column", gap: 16 }}
               >
-                Skip
-              </button>
-            )}
-          </div>
+                <div style={{
+                  width: 64, height: 64, borderRadius: 18,
+                  background: "linear-gradient(135deg, rgba(138,125,255,0.32), rgba(110,231,255,0.26))",
+                  border: "1px solid var(--glass-border-hi)",
+                  boxShadow: "0 8px 22px rgba(138,125,255,0.22), inset 0 1px 0 rgba(255,255,255,0.14)",
+                  display: "grid", placeItems: "center",
+                  color: "var(--text)",
+                }}>
+                  {s.art}
+                </div>
+                <h2 style={{ margin: 0, fontSize: 24, lineHeight: 1.2, letterSpacing: "-0.01em", fontWeight: 700 }}>
+                  {s.title}
+                </h2>
+                <div style={{
+                  color: s.critical ? "var(--text)" : "var(--text-dim)",
+                  fontSize: 15, lineHeight: 1.65,
+                  background: s.critical ? "rgba(255, 196, 110, 0.09)" : "transparent",
+                  border: s.critical ? "1px solid rgba(255, 196, 110, 0.28)" : "none",
+                  borderRadius: s.critical ? 14 : 0,
+                  padding: s.critical ? "14px 16px" : 0,
+                }}>
+                  {s.body}
+                </div>
+              </motion.div>
+            </AnimatePresence>
 
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={step}
-              initial={reduce ? { opacity: 0 } : { opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={reduce ? { opacity: 0 } : { opacity: 0, x: -20 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              style={{ display: "flex", flexDirection: "column", gap: 14 }}
-            >
-              <div style={{
-                width: 72, height: 72, borderRadius: 20,
-                background: "linear-gradient(135deg, rgba(138,125,255,0.28), rgba(110,231,255,0.24))",
-                border: "1px solid var(--glass-border-hi)",
-                display: "grid", placeItems: "center",
-                color: "var(--text)",
-              }}>
-                {s.art}
-              </div>
-              <h2 style={{ margin: 0, fontSize: 22, lineHeight: 1.25 }}>{s.title}</h2>
-              <div style={{
-                color: "var(--text-dim)", fontSize: 15, lineHeight: 1.6,
-                background: s.critical ? "rgba(255, 196, 110, 0.08)" : "transparent",
-                border: s.critical ? "1px solid rgba(255, 196, 110, 0.3)" : "none",
-                borderRadius: s.critical ? 12 : 0,
-                padding: s.critical ? "12px 14px" : 0,
-              }}>
-                {s.body}
-              </div>
-            </motion.div>
-          </AnimatePresence>
-
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            {step > 0 && (
-              <Button variant="ghost" onClick={() => setStep((i) => i - 1)}
-                aria-label="Previous step">
-                <span style={{ display: "inline-block", transform: "rotate(180deg)" }}>
-                  <Icon.chevron />
-                </span>
-                Back
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
+              {step > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setStep((i) => i - 1)}
+                  aria-label="Previous step"
+                  style={{
+                    all: "unset", cursor: "pointer",
+                    display: "inline-flex", alignItems: "center", gap: 4,
+                    padding: "10px 14px", minHeight: 44, borderRadius: 12,
+                    color: "var(--text-dim)", fontSize: 15, fontWeight: 550,
+                  }}
+                >
+                  <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}>
+                    <Icon.chevron />
+                  </span>
+                  Back
+                </button>
+              ) : <span />}
+              <Button
+                className="tour-cta"
+                onClick={next}
+                style={{
+                  marginLeft: "auto", minHeight: 48, padding: "12px 22px",
+                  borderRadius: 14, fontSize: 15.5,
+                }}
+                aria-label={isLast ? "Finish and open Aegent" : (s.critical ? "Confirm I understand and continue" : "Next step")}
+              >
+                {isLast ? "Open Aegent" : s.critical ? "I understand" : "Next"}
+                {!isLast && <Icon.chevron />}
               </Button>
-            )}
-            <Button variant="primary" onClick={next}
-              aria-label={isLast ? "Finish and open Aegent" : (s.critical ? "Confirm I understand and continue" : "Next step")}>
-              {isLast ? "Open Aegent" : s.critical ? "I understand" : "Next"}
-              {!isLast && <Icon.chevron />}
-            </Button>
+            </div>
           </div>
         </motion.div>
       </motion.div>
