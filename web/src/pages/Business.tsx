@@ -541,14 +541,14 @@ function ProductForm({
         <code>1999.99</code> or <code>1,999.99</code>. Preview:{" "}
         <strong>{previewMoney(priceStr, currency)}</strong>.
       </div>
-      {!PAYPAL_OK.has(currency) && (
+      {!providerLabel(currency) && (
         <div className="small" style={{
           marginBottom: 10, padding: "8px 10px", borderRadius: 10, lineHeight: 1.45,
           background: "rgba(255, 196, 110, 0.10)",
           border: "1px solid rgba(255, 196, 110, 0.30)",
           color: "var(--text)",
         }}>
-          ⚠️ PayPal doesn't accept <strong>{currency}</strong>. Buyers won't be able to check this out until you set the currency to a PayPal-supported one — most sellers use <strong>USD</strong>, <strong>EUR</strong>, or <strong>GBP</strong>.
+          ⚠️ Neither PayPal nor Paystack accepts <strong>{currency}</strong>, so buyers can't check this out. Use <strong>USD</strong> (both gateways), <strong>NGN / GHS / ZAR / KES</strong> (Paystack), or <strong>EUR / GBP / …</strong> (PayPal).
         </div>
       )}
 
@@ -613,16 +613,24 @@ function previewMoney(input: string, currency: string): string {
   return formatMoney(cents, currency);
 }
 
-// Currencies PayPal will actually settle. Pulled from
-// https://developer.paypal.com/api/rest/reference/currency-codes/ —
-// anything outside this set WILL fail at checkout, so the picker
-// surfaces it with a visible badge and the ProductForm warns when
-// the selected currency isn't one of these.
+// Currencies each gateway will actually settle. Pulled from each
+// provider's docs — anything outside the union of these two sets
+// WILL fail at checkout, so the picker surfaces a badge per
+// provider and the ProductForm warns on an unsupported currency.
 const PAYPAL_OK = new Set([
   "AUD", "BRL", "CAD", "CNY", "CZK", "DKK", "EUR", "HKD", "HUF", "ILS",
   "INR", "JPY", "MYR", "MXN", "NOK", "NZD", "PHP", "PLN", "GBP", "RUB",
   "SGD", "SEK", "CHF", "THB", "TWD", "USD",
 ]);
+const PAYSTACK_OK = new Set(["NGN", "GHS", "ZAR", "KES", "USD"]);
+function providerLabel(code: string): string | null {
+  const pp = PAYPAL_OK.has(code);
+  const ps = PAYSTACK_OK.has(code);
+  if (pp && ps) return "Both";
+  if (pp) return "PayPal";
+  if (ps) return "Paystack";
+  return null;
+}
 
 // ISO 4217 currency codes the dropdown offers. Not every valid code —
 // a curated set weighted toward Africa + the major reserve currencies
@@ -753,7 +761,7 @@ function CurrencySelect({ value, onChange }: { value: string; onChange: (v: stri
               </div>
             )}
             {filtered.map((c) => {
-              const ok = PAYPAL_OK.has(c.code);
+              const label = providerLabel(c.code);
               return (
                 <button key={c.code} type="button" onClick={() => commit(c.code)}
                   style={{
@@ -766,14 +774,16 @@ function CurrencySelect({ value, onChange }: { value: string; onChange: (v: stri
                   onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = c.code === value ? "rgba(138,125,255,0.14)" : "transparent"; }}>
                   <strong style={{ width: 42 }}>{c.code}</strong>
                   <span className="small" style={{ color: "var(--text-dim)", flex: 1 }}>{c.name}</span>
-                  {ok && (
-                    <span title="PayPal will accept this currency at checkout"
+                  {label && (
+                    <span title={label === "Both"
+                      ? "PayPal AND Paystack will accept this currency at checkout"
+                      : `${label} will accept this currency at checkout`}
                       style={{
                         fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
                         padding: "2px 7px", borderRadius: 999,
                         background: "rgba(127,230,161,0.14)", color: "var(--ok)",
                         border: "1px solid rgba(127,230,161,0.28)",
-                      }}>PayPal</span>
+                      }}>{label}</span>
                   )}
                 </button>
               );

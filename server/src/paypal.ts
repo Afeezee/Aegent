@@ -33,6 +33,11 @@ import type { Request, Response } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db } from "./db.js";
+import { getUserById } from "./auth.js";
+import {
+  PAYSTACK_SUPPORTED_CURRENCIES, paystackEnabled, paystackInit,
+  paystackVerify, resolvePaystackCallback,
+} from "./paystack.js";
 
 type AuthedReq = Request & { userId: string };
 
@@ -175,10 +180,10 @@ type BusinessRow = {
 };
 
 export async function createCheckoutOrder(req: AuthedReq, res: Response) {
-  if (!paypalEnabled()) {
+  if (!paypalEnabled() && !paystackEnabled()) {
     return res.status(503).json({
-      error: "paypal_disabled",
-      message: "PayPal is not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.",
+      error: "no_gateway",
+      message: "No payment provider is configured. Set PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET or PAYSTACK_SECRET_KEY on the server.",
     });
   }
   let body: z.infer<typeof createSchema>;
@@ -209,41 +214,106 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     const totalCents = resolved.reduce((s, it) => s + it.unitPriceCents * it.qty, 0);
     const activeCurrency = currency ?? "USD";
 
-    // Preflight: refuse unsupported currencies with a seller-fixable
-    // message. PayPal doesn't settle NGN / most African currencies,
-    // so an order priced in NGN would always fail at create-time with
-    // a cryptic CURRENCY_NOT_SUPPORTED. Tell the seller plainly what
-    // to do instead.
-    if (!PAYPAL_SUPPORTED_CURRENCIES.has(activeCurrency)) {
+    // Currency → provider dispatch. Rules:
+    //   - Paystack-only currency (NGN, GHS, ZAR, KES) → Paystack
+    //   - PayPal-only currency (EUR, GBP, JPY, …)     → PayPal
+    //   - USD, which both support                     → prefer Paystack
+    //     when configured (Paystack-NG resolves naira cards natively
+    //     and USD-priced orders settle fine); fall through to PayPal
+    //     otherwise. If Paystack isn't configured, PayPal always wins.
+    //   - Supported by neither (or by a disabled provider) → clear 400
+    //
+    // Any error from this block is a server-side setup problem and
+    // comes out of the create-order call so the seller/buyer sees it
+    // instead of a mysterious 502.
+    const paystackCurrencyOk = PAYSTACK_SUPPORTED_CURRENCIES.has(activeCurrency);
+    const paypalCurrencyOk = PAYPAL_SUPPORTED_CURRENCIES.has(activeCurrency);
+    const paystackReady = paystackEnabled() && paystackCurrencyOk;
+    const paypalReady = paypalEnabled() && paypalCurrencyOk;
+    let provider: "paypal" | "paystack";
+    if (paystackReady && (!paypalReady || activeCurrency !== "USD")) {
+      provider = "paystack";
+    } else if (paypalReady) {
+      provider = "paypal";
+    } else {
+      // Nothing routes this currency with the keys we have.
+      const bits: string[] = [];
+      if (paystackCurrencyOk && !paystackEnabled()) bits.push("Paystack would accept it but PAYSTACK_SECRET_KEY isn't set on the server");
+      if (paypalCurrencyOk && !paypalEnabled()) bits.push("PayPal would accept it but PAYPAL_CLIENT_ID/SECRET aren't set on the server");
+      if (!paystackCurrencyOk && !paypalCurrencyOk) {
+        bits.push(`neither PayPal (${[...PAYPAL_SUPPORTED_CURRENCIES].sort().join(", ")}) nor Paystack (${[...PAYSTACK_SUPPORTED_CURRENCIES].sort().join(", ")}) accepts it`);
+      }
       return res.status(400).json({
         error: "currency_not_supported",
-        message: `${activeCurrency} isn't accepted by PayPal, so this product can't check out. Ask the seller to edit the product's currency to USD, EUR, GBP, or another PayPal-supported currency (full list: AUD, BRL, CAD, CNY, CZK, DKK, EUR, GBP, HKD, HUF, ILS, INR, JPY, MXN, MYR, NOK, NZD, PHP, PLN, RUB, SEK, SGD, THB, TWD, USD).`,
+        message: `${activeCurrency} can't be charged right now: ${bits.join("; ")}. Ask the seller to edit the product's currency to USD (works with both), or NGN/GHS/ZAR/KES (Paystack), or EUR/GBP/… (PayPal).`,
       });
     }
 
     // Commission split, frozen on the row. The seller sees this exact
-    // breakdown in their Earnings view. PayPal still charges the full
-    // totalCents to the buyer; this is purely an internal ledger
-    // between Aegent (merchant of record) and the seller.
+    // breakdown in their Earnings view. The gateway still charges the
+    // full totalCents to the buyer; this is purely an internal ledger
+    // between Aegent (merchant of record) and the seller. Same math
+    // for both providers.
     const feeCents = Math.floor(totalCents * COMMISSION_BPS / 10000);
     const netCents = totalCents - feeCents;
 
-    // Insert the local audit row BEFORE calling PayPal, so a timeout
-    // between create-order and our row-insert never leaves a PayPal
-    // order with no local counterpart.
+    // Insert the local audit row BEFORE calling the gateway, so a
+    // timeout between create-order and our row-insert never leaves a
+    // gateway-side order with no local counterpart.
     const orderId = randomUUID();
     const now = Date.now();
     await db.prepare(
       `INSERT INTO business_orders
          (id, business_id, buyer_id, items_json, total_cents, currency,
           fee_cents, net_cents, fee_bps,
-          paypal_order_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'created', ?, NULL)`,
+          provider, paypal_order_id, paystack_reference,
+          status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'created', ?, NULL)`,
     ).run(
       orderId, biz.id, req.userId, JSON.stringify(resolved), totalCents, activeCurrency,
       feeCents, netCents, COMMISSION_BPS,
+      provider,
       now,
     );
+
+    // Paystack path — hosted-checkout URL out, verify on return. No
+    // tokens, no items[], no breakdown math: it's just email + amount
+    // + currency + reference + callback. Shape of what we return to
+    // the client is identical to the PayPal branch so the agent's
+    // openApprovalAndWaitForReturn + capture rail stays unchanged.
+    if (provider === "paystack") {
+      try {
+        const buyer = await getUserById(req.userId);
+        if (!buyer?.email) {
+          await db.prepare("UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?").run(Date.now(), orderId);
+          return res.status(400).json({ error: "no_buyer_email", message: "Your account has no email on file — Paystack can't send a receipt without one." });
+        }
+        const summary = resolved.map((r) => `${r.qty}× ${r.name}`).join(", ").slice(0, 500);
+        const init = await paystackInit({
+          orderId, totalCents, currency: activeCurrency,
+          buyerEmail: buyer.email, businessName: biz.name,
+          callbackUrl: resolvePaystackCallback(req),
+          itemsSummary: summary,
+        });
+        await db.prepare(
+          "UPDATE business_orders SET paystack_reference = ?, updated_at = ? WHERE id = ?",
+        ).run(init.reference, Date.now(), orderId);
+        return res.json({
+          orderId,
+          paypalOrderId: init.reference,          // kept for client-shape compat; it's the Paystack reference here
+          paystackReference: init.reference,
+          approveUrl: init.authorizationUrl,
+          status: "PENDING",
+          provider: "paystack",
+        });
+      } catch (e) {
+        await db.prepare("UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?").run(Date.now(), orderId);
+        return res.status(502).json({
+          error: "paystack_init_failed",
+          message: (e as Error).message,
+        });
+      }
+    }
 
     // Create the PayPal order. intent CAPTURE lets us capture
     // immediately after the buyer approves; no separate authorize step.
@@ -355,27 +425,65 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
 // ---- capture order ----
 
 export async function captureCheckoutOrder(req: AuthedReq, res: Response) {
-  if (!paypalEnabled()) {
-    return res.status(503).json({ error: "paypal_disabled" });
-  }
   const orderId = req.params.id;
   try {
     const row = await db.prepare(
       "SELECT * FROM business_orders WHERE id = ?",
     ).get<{
       id: string; business_id: string; buyer_id: string;
-      paypal_order_id: string | null; status: string;
+      paypal_order_id: string | null; paystack_reference: string | null;
+      provider: string | null; status: string;
     }>(orderId);
     if (!row) return res.status(404).json({ error: "not_found" });
     if (row.buyer_id !== req.userId) {
       return res.status(403).json({ error: "not_your_order" });
     }
-    if (!row.paypal_order_id) {
-      return res.status(400).json({ error: "no_paypal_order", message: "This order was never created on PayPal." });
-    }
     if (row.status === "captured") {
       // Idempotent — a double-tap on Pay shouldn't double-charge.
       return res.json({ ok: true, status: "captured" });
+    }
+
+    // Paystack path — one call to /verify, authoritative answer back.
+    // No preflight needed: Paystack's verify IS the status check +
+    // settle step rolled together, and it's idempotent.
+    const provider = row.provider ?? "paypal";
+    if (provider === "paystack") {
+      if (!paystackEnabled()) {
+        return res.status(503).json({ error: "paystack_disabled", message: "Server has no PAYSTACK_SECRET_KEY set." });
+      }
+      if (!row.paystack_reference) {
+        return res.status(400).json({ error: "no_paystack_reference", message: "This order was never initialised on Paystack." });
+      }
+      try {
+        const result = await paystackVerify(row.paystack_reference);
+        if (result.nextStatus === "pending") {
+          return res.status(409).json({
+            error: "not_approved",
+            status: result.paystackStatus,
+            message: "The Paystack checkout isn't finished yet. Open the approval tab, complete the payment, and tap Pay again — your order is still waiting.",
+          });
+        }
+        if (result.nextStatus === "failed") {
+          await db.prepare("UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?").run(Date.now(), orderId);
+          return res.status(502).json({
+            error: "paystack_failed",
+            status: result.paystackStatus,
+            message: `Paystack reports this payment as "${result.paystackStatus}". Nothing was charged. Try again or use a different card.`,
+          });
+        }
+        await db.prepare("UPDATE business_orders SET status = 'captured', updated_at = ? WHERE id = ?").run(Date.now(), orderId);
+        return res.json({ ok: true, status: "captured" });
+      } catch (e) {
+        return res.status(502).json({ error: "paystack_verify_failed", message: (e as Error).message });
+      }
+    }
+
+    // --- PayPal path (default / legacy) ---
+    if (!paypalEnabled()) {
+      return res.status(503).json({ error: "paypal_disabled" });
+    }
+    if (!row.paypal_order_id) {
+      return res.status(400).json({ error: "no_paypal_order", message: "This order was never created on PayPal." });
     }
 
     const token = await getAccessToken();

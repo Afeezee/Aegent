@@ -63,6 +63,7 @@ import {
 import {
   captureCheckoutOrder, createCheckoutOrder, listMyOrders, paypalEnabled,
 } from "./paypal.js";
+import { paystackEnabled } from "./paystack.js";
 import { MAX_BACKUP_BYTES, backupMeta, readBackup, saveBackup } from "./backups.js";
 import { agentQuota, agentTurn } from "./agent.js";
 import { webSearch, webSearchEnabled } from "./websearch.js";
@@ -94,6 +95,7 @@ app.get("/healthz", (_req, res) => res.json({
   // sees it when a provider is actually wired on the server.
   webSearch: webSearchEnabled(),
   paypal: paypalEnabled(),
+  paystack: paystackEnabled(),
   db: db.backend,
 }));
 

@@ -785,6 +785,12 @@ const ADDED_COLUMNS: AddedColumn[] = [
   // column so the pitch "what the buyer gets, delivery included" lives
   // in one place and renders in one line on the product card.
   { table: "business_products", name: "delivery_text", ddl: "ALTER TABLE business_products ADD COLUMN delivery_text TEXT" },
+  // Multi-provider checkout. provider defaults to 'paypal' so existing
+  // rows (which only knew about PayPal) stay semantically correct.
+  { table: "business_orders", name: "provider", ddl: "ALTER TABLE business_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'paypal'" },
+  // Paystack's reference id — equivalent of paypal_order_id for the
+  // Paystack side. Set at init, used for verify.
+  { table: "business_orders", name: "paystack_reference", ddl: "ALTER TABLE business_orders ADD COLUMN paystack_reference TEXT" },
 ];
 
 export async function initSchema(): Promise<void> {
