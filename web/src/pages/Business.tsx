@@ -256,9 +256,15 @@ function ProfileForm({
 function ProductRow({
   businessId, product, onChanged,
 }: { businessId: string; product: ProductApi; onChanged: () => void | Promise<void> }) {
+  // IMPORTANT: every hook here MUST run on every render. React tracks
+  // hook identity by call order — adding one below a conditional
+  // return (like the editing-mode render below) throws React error
+  // #300 the instant the condition flips. All useState/useEffect for
+  // this component live in this block.
   const [editing, setEditing] = useState(false);
-  const image = product.image as MediaRef | null;
+  const [lightbox, setLightbox] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
+  const image = product.image as MediaRef | null;
   useEffect(() => {
     if (!image) { setUrl(null); return; }
     let live = true;
@@ -267,6 +273,7 @@ function ProductRow({
       .catch(() => { if (live) setUrl(null); });
     return () => { live = false; };
   }, [image?.blobId]);
+  const album = productAlbum(product);
 
   async function del() {
     if (!confirm(`Delete "${product.name}"? Existing orders keep their record.`)) return;
@@ -287,9 +294,6 @@ function ProductRow({
       />
     );
   }
-
-  const album = productAlbum(product);
-  const [lightbox, setLightbox] = useState(false);
   return (
     <div className="glass" style={{
       padding: 12, borderRadius: 12,
