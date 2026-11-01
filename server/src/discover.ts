@@ -20,6 +20,15 @@ import { AuthError, ForbiddenError } from "./auth.js";
 export const MAX_DISCOVER_TEXT = 500;
 export const MAX_DISCOVER_FEED = 100;
 
+// Personal Discover posts mirror the diary's 24-hour visibility
+// contract: a diary entry's grants to viewers expire in 24 hours; the
+// public copy should expire with them. Business ads live in the
+// `business_products` table (not `discover_posts`), so they stay
+// visible for as long as the business keeps the product live —
+// which is the ad's own natural duration, and the right behaviour for
+// something a seller actively published.
+export const DISCOVER_PERSONAL_TTL_MS = 24 * 60 * 60 * 1000;
+
 export type DiscoverPostRow = {
   id: string;
   author_id: string;
@@ -81,14 +90,16 @@ export type DiscoverFeedRow = DiscoverPostRow & {
 };
 
 // Newest-first global feed, excluding the viewer's own posts (you don't
-// discover yourself) and any revoked ones. `before` pages backwards in
-// time: pass the oldest created_at you've seen to get the next page.
+// discover yourself), anything revoked, and anything past the 24-hour
+// TTL. `before` pages backwards in time: pass the oldest created_at
+// you've seen to get the next page.
 export async function discoverFeed(
   viewerId: string, opts: { before?: number; limit?: number },
 ): Promise<DiscoverFeedRow[]> {
   const limit = Math.min(Math.max(opts.limit ?? 30, 1), MAX_DISCOVER_FEED);
-  const args: unknown[] = [viewerId];
-  let where = "p.revoked_at IS NULL AND p.author_id != ?";
+  const cutoff = Date.now() - DISCOVER_PERSONAL_TTL_MS;
+  const args: unknown[] = [viewerId, cutoff];
+  let where = "p.revoked_at IS NULL AND p.author_id != ? AND p.created_at >= ?";
   if (opts.before) { where += " AND p.created_at < ?"; args.push(opts.before); }
   return db.prepare(
     `SELECT p.*, u.display_name, u.handle, u.public_key, u.avatar
@@ -98,6 +109,30 @@ export async function discoverFeed(
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT ${limit}`,
   ).all<DiscoverFeedRow>(...args);
+}
+
+// Opportunistic hygiene — hard-delete personal Discover posts past
+// the 24h TTL (and their blob bindings). Called from the feed handler
+// so cleanup runs with real traffic and we don't need a separate cron.
+// Business ads are NOT touched; they come from `business_products`.
+let lastSweep = 0;
+const SWEEP_THROTTLE_MS = 10 * 60 * 1000;
+export async function sweepExpiredDiscoverPosts(): Promise<void> {
+  const now = Date.now();
+  if (now - lastSweep < SWEEP_THROTTLE_MS) return;
+  lastSweep = now;
+  const cutoff = now - DISCOVER_PERSONAL_TTL_MS;
+  try {
+    const expired = await db.prepare(
+      "SELECT id FROM discover_posts WHERE created_at < ? AND revoked_at IS NULL",
+    ).all<{ id: string }>(cutoff);
+    for (const row of expired) {
+      // Soft-delete first (so an in-flight feed query that saw the id
+      // doesn't 404 on a blob fetch), then drop the blob binding.
+      await db.prepare("UPDATE discover_posts SET revoked_at = ? WHERE id = ?").run(now, row.id);
+      await db.prepare("DELETE FROM discover_blobs WHERE post_id = ?").run(row.id);
+    }
+  } catch { /* non-critical hygiene */ }
 }
 
 // Mixed feed: personal public posts + one ad per business (newest

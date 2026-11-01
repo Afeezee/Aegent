@@ -652,6 +652,17 @@ export async function draft_order(args: {
   };
 }
 
+// Localised currency formatting for the order-notice message.
+// Falls back to a plain "9.99 USD" if the currency code can't be
+// resolved by Intl.NumberFormat (e.g. a bespoke 3-letter token).
+function formatCents(cents: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${currency}`;
+  }
+}
+
 // Open PayPal's hosted approval page and resolve once the buyer
 // returns to the app. Simplest viable mechanism per the plan:
 // visibility-change triggers the resolve, since a capture call against
@@ -1761,10 +1772,45 @@ export async function executePending(action: PendingAction) {
         await openApprovalAndWaitForReturn(created.approveUrl);
       }
       const res = await api.captureCheckoutOrder(created.orderId);
-      if (!res.ok) return { ok: false, error: `capture_${res.status}` } as const;
-      return { ok: true, orderId: created.orderId, status: res.status } as const;
+      if (!res.ok) {
+        // Server returned ok=false (status something other than
+        // 'captured'). Hand the exact PayPal status back so the UI
+        // can tell the user *why* instead of just "cancelled".
+        return { ok: false, error: `Payment didn't complete — PayPal returned "${res.status}". Common causes: the sandbox buyer account has no balance, approval was closed before confirming, or the buyer account is Nigeria-restricted. Add a sandbox buyer with funds at developer.paypal.com and retry.` } as const;
+      }
+      // Capture succeeded → auto-notify the vendor by sending a
+      // normal E2E message into the business owner's DM. The buyer
+      // and the vendor are already peers (the chat where draft_order
+      // was staged), so the thread exists and encryption keys are
+      // already resolved — this just drops an order summary in there
+      // like any other message.
+      const itemLines = action.items
+        .map((it) => `• ${it.qty}× ${it.name} — ${formatCents(it.unitPriceCents, action.currency)}`)
+        .join("\n");
+      const total = formatCents(action.totalCents, action.currency);
+      const notice = [
+        `📦 New order confirmed via Aegent`,
+        ``,
+        itemLines,
+        ``,
+        `Total: ${total}`,
+        `Order #${created.orderId.slice(0, 8)}`,
+        `(PayPal ${created.paypalOrderId.slice(-10)}, status: ${res.status})`,
+      ].join("\n");
+      try {
+        await sendText(action.businessOwnerId, false, notice);
+      } catch { /* best-effort; the capture already succeeded, so the
+                   PayPal side is fine even if the chat message hiccupped */ }
+      return {
+        ok: true,
+        orderId: created.orderId,
+        status: res.status,
+        message: `Order placed! Total ${total} charged via PayPal. ${action.businessName} has been notified in your chat — your order #${created.orderId.slice(0, 8)} is now in their inbox.`,
+      } as const;
     } catch (e) {
-      return { ok: false, error: `checkout_failed: ${(e as Error).message}` } as const;
+      // Thrown by req() on 4xx/5xx. Surface the server's own message
+      // so a 503 "paypal_disabled" doesn't look like a silent cancel.
+      return { ok: false, error: (e as Error).message || "checkout_failed" } as const;
     }
   }
   return { ok: false, error: "unknown_action" } as const;

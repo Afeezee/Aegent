@@ -33,14 +33,14 @@ export function TabBar({
   return (
     <nav
       aria-label="Sections"
+      className="tabbar"
       style={{
         position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 300,
         display: "grid", gridTemplateColumns: `repeat(${DESTS.length}, 1fr)`,
         height: "calc(var(--tabbar-h) + var(--safe-bottom))",
         paddingBottom: "var(--safe-bottom)",
-        background: "rgba(10,13,28,0.86)",
         backdropFilter: "blur(18px)",
-        borderTop: "1px solid var(--line)",
+        WebkitBackdropFilter: "blur(18px)",
       }}
     >
       {DESTS.map((d) => (

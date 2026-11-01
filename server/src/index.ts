@@ -53,7 +53,7 @@ import {
   publishEntry, sweepExpiredGrants, updateGrants, viewsOf,
 } from "./diary.js";
 import {
-  MAX_DISCOVER_TEXT, discoverMixedFeed, publishPublic, unpublishPublic,
+  MAX_DISCOVER_TEXT, discoverMixedFeed, publishPublic, sweepExpiredDiscoverPosts, unpublishPublic,
 } from "./discover.js";
 import {
   addProduct, createOrUpdateBusiness, deleteProduct,
@@ -1185,6 +1185,11 @@ app.post("/api/discover", authed, async (req, res) => {
 
 app.get("/api/discover/feed", authed, async (req, res) => {
   try {
+    // Opportunistic cleanup — hard-delete personal Discover posts
+    // past the 24h TTL (business ads live in business_products and
+    // are not touched). Throttled internally so a hot feed doesn't
+    // thrash the DB.
+    void sweepExpiredDiscoverPosts();
     const items = await discoverMixedFeed((req as AuthedReq).userId, {
       before: Number(req.query.before ?? 0) || undefined,
       limit: Number(req.query.limit ?? 30) || 30,

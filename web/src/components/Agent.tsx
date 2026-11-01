@@ -217,6 +217,19 @@ export function AgentSheet({
     setMsgs((xs) => xs.map((m) =>
       m.id === id && m.kind === "confirm" ? { ...m, resolved: res.ok ? "sent" : "cancelled" } : m,
     ));
+    // Surface a follow-up message so the user actually sees what
+    // happened — "cancelled" alone (the only thing the confirm card
+    // used to show on failure) looked like a silent abort. For orders
+    // specifically we also want them to see the success summary with
+    // the vendor-notification line.
+    const resAny = res as { message?: string; error?: string; ok: boolean };
+    const followUp = resAny.message ?? resAny.error;
+    if (followUp) {
+      const kind: UiMsg["kind"] = resAny.ok ? "reply" : "error";
+      const m: UiMsg = { id: crypto.randomUUID(), kind, text: followUp } as UiMsg;
+      setMsgs((xs) => [...xs, m]);
+      persistTurn(m);
+    }
     if (res.ok) onDidAct();
   }
   function cancel(id: string) {
