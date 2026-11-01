@@ -387,8 +387,14 @@ function ProductForm({
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  async function pickImages(files: FileList) {
-    const list = Array.from(files).slice(0, MAX_PRODUCT_IMAGES - images.length);
+  // Takes File[] rather than FileList: callers must snapshot
+  // Array.from(e.target.files) BEFORE clearing e.target.value,
+  // because some browsers (incl. Chrome on Android) empty the
+  // underlying FileList the moment value is reset — and we were
+  // reading .length AFTER the reset, which came back zero and
+  // silently dropped the picked image.
+  async function pickImages(files: File[]) {
+    const list = files.slice(0, MAX_PRODUCT_IMAGES - images.length);
     if (list.length === 0) {
       toast(`Max ${MAX_PRODUCT_IMAGES} images per product.`, "warn");
       return;
@@ -515,7 +521,14 @@ function ProductForm({
         )}
       </div>
       <input ref={fileRef} type="file" accept="image/*" multiple hidden
-        onChange={(e) => { const fs = e.target.files; e.target.value = ""; if (fs && fs.length) void pickImages(fs); }} />
+        onChange={(e) => {
+          // Snapshot FIRST, clear AFTER — Chrome on Android empties
+          // the FileList the moment e.target.value is reset, which
+          // was dropping the picked image(s) silently.
+          const fs = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (fs.length) void pickImages(fs);
+        }} />
       <div className="small" style={{ color: "var(--text-mute)", marginBottom: 10 }}>
         First image is the cover shoppers see in Discover. Tap another to promote it. Up to {MAX_PRODUCT_IMAGES} images; buyers swipe through them.
       </div>
