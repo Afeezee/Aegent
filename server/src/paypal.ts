@@ -225,13 +225,27 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     // custom_id ties PayPal's record back to our audit row.
     const token = await getAccessToken();
     const amount = (totalCents / 100).toFixed(2);
+    // When items[] is included with unit_amount+quantity, PayPal
+    // requires amount.breakdown.item_total to be present and to
+    // equal the sum of (unit_amount × quantity) across all items.
+    // The two totals also have to equal amount.value — all three
+    // numbers are the same here because we don't charge separate
+    // shipping/tax/discount lines yet. If any of those get added
+    // later, each needs its own breakdown entry and amount.value
+    // becomes item_total + shipping + tax − discount.
     const paypalBody = {
       intent: "CAPTURE",
       purchase_units: [{
         reference_id: orderId,
         custom_id: orderId,
         description: `Aegent · ${biz.name}`.slice(0, 127),
-        amount: { currency_code: activeCurrency, value: amount },
+        amount: {
+          currency_code: activeCurrency,
+          value: amount,
+          breakdown: {
+            item_total: { currency_code: activeCurrency, value: amount },
+          },
+        },
         items: resolved.map((r) => ({
           name: r.name.slice(0, 127),
           quantity: String(r.qty),
