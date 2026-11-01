@@ -1537,6 +1537,45 @@ function handleError(res: express.Response, e: unknown) {
 // keep TS happy — referenced elsewhere
 export type _UserRow = UserRow;
 
+// ---- PayPal return / cancel landing pages ----
+//
+// PayPal's hosted approval flow redirects the buyer's browser to
+// return_url on success and cancel_url on cancel. These are plain GETs
+// to our origin, so if we didn't have handlers the buyer would land
+// on either the SPA (ambiguous) or an Express 404. These pages render
+// a tiny self-closing HTML so the PayPal tab goes away cleanly — the
+// main Aegent window's visibilitychange listener then kicks off the
+// capture call on its own. Mounted BEFORE the SPA fallback so they
+// win over the catch-all.
+function returnPage(title: string, body: string, closeMs = 800): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>
+    html,body{margin:0;height:100%;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#10182a;color:#eef1f7;-webkit-font-smoothing:antialiased}
+    .wrap{height:100%;display:grid;place-items:center;padding:24px}
+    .card{max-width:360px;text-align:center;padding:24px;border-radius:16px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)}
+    h1{margin:0 0 8px;font-size:18px;font-weight:650}
+    p{margin:0;color:#a3adc2;font-size:14px;line-height:1.55}
+  </style></head><body><div class="wrap"><div class="card"><h1>${title}</h1><p>${body}</p></div></div><script>
+    // Try to close the window if it was opened by Aegent (window.opener
+    // set) so the user doesn't have to tap the X. On mobile Chrome the
+    // close call is a no-op from JS, which is fine — the main Aegent
+    // app will capture when the user tabs back.
+    setTimeout(function(){ try { window.close(); } catch(e){} }, ${closeMs});
+  </script></body></html>`;
+}
+app.get("/checkout/return", (_req, res) => {
+  res.type("html").send(returnPage(
+    "Returning to Aegent…",
+    "PayPal approval received. You can close this tab and head back to Aegent — your order is being finalised there.",
+  ));
+});
+app.get("/checkout/cancel", (_req, res) => {
+  res.type("html").send(returnPage(
+    "Checkout cancelled",
+    "No charge was made. Head back to Aegent to try again — your order is still waiting.",
+    1800,
+  ));
+});
+
 // ---- serve the SPA in production ----
 const SPA_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
 if (existsSync(SPA_DIR)) {

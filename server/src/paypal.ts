@@ -44,6 +44,43 @@ export function paypalEnabled(): boolean {
   return !!(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
 }
 
+// Where PayPal should redirect the buyer after approval / cancel.
+// Priority: explicit PAYPAL_RETURN_URL / PAYPAL_CANCEL_URL env (used
+// in prod to pin exact URLs across deploys) → derived from the
+// request's own Origin / Host so local dev + any deploy "just work"
+// without env tuning → a safe prod default.
+//
+// Refuses an env value that points at /api/, which was the "Cannot
+// GET /api/checkout/orders" symptom: a misconfigured env sent the
+// buyer's browser back to the raw API endpoint on return, which
+// Express 404'd. Falling back here is better than silently sending
+// the user into an API path.
+function resolveReturnUrl(req: Request & { userId: string }, kind: "return" | "cancel"): string {
+  const envVar = kind === "return" ? "PAYPAL_RETURN_URL" : "PAYPAL_CANCEL_URL";
+  const configured = process.env[envVar];
+  const path = kind === "return" ? "/checkout/return" : "/checkout/cancel";
+  if (configured && !configured.includes("/api/")) {
+    // If env points at an origin (no path), append the standard path.
+    try {
+      const u = new URL(configured);
+      if (u.pathname === "/" || u.pathname === "") return `${u.origin}${path}`;
+      return configured;
+    } catch { /* fall through to derivation */ }
+  }
+  // Derive from the request. Capacitor/webview may send Origin set to
+  // something non-HTTP (capacitor://localhost) that PayPal rejects —
+  // in that case the Host header is still the API origin, which is
+  // https in prod and a path PayPal accepts.
+  const origin = req.get("origin");
+  if (origin && /^https?:\/\//.test(origin) && !origin.startsWith("capacitor:")) {
+    return `${origin}${path}`;
+  }
+  const host = req.get("host");
+  const proto = (req.get("x-forwarded-proto") ?? req.protocol ?? "https").split(",")[0].trim();
+  if (host) return `${proto}://${host}${path}`;
+  return `https://aegent.cereustechnologies.com${path}`;
+}
+
 // Map PayPal's named errors to one-line prose the client surfaces in
 // the agent chat. Falls back to a generic "returned N" with the raw
 // code so we never swallow context.
@@ -207,8 +244,8 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
       application_context: {
         brand_name: "Aegent",
         user_action: "PAY_NOW",
-        return_url: process.env.PAYPAL_RETURN_URL ?? "https://aegent.cereustechnologies.com/checkout/return",
-        cancel_url: process.env.PAYPAL_CANCEL_URL ?? "https://aegent.cereustechnologies.com/checkout/cancel",
+        return_url: resolveReturnUrl(req, "return"),
+        cancel_url: resolveReturnUrl(req, "cancel"),
       },
     };
     const pr = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
@@ -223,12 +260,34 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     });
     if (!pr.ok) {
       const errText = await pr.text().catch(() => "");
+      let friendly = `PayPal returned ${pr.status}`;
+      try {
+        const body = JSON.parse(errText) as {
+          name?: string;
+          details?: Array<{ issue?: string; description?: string; field?: string }>;
+          message?: string;
+        };
+        const issue = body.details?.[0]?.issue ?? body.name;
+        if (issue) {
+          friendly = translatePaypalIssue(issue, pr.status);
+          // Include the per-field detail if PayPal named one — makes
+          // "application_context.return_url: not a valid URL" show up
+          // on the client, not a mute 502.
+          const field = body.details?.[0]?.field;
+          const desc = body.details?.[0]?.description;
+          if (field || desc) {
+            friendly += ` (${[field, desc].filter(Boolean).join(": ")})`;
+          }
+        } else if (body.message) {
+          friendly = body.message;
+        }
+      } catch { /* non-JSON body — keep the generic message */ }
       await db.prepare(
         "UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?",
       ).run(Date.now(), orderId);
       return res.status(502).json({
         error: "paypal_create_failed",
-        message: `PayPal returned ${pr.status}`,
+        message: friendly,
         detail: errText.slice(0, 500),
       });
     }
