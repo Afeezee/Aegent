@@ -115,6 +115,19 @@ function translatePaypalIssue(issue: string, httpStatus: number): string {
 // show. Compare: Shopify ~2.9% + 30¢, Gumroad 10%, Etsy 6.5% + listing.
 export const COMMISSION_BPS = 500;
 
+// Currencies the PayPal Orders API accepts. Pulled from
+// https://developer.paypal.com/api/rest/reference/currency-codes/ —
+// notably excludes most African currencies (NGN, GHS, KES, ZAR, EGP,
+// XOF, XAF, …) because PayPal's merchant settlement doesn't cover
+// them. The Business page's currency picker should prefer these at
+// the top, and createCheckoutOrder refuses anything else before
+// burning the PayPal call.
+export const PAYPAL_SUPPORTED_CURRENCIES = new Set([
+  "AUD", "BRL", "CAD", "CNY", "CZK", "DKK", "EUR", "HKD", "HUF", "ILS",
+  "INR", "JPY", "MYR", "MXN", "NOK", "NZD", "PHP", "PLN", "GBP", "RUB",
+  "SGD", "SEK", "CHF", "THB", "TWD", "USD",
+]);
+
 // Module-level cache for the OAuth2 access token. PayPal access tokens
 // expire in ~9 hours; cache with a 5s skew so a mid-flight request
 // doesn't race the expiry.
@@ -195,6 +208,18 @@ export async function createCheckoutOrder(req: AuthedReq, res: Response) {
     }
     const totalCents = resolved.reduce((s, it) => s + it.unitPriceCents * it.qty, 0);
     const activeCurrency = currency ?? "USD";
+
+    // Preflight: refuse unsupported currencies with a seller-fixable
+    // message. PayPal doesn't settle NGN / most African currencies,
+    // so an order priced in NGN would always fail at create-time with
+    // a cryptic CURRENCY_NOT_SUPPORTED. Tell the seller plainly what
+    // to do instead.
+    if (!PAYPAL_SUPPORTED_CURRENCIES.has(activeCurrency)) {
+      return res.status(400).json({
+        error: "currency_not_supported",
+        message: `${activeCurrency} isn't accepted by PayPal, so this product can't check out. Ask the seller to edit the product's currency to USD, EUR, GBP, or another PayPal-supported currency (full list: AUD, BRL, CAD, CNY, CZK, DKK, EUR, GBP, HKD, HUF, ILS, INR, JPY, MXN, MYR, NOK, NZD, PHP, PLN, RUB, SEK, SGD, THB, TWD, USD).`,
+      });
+    }
 
     // Commission split, frozen on the row. The seller sees this exact
     // breakdown in their Earnings view. PayPal still charges the full

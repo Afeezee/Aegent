@@ -541,6 +541,16 @@ function ProductForm({
         <code>1999.99</code> or <code>1,999.99</code>. Preview:{" "}
         <strong>{previewMoney(priceStr, currency)}</strong>.
       </div>
+      {!PAYPAL_OK.has(currency) && (
+        <div className="small" style={{
+          marginBottom: 10, padding: "8px 10px", borderRadius: 10, lineHeight: 1.45,
+          background: "rgba(255, 196, 110, 0.10)",
+          border: "1px solid rgba(255, 196, 110, 0.30)",
+          color: "var(--text)",
+        }}>
+          ⚠️ PayPal doesn't accept <strong>{currency}</strong>. Buyers won't be able to check this out until you set the currency to a PayPal-supported one — most sellers use <strong>USD</strong>, <strong>EUR</strong>, or <strong>GBP</strong>.
+        </div>
+      )}
 
       {/* Delivery — presets + a nudge-only free text. One column
           server-side; this UI just helps the seller write something a
@@ -603,11 +613,23 @@ function previewMoney(input: string, currency: string): string {
   return formatMoney(cents, currency);
 }
 
+// Currencies PayPal will actually settle. Pulled from
+// https://developer.paypal.com/api/rest/reference/currency-codes/ —
+// anything outside this set WILL fail at checkout, so the picker
+// surfaces it with a visible badge and the ProductForm warns when
+// the selected currency isn't one of these.
+const PAYPAL_OK = new Set([
+  "AUD", "BRL", "CAD", "CNY", "CZK", "DKK", "EUR", "HKD", "HUF", "ILS",
+  "INR", "JPY", "MYR", "MXN", "NOK", "NZD", "PHP", "PLN", "GBP", "RUB",
+  "SGD", "SEK", "CHF", "THB", "TWD", "USD",
+]);
+
 // ISO 4217 currency codes the dropdown offers. Not every valid code —
 // a curated set weighted toward Africa + the major reserve currencies
 // so the picker opens on something a Nigerian seller probably wants
 // without scrolling. "Add your own" is covered by typing a 3-letter
-// code into the search box; the server accepts any 3-letter string.
+// code into the search box; the server accepts any 3-letter string
+// (though PAYPAL_OK gates what will actually check out).
 const CURRENCIES: Array<{ code: string; name: string }> = [
   { code: "NGN", name: "Nigerian Naira" },
   { code: "USD", name: "US Dollar" },
@@ -730,20 +752,32 @@ function CurrencySelect({ value, onChange }: { value: string; onChange: (v: stri
                 Press Enter to use "{query.toUpperCase()}" anyway.
               </div>
             )}
-            {filtered.map((c) => (
-              <button key={c.code} type="button" onClick={() => commit(c.code)}
-                style={{
-                  all: "unset", cursor: "pointer",
-                  padding: "7px 8px", borderRadius: 8,
-                  display: "flex", alignItems: "center", gap: 10,
-                  background: c.code === value ? "rgba(138,125,255,0.14)" : "transparent",
-                }}
-                onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = "var(--glass-bg-hi)"; }}
-                onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = c.code === value ? "rgba(138,125,255,0.14)" : "transparent"; }}>
-                <strong style={{ width: 42 }}>{c.code}</strong>
-                <span className="small" style={{ color: "var(--text-dim)" }}>{c.name}</span>
-              </button>
-            ))}
+            {filtered.map((c) => {
+              const ok = PAYPAL_OK.has(c.code);
+              return (
+                <button key={c.code} type="button" onClick={() => commit(c.code)}
+                  style={{
+                    all: "unset", cursor: "pointer",
+                    padding: "7px 8px", borderRadius: 8,
+                    display: "flex", alignItems: "center", gap: 10,
+                    background: c.code === value ? "rgba(138,125,255,0.14)" : "transparent",
+                  }}
+                  onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.background = "var(--glass-bg-hi)"; }}
+                  onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.background = c.code === value ? "rgba(138,125,255,0.14)" : "transparent"; }}>
+                  <strong style={{ width: 42 }}>{c.code}</strong>
+                  <span className="small" style={{ color: "var(--text-dim)", flex: 1 }}>{c.name}</span>
+                  {ok && (
+                    <span title="PayPal will accept this currency at checkout"
+                      style={{
+                        fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3,
+                        padding: "2px 7px", borderRadius: 999,
+                        background: "rgba(127,230,161,0.14)", color: "var(--ok)",
+                        border: "1px solid rgba(127,230,161,0.28)",
+                      }}>PayPal</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
