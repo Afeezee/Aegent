@@ -44,6 +44,31 @@ export function paypalEnabled(): boolean {
   return !!(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
 }
 
+// Map PayPal's named errors to one-line prose the client surfaces in
+// the agent chat. Falls back to a generic "returned N" with the raw
+// code so we never swallow context.
+function translatePaypalIssue(issue: string, httpStatus: number): string {
+  switch (issue) {
+    case "ORDER_NOT_APPROVED":
+      return "The PayPal checkout wasn't completed. Open the approval tab, log into a sandbox buyer account with a balance, and tap Pay again — your order is still waiting.";
+    case "PAYER_ACTION_REQUIRED":
+      return "PayPal needs the buyer to take one more action. Reopen the approval tab to finish, then try Pay again.";
+    case "INSTRUMENT_DECLINED":
+      return "PayPal declined the payment method on the buyer's account. Choose a different funding source (or add a sandbox balance), then retry.";
+    case "PAYEE_ACCOUNT_RESTRICTED":
+    case "COMPLIANCE_VIOLATION":
+      return "The merchant account can't receive this payment (country/compliance restriction). This is the Nigeria-sandbox limit — swap PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET to a non-restricted developer app and retry.";
+    case "INSUFFICIENT_FUNDS":
+      return "The buyer's sandbox account has no balance. Add funds at developer.paypal.com → Sandbox → Accounts → Manage funds, then try again.";
+    case "DUPLICATE_INVOICE_ID":
+      return "This order was already processed on PayPal — treat it as paid.";
+    case "ORDER_ALREADY_CAPTURED":
+      return "This order was already captured on PayPal.";
+    default:
+      return `PayPal returned ${httpStatus} (${issue}).`;
+  }
+}
+
 // Aegent's cut of every captured order, in basis points (1/100th of a
 // percent). 500 = 5%. Deliberately low to minimise seller friction and
 // shown openly in each seller's Earnings view — no hidden fees. If this
@@ -256,6 +281,44 @@ export async function captureCheckoutOrder(req: AuthedReq, res: Response) {
     }
 
     const token = await getAccessToken();
+
+    // Preflight: ask PayPal for the order's current status. If it's
+    // not APPROVED yet, trying to capture will come back with a 422
+    // UNPROCESSABLE_ENTITY / ORDER_NOT_APPROVED that reads as a
+    // confusing "cancelled" to the user. Return a clear reason here
+    // instead so the UI can tell them "you closed the PayPal tab
+    // before confirming — try again." APPROVED means they completed
+    // the hosted flow and PayPal is ready for us to capture.
+    const statusPr = await fetch(
+      `${PAYPAL_BASE}/v2/checkout/orders/${encodeURIComponent(row.paypal_order_id)}`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+    if (statusPr.ok) {
+      const sj = await statusPr.json() as { status?: string };
+      const paypalStatus = sj.status ?? "UNKNOWN";
+      if (paypalStatus !== "APPROVED" && paypalStatus !== "COMPLETED") {
+        // Don't flip the local row to failed yet — the buyer might
+        // simply come back and approve. Keep it at 'created' so a
+        // retry (user re-opens the approve URL) still works.
+        return res.status(409).json({
+          error: "not_approved",
+          status: paypalStatus,
+          message: paypalStatus === "CREATED"
+            ? "The PayPal checkout wasn't completed. Open the approval tab, log into a sandbox buyer account with a balance, and tap Pay again — your order is still waiting."
+            : paypalStatus === "VOIDED"
+              ? "PayPal cancelled this order. Start a new purchase to try again."
+              : `PayPal reports this order as ${paypalStatus}, which isn't ready to capture.`,
+        });
+      }
+    }
+    // If the status probe itself failed, fall through to capture —
+    // PayPal will return a definitive error on the capture call that
+    // the client surfaces to the user verbatim.
+
     const pr = await fetch(
       `${PAYPAL_BASE}/v2/checkout/orders/${encodeURIComponent(row.paypal_order_id)}/capture`,
       {
@@ -271,13 +334,32 @@ export async function captureCheckoutOrder(req: AuthedReq, res: Response) {
     );
     const pj = await pr.json().catch(() => ({}));
     if (!pr.ok) {
-      await db.prepare(
-        "UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?",
-      ).run(Date.now(), orderId);
-      return res.status(502).json({
+      // Pull PayPal's named error code out of the response body so
+      // the client can tell the user the real reason instead of a
+      // generic "PayPal returned 422". Shape per Orders API v2:
+      //   { name: "UNPROCESSABLE_ENTITY",
+      //     details: [{ issue: "ORDER_NOT_APPROVED", description }] }
+      const body = pj as {
+        name?: string;
+        message?: string;
+        details?: Array<{ issue?: string; description?: string }>;
+      };
+      const issue = body.details?.[0]?.issue ?? body.name ?? "unknown";
+      const friendly = translatePaypalIssue(issue, pr.status);
+      // Only hard-fail the local row if the error is terminal. A
+      // 422/ORDER_NOT_APPROVED is a retry case — the buyer can go
+      // back and complete approval.
+      const terminal = issue !== "ORDER_NOT_APPROVED" && issue !== "PAYER_ACTION_REQUIRED";
+      if (terminal) {
+        await db.prepare(
+          "UPDATE business_orders SET status = 'failed', updated_at = ? WHERE id = ?",
+        ).run(Date.now(), orderId);
+      }
+      return res.status(pr.status === 422 ? 409 : 502).json({
         error: "paypal_capture_failed",
-        message: `PayPal returned ${pr.status}`,
-        detail: JSON.stringify(pj).slice(0, 500),
+        issue,
+        message: friendly,
+        detail: (body.details?.[0]?.description ?? body.message ?? JSON.stringify(pj)).slice(0, 500),
       });
     }
     const status = (pj as { status?: string }).status ?? "COMPLETED";
