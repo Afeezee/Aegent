@@ -89,6 +89,11 @@ export type UserRow = {
   avatar: string | null;
   status_text: string | null;
   status_until: number | null;
+  // Account-wide security generation; bumped on recovery reset,
+  // password change, or revoke-all. Every JWT carries its issue-time
+  // sv; the authed middleware rejects tokens whose sv is below the
+  // user's current value.
+  security_version: number;
 };
 
 export type MessageRow = {
@@ -791,6 +796,14 @@ const ADDED_COLUMNS: AddedColumn[] = [
   // Paystack's reference id — equivalent of paypal_order_id for the
   // Paystack side. Set at init, used for verify.
   { table: "business_orders", name: "paystack_reference", ddl: "ALTER TABLE business_orders ADD COLUMN paystack_reference TEXT" },
+  // Account-wide security generation. Bumped on recovery reset,
+  // password change, or revoke-all. The access-token JWT carries
+  // its issue-time value as `sv`; any request whose JWT sv is
+  // below the user's current sv is rejected 401. This is what
+  // makes recovery and "sign out everywhere" actually evict the
+  // token window — otherwise a stale access token kept working
+  // until it naturally expired (QA F01 + F02).
+  { table: "users", name: "security_version", ddl: "ALTER TABLE users ADD COLUMN security_version INTEGER NOT NULL DEFAULT 0" },
 ];
 
 export async function initSchema(): Promise<void> {

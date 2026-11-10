@@ -84,6 +84,15 @@ export async function applyNewPassword(userId: string, input: {
   await db.prepare(
     "UPDATE users SET password_hash = ?, wrapped_priv = ?, kdf_salt = ? WHERE id = ?",
   ).run(input.passwordHash, input.wrappedPriv, input.kdfSalt, userId);
+  // Evict every pre-change session: bump the account's security
+  // version AND hard-revoke all existing refresh tokens. The sv bump
+  // closes the access-token window within one request round-trip
+  // (the authed middleware rejects any JWT whose sv is below the
+  // current value), and the refresh revocation stops new access
+  // tokens from being minted off a stale refresh. Fixes QA F01 and
+  // the related F02 window.
+  const { bumpSecurityAndRevokeAllRefresh } = await import("./auth.js");
+  await bumpSecurityAndRevokeAllRefresh(userId);
 }
 
 // ---- reset flow ----

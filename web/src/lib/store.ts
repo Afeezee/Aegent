@@ -736,10 +736,29 @@ export async function applyReaction(targetId: string, userId: string, emoji: str
   await toggleReaction(targetId, userId, emoji);
 }
 
+// Returns the stored message row by id, or undefined. Exposed so
+// the session-layer ingest guards can check a payload's targetId
+// against the row's sender/peer without widening the Db export.
+export async function getStoredMessage(id: string) {
+  return requireDb().messages.get(id);
+}
+
 export async function applyEdit(targetId: string, newBody: string) {
   const target = await requireDb().messages.get(targetId);
   if (!target) return;
-  await requireDb().messages.update(targetId, { editedBody_ct: sealText(newBody) });
+  // Also refresh the search index so an edited body is findable by
+  // its new wording — not the pre-edit tokens that would otherwise
+  // live on indefinitely (QA F22). Translation cache for this
+  // message is stale too; drop it so the next render re-translates
+  // from the new body instead of showing the pre-edit translation
+  // (QA F23). sealText is the same codec used at insert time.
+  const next = (newBody ?? "").trim();
+  await requireDb().messages.update(targetId, {
+    editedBody_ct: sealText(newBody),
+    tokens: tokenize(next).join(" "),
+    embedding: embed(next),
+  });
+  try { await requireDb().translations.delete(targetId); } catch { /* ignore */ }
 }
 
 // May `by` tombstone this message?

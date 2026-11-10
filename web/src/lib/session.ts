@@ -40,11 +40,11 @@ import {
 } from "./crypto.js";
 import { startReplication, stopReplication } from "./replication.js";
 import {
-  api, apiUrl, loadToken, setRefreshToken, setToken,
+  api, apiUrl, loadRefreshToken, loadToken, setRefreshToken, setToken,
   type Envelope, type InboxStats, type MeApi, type PublicUser,
 } from "./api.js";
 import {
-  applyDelete, applyEdit, applyReaction, setReaction, toggleReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
+  applyDelete, applyEdit, applyReaction, getStoredMessage, setReaction, toggleReaction, bumpOutboxAttempt, closeStore, dequeueOutbox,
   enqueueOutbox, getContact, getGroup, getMeta, ledgerAllIds, ledgerClear, ledgerCounts,
   ledgerMarkOk, ledgerMarkPending, ledgerPending, ledgerStatus, listOutbox, markDelivered,
   markRead, messageSenderId, openStore, outboxCount, rekeyLocalStore, repairAgentTurns, repairSentTimes, repairTimestamps,
@@ -830,6 +830,22 @@ export async function tryRestoreSession(): Promise<Session | null> {
 
 export function logout() {
   SWEPT_THIS_SESSION = false;
+  // Server-side revoke the refresh chain BEFORE we drop the local
+  // copy, so a credential captured in the pre-logout window stops
+  // working at the relay (QA F03 — ordinary logout used to leave the
+  // refresh usable). Fire-and-forget: a transient network hiccup
+  // shouldn't block the local sign-out; the token's exp caps the
+  // window either way, and the account can still revoke-everywhere
+  // from Settings.
+  const presentedRefresh = loadRefreshToken();
+  if (presentedRefresh) {
+    fetch(apiUrl("/api/logout"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: presentedRefresh }),
+      keepalive: true,
+    }).catch(() => { /* best-effort; the local wipe below still runs */ });
+  }
   void import("./push.js").then((m) => m.teardownPush()).catch(() => { /* ignore */ });
   stopReplication();
   disconnectSocket();
@@ -1277,6 +1293,25 @@ export async function ingestEnvelope(envIn: {
   // nothing at all. This is the bug behind "new device, empty inbox".
   await ensureThreadEntity(threadId, !!env.groupId);
 
+  // Integrity guard: text/media payloads that collide with an
+  // existing msgId are either our own self-echo (sender matches) or
+  // a forgery (someone else trying to overwrite our row by reusing
+  // our id). Accept the first, drop the second. Without this check
+  // Dexie's .put() upsert quietly overwrote the original row — a
+  // classic "duplicate msg id replaces history" integrity bug.
+  if (payload.t === "text" || payload.t === "media") {
+    const existing = await getStoredMessage(payload.msgId);
+    if (existing && existing.senderId !== env.senderId) {
+      console.warn("[ingest] dropping msgId collision from different sender", {
+        msgId: payload.msgId, existingSender: existing.senderId.slice(0, 8),
+        envSender: env.senderId.slice(0, 8),
+      });
+      await ledgerMarkOk(env.id, env.createdAt).catch(() => { /* ignore */ });
+      if (ack) await api.ack([env.id]).catch(() => { /* best-effort */ });
+      return { threadId, msgId: payload.msgId };
+    }
+  }
+
   if (payload.t === "text") {
     await saveTextMessage({
       id: payload.msgId,
@@ -1310,7 +1345,19 @@ export async function ingestEnvelope(envIn: {
       await applyReaction(payload.targetId, env.senderId, payload.emoji);
     }
   } else if (payload.t === "edit") {
-    await applyEdit(payload.targetId, payload.body);
+    // Integrity guard: only the message's own author can edit it.
+    // Without this, a peer could send an "edit" op for someone
+    // else's msgId and rewrite its body on this device. Same shape
+    // as the existing delete + transcript guards below.
+    const owner = await messageSenderId(payload.targetId);
+    if (owner && owner === env.senderId) {
+      await applyEdit(payload.targetId, payload.body);
+    } else {
+      console.warn("[ingest] dropping edit from non-author", {
+        targetId: payload.targetId, owner: owner?.slice(0, 8),
+        envSender: env.senderId.slice(0, 8),
+      });
+    }
   } else if (payload.t === "delete") {
     // The envelope's sender is the authority here — not the payload,
     // which anyone could have written.

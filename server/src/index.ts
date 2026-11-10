@@ -31,6 +31,7 @@ import {
   invalidateAdminCache, isAdmin, isSuspended,
   listActiveSessions, loginUser, registerUser, revokeOtherSessions, revokeSession,
   rotateRefreshToken, searchUsers, setPhone, toPublic, updatePrivacy, updateProfile, verifyToken,
+  bumpSecurityAndRevokeAllRefresh, getSecurityVersion,
 } from "./auth.js";
 import {
   maybeLogSessionStart, recordAbuseReport, recordErrorReport, recordFeedback,
@@ -142,6 +143,28 @@ app.post("/api/refresh", async (req, res) => {
   } catch (e) { handleError(res, e); }
 });
 
+// Server-side logout. Revokes the refresh-token chain the client
+// presents so that pre-logout refresh credentials captured by an
+// attacker (or lingering on a shared machine) stop working at the
+// server. Matches the QA model's F03: ordinary logout should not
+// leave a renewable session behind. Intentionally tolerant: we
+// return 200 even if the token is already gone / unknown — the
+// client's "signed out locally" semantics shouldn't visibly fail
+// because the server state was already clean. Not authed: the
+// refresh token itself is the credential (same posture as /refresh).
+app.post("/api/logout", async (req, res) => {
+  try {
+    const body = z.object({ refreshToken: z.string().min(1).optional() }).parse(req.body ?? {});
+    if (body.refreshToken) {
+      // Idempotent revoke — walks the chain if the presented row
+      // has been rotated already.
+      const { revokeRefreshChain } = await import("./auth.js");
+      await revokeRefreshChain(body.refreshToken).catch(() => { /* already gone, fine */ });
+    }
+    res.json({ ok: true });
+  } catch { res.json({ ok: true }); }
+});
+
 app.get("/api/sessions", authed, async (req, res) => {
   try { res.json(await listActiveSessions((req as AuthedReq).userId)); }
   catch (e) { handleError(res, e); }
@@ -186,7 +209,7 @@ app.post("/api/reports/error", async (req, res) => {
     const header = req.header("authorization") ?? "";
     const m = /^Bearer (.+)$/.exec(header);
     let userId: string | null = null;
-    if (m) { try { userId = verifyToken(m[1]); } catch { /* anonymous */ } }
+    if (m) { try { userId = verifyToken(m[1]).userId; } catch { /* anonymous */ } }
     await recordErrorReport({
       userId, kind: body.kind,
       message: body.message, stack: body.stack,
@@ -1289,7 +1312,7 @@ io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token as string | undefined;
     if (!token) throw new Error("missing_token");
-    (socket.data as { userId: string }).userId = verifyToken(token);
+    (socket.data as { userId: string }).userId = verifyToken(token).userId;
     next();
   } catch { next(new Error("unauthorized")); }
 });
@@ -1438,8 +1461,11 @@ function authed(req: express.Request, res: express.Response, next: express.NextF
   const m = /^Bearer (.+)$/.exec(header);
   if (!m) return res.status(401).json({ error: "unauthorized" });
   let userId: string;
+  let sv: number;
   try {
-    userId = verifyToken(m[1]);
+    const verified = verifyToken(m[1]);
+    userId = verified.userId;
+    sv = verified.sv;
   } catch { return res.status(401).json({ error: "unauthorized" }); }
   (req as AuthedReq).userId = userId;
   // Phase 2: suspension check + session-start analytics. Both are
@@ -1448,10 +1474,21 @@ function authed(req: express.Request, res: express.Response, next: express.NextF
   // enforcement for that one request, same as before the hook existed.
   (async () => {
     try {
+      // Security-version check. If the user has bumped their sv (via
+      // recovery reset, password change, or sign-out-everywhere)
+      // since this token was issued, it's dead regardless of its
+      // JWT exp claim — a stale access-token window must not
+      // survive. Same fail-open posture as suspension: if the DB
+      // hiccups we let the request through this once rather than
+      // locking everybody out.
+      const currentSv = await getSecurityVersion(userId);
+      if (currentSv > sv) {
+        return res.status(401).json({ error: "token_superseded" });
+      }
       if (await isSuspended(userId)) {
         return res.status(403).json({ error: "account_suspended" });
       }
-    } catch { /* let the request through; suspension re-checked next request */ }
+    } catch { /* let the request through; re-checked next request */ }
     void maybeLogSessionStart(userId);
     next();
   })();

@@ -57,7 +57,8 @@ export async function checkPassword(userId: string, password: string): Promise<b
 export async function issueTokens(userId: string, deviceLabel?: string): Promise<{
   token: string; refreshToken: string;
 }> {
-  return { token: sign(userId), refreshToken: await issueRefreshToken(userId, deviceLabel) };
+  const sv = await getSecurityVersion(userId);
+  return { token: sign(userId, sv), refreshToken: await issueRefreshToken(userId, deviceLabel) };
 }
 
 // ---- registration / login ----
@@ -109,7 +110,7 @@ export async function registerUser(input: {
   const refreshToken = await issueRefreshToken(id, input.deviceLabel);
   // Analytics (metadata-only, fail-safe inside logSessionEvent).
   void logSessionEvent(id, "login", input.deviceLabel);
-  return { user: toPublic(user), token: sign(id), refreshToken, handle };
+  return { user: toPublic(user), token: sign(id, user.security_version ?? 0), refreshToken, handle };
 }
 
 export async function loginUser(input: {
@@ -133,7 +134,7 @@ export async function loginUser(input: {
   void logSessionEvent(row.id, "login", input.deviceLabel);
   return {
     user: toPublic(row),
-    token: sign(row.id),
+    token: sign(row.id, row.security_version ?? 0),
     refreshToken,
     wrappedPriv: row.wrapped_priv,
     kdfSalt: row.kdf_salt,
@@ -218,7 +219,7 @@ export async function rotateRefreshToken(presented: string): Promise<{
   void logSessionEvent(row.user_id, "token_refresh", row.device_label);
   return {
     userId: row.user_id,
-    accessToken: sign(row.user_id),
+    accessToken: sign(row.user_id, await getSecurityVersion(row.user_id)),
     refreshToken: `${newId}.${newRaw}`,
   };
 }
@@ -338,9 +339,60 @@ export async function revokeSession(userId: string, sessionId: string): Promise<
   ).run(Date.now(), sessionId, userId);
 }
 
-export function verifyToken(token: string): string {
-  const payload = jwt.verify(token, JWT_SECRET) as { sub: string };
-  return payload.sub;
+// Revoke the refresh-token chain the client presents at logout. The
+// presented token's row may already have been rotated (and thus
+// "superseded") by a background refresh — walk to the current head
+// and revoke THAT, so a credential captured just before logout
+// doesn't survive by virtue of having already been rotated once.
+// Tolerant: unknown/missing tokens return silently.
+export async function revokeRefreshChain(presented: string): Promise<void> {
+  const presentedHash = hashToken(presented);
+  let cur = await db.prepare(
+    "SELECT id, user_id, replaced_by FROM refresh_tokens WHERE token_hash = ?",
+  ).get<{ id: string; user_id: string; replaced_by: string | null }>(presentedHash);
+  if (!cur) return;
+  const userId = cur.user_id;
+  const now = Date.now();
+  // Walk forward through any rotation chain.
+  while (cur) {
+    await db.prepare(
+      "UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, cur.id);
+    if (!cur.replaced_by) break;
+    cur = await db.prepare(
+      "SELECT id, user_id, replaced_by FROM refresh_tokens WHERE id = ? AND user_id = ?",
+    ).get<{ id: string; user_id: string; replaced_by: string | null }>(cur.replaced_by, userId);
+  }
+}
+
+export type VerifiedToken = { userId: string; sv: number };
+export function verifyToken(token: string): VerifiedToken {
+  const payload = jwt.verify(token, JWT_SECRET) as { sub: string; sv?: number };
+  return { userId: payload.sub, sv: typeof payload.sv === "number" ? payload.sv : 0 };
+}
+
+// Bump every refresh token + the account's security version so any
+// outstanding access token issued below the new sv is rejected on
+// its next request. Used by recovery reset, password change, and
+// explicit "sign out everywhere". The access-token window closes
+// within one request round-trip of this call completing.
+export async function bumpSecurityAndRevokeAllRefresh(userId: string): Promise<void> {
+  const now = Date.now();
+  await db.prepare(
+    "UPDATE users SET security_version = security_version + 1 WHERE id = ?",
+  ).run(userId);
+  await db.prepare(
+    "UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+  ).run(now, userId);
+}
+
+// Current security version — cheap single-row read used by the authed
+// middleware on every request. For a hot path this could be cached,
+// but at today's traffic a single indexed SELECT per request is fine.
+export async function getSecurityVersion(userId: string): Promise<number> {
+  const row = await db.prepare("SELECT security_version AS sv FROM users WHERE id = ?")
+    .get<{ sv: number }>(userId);
+  return row?.sv ?? 0;
 }
 
 // ---- directory lookups ----
@@ -503,8 +555,15 @@ export async function updateProfile(userId: string, patch: {
   );
 }
 
-function sign(userId: string): string {
-  return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: TOKEN_TTL });
+// The sv claim is the account's security version at issue time. If
+// the user later resets recovery / changes password / signs out
+// everywhere, the server-side sv bumps and this access token is
+// rejected on its next request — regardless of its JWT exp claim.
+// Callers that don't have an sv handy can fetch it with
+// getSecurityVersion(userId); loginUser / registerUser / rotate do
+// so inline so the fresh token always carries the current value.
+function sign(userId: string, sv: number): string {
+  return jwt.sign({ sub: userId, sv }, JWT_SECRET, { expiresIn: TOKEN_TTL });
 }
 
 async function allocateHandle(displayName: string): Promise<string> {
