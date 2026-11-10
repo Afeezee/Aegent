@@ -230,6 +230,60 @@ Every content column is opaque bytes. No key that opens any of them ever transit
 
 ---
 
+## Security posture (what's fixed, what's accepted, what's deferred)
+
+An external QA pass in Nov 2026 produced a 23-point audit. The findings landed as a prioritised fix plan; this section documents the end state so the trade-offs are explicit rather than hidden in a git log.
+
+### Fixed in the current build
+
+**Account containment**
+- **Recovery evicts every pre-reset session.** `applyNewPassword` bumps a per-user `security_version` and hard-revokes every outstanding refresh token. Every JWT carries its issue-time `sv`; the authed middleware rejects tokens whose `sv` is below the user's current value. So within one request round-trip of a recovery (or password change, or sign-out-everywhere), stale access tokens are dead — no "stale 15-minute window" survives.
+- **Ordinary logout revokes server-side.** `POST /api/logout` walks the refresh-token rotation chain and revokes the head, so a credential captured just before logout stops working at the relay. The client fires this with `keepalive: true` before wiping localStorage, so a page close doesn't skip it.
+
+**Message integrity**
+- **Edits are author-bound.** Incoming `edit` payloads whose envelope sender doesn't match the message's own author are dropped with a warn log. Same guard already existed for `delete` and `transcript`; now consistent across every op that mutates an existing row.
+- **Duplicate-id replays are refused.** Incoming `text`/`media` payloads whose `msgId` collides with an existing row written by a different sender are dropped (same-sender collisions still pass through as the normal self-echo dedupe). Dexie's `.put()` upsert can no longer be used to overwrite someone else's message.
+
+**Search + translation correctness**
+- **Edits refresh the search index.** `applyEdit` now re-tokenises + re-embeds the new body, so an edited message is findable by its new wording from the next search (not its pre-edit tokens).
+- **Edits clear the translation cache.** No more stale pre-edit translation surfacing on the next render.
+- **Non-Latin scripts tokenise.** `tokenize()` uses `\p{L}\p{N}` with the `/u` flag — Arabic, Chinese, Japanese, Korean, Devanagari, Cyrillic, Thai, Hebrew all index cleanly. CJK uses a 1-char minimum (each char is a token); everything else uses the old 2-char minimum.
+
+**Transport + browser hardening**
+- **Security headers** on every response: `Content-Security-Policy` (scripts `'self'` only; `frame-ancestors 'none'` closes clickjacking regardless of the browser's storage-partitioning behaviour), `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Cache-Control: no-store** on every `/api/*` response except `/api/blobs/*` (blobs are content-addressed and effectively immutable, so caching them is safe and desirable).
+
+**Directory privacy**
+- **Handle / phone / id lookups don't leak email or phone.** `GET /api/users/by-handle/:h`, `by-phone/:p`, `/api/users/:id` return `email: ""` and `phone: null` when the lookup resolves to someone OTHER than the caller. `by-email/:e` still echoes the email (the caller already knows it). `POST /api/users/lookup-phones` echoes the phone + email back because the caller supplied the phone (their own contact list).
+
+**Agent quota + checkout**
+- **Agent quota counts user messages**, not every tool round-trip. One question with three tools = one of 10/day.
+- **PayPal / Paystack errors are translated to actionable prose** inline in the agent chat. Capture preflight catches the "closed the approve tab too early" case with a clear retry message instead of a mute "cancelled".
+
+**UX polish from the same pass**
+- **Modal focus trap.** Tab / Shift+Tab stays inside the dialog; Escape closes; focus restores to the triggering element on close.
+- **Form labels associated** with inputs via `htmlFor` / `id` — label click focuses the field; screen readers pair them correctly.
+- **Session ID stays stable across refresh rotations.** `/api/sessions` returns both the current head `id` AND the chain-root `chainId`. Clients that need to say "this device" compare against `chainId`, so a background refresh doesn't break the labelling.
+- **Attachment size shown is the plaintext size**, not ciphertext (subtract 40 bytes of nacl.secretbox overhead).
+- **Profile edits that don't touch the status-expiry preserve it** — a name-only edit used to silently clear a one-hour expiry; now `statusUntil` is omitted from the PATCH unless the user actually touched the selector.
+
+### Accepted trade-offs (documented, not bugs)
+
+These behaviours surfaced in the audit and the design decision stays: history availability outranks the local-storage reduction they'd each give you.
+
+- **Message search tokens + translation cache + contact/group metadata survive logout** in the local Dexie store. On sign-in, the password-derived key unseals the archive and you're back where you were without a server round-trip. Sign out on a shared device by signing out of the device itself; don't rely on an app-level logout to erase your chat history.
+- **Attachment content keys live in the local store** so a receiver can still open an attachment offline after a message is decrypted. Same availability bias; same guidance about shared devices.
+- **The identity private key is wrapped by the Argon2id-derived key**. The *wrapped* bytes sit in localStorage; the *unwrapped* key only lives in memory after unlock, torn down on tab close.
+- **Any authenticated user can fetch any attachment blob by exact id** (`/api/blobs/:id`). Blobs are encrypted with the per-blob content key that only the message recipients hold, so the raw ciphertext is useless to a random fetcher. Closing the gap "properly" would need a blob-to-message binding the current encryption model doesn't expose server-side. The code comment in `server/src/blobs.ts` calls this out explicitly; the id is a UUID, not a sequential counter, so enumeration is infeasible.
+
+### Deferred (real but bigger than one PR)
+
+- **JWT access/refresh in localStorage (XSS exposure).** CSP from this pass blunts the practical risk, but the belt-and-braces fix is HttpOnly cookies with CSRF defences. That's a proper refactor — Capacitor WebView origin handling, cookie-domain story across environments, and a CSRF token rail — not a one-line swap.
+- **Blob-recipient binding.** Same story as above — would reshape the capability model; deferred rather than hacked.
+- **OpenMLS / forward secrecy.** Still the right production target. Localised to `web/src/lib/crypto.ts`.
+
+---
+
 ## Tech decisions and their reasons
 
 - **`node:sqlite`** for local dev — Node 22.5+ ships it built-in; zero native compile step on Windows. Production uses `pg` against a Railway-managed Postgres.

@@ -382,7 +382,12 @@ export const api = {
     "/api/password/reset", { method: "POST", body: JSON.stringify(body) },
   ),
   listSessions: () => req<Array<{
-    id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
+    // id is the current HEAD of the rotation chain (rotates on each
+    // refresh). chainId is the ROOT — stable across rotations. The
+    // "This device" label should compare against chainId so a
+    // background refresh doesn't break the labeling (QA F20).
+    id: string; chainId: string;
+    deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
   }>>("/api/sessions"),
   revokeOtherSessions: (keepRefresh: string) => req<{ revoked: number }>(
     "/api/sessions/revoke-others",

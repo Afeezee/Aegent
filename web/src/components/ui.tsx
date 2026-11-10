@@ -3,7 +3,7 @@
 // it belongs to a single design system rather than a stack of screens.
 
 import { AnimatePresence, motion, useReducedMotion, type MotionProps } from "framer-motion";
-import { Component, forwardRef, useEffect, useState, type CSSProperties, type ErrorInfo, type MouseEvent, type PropsWithChildren, type ReactNode } from "react";
+import { Component, forwardRef, useEffect, useRef, useState, type CSSProperties, type ErrorInfo, type MouseEvent, type PropsWithChildren, type ReactNode } from "react";
 
 // ---- error boundary ----
 // Wraps any subtree so an exception during render or in an effect
@@ -138,11 +138,47 @@ export function Modal({
   children: ReactNode; footer?: ReactNode; width?: number;
 }) {
   const reduce = useReducedMotion();
+  // Focus trap + restore (QA F19). When the modal opens, remember the
+  // element that had focus (usually the button that triggered it) and
+  // move focus into the dialog. While open, Tab/Shift+Tab is
+  // constrained to focusable children of the dialog so keyboard users
+  // can't accidentally land on the chat behind. On close, focus goes
+  // back to the trigger. aria-modal + role="dialog" on the panel
+  // tells screen readers this is a true modal.
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<Element | null>(null);
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    triggerRef.current = document.activeElement;
+    // Defer so the panel is in the DOM before we try to focus it.
+    const t = window.setTimeout(() => {
+      const first = dialogRef.current?.querySelector<HTMLElement>(
+        "a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])",
+      );
+      (first ?? dialogRef.current)?.focus();
+    }, 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key !== "Tab") return;
+      const nodes = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          "a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])",
+        ) ?? [],
+      ).filter((el) => !el.hidden && el.offsetParent !== null);
+      if (nodes.length === 0) { e.preventDefault(); return; }
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("keydown", onKey);
+      // Restore focus to whoever opened us so keyboard flow resumes.
+      try { (triggerRef.current as HTMLElement | null)?.focus?.(); } catch { /* ignore */ }
+    };
   }, [open, onClose]);
   return (
     <AnimatePresence>
@@ -165,6 +201,10 @@ export function Modal({
           onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
         >
           <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            tabIndex={-1}
             className="glass glass-hi"
             style={{
               width: "100%", maxWidth: width, borderRadius: 20,

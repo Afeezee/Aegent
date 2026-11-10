@@ -20,6 +20,11 @@ export function Profile({
   const [avatar, setAvatar] = useState<string | null>((me as { avatar?: string | null })?.avatar ?? null);
   const [statusText, setStatusText] = useState((me as { statusText?: string | null })?.statusText ?? "");
   const [until, setUntil] = useState<string>(""); // "" | "1h" | "4h" | "today" | "custom hh:mm"
+  // Track whether the user TOUCHED the expiry control this session.
+  // If they didn't, we omit statusUntil from the PATCH entirely so the
+  // server keeps the previously-saved value — fixes QA F17 where a
+  // name-only edit was quietly clearing a one-hour expiry.
+  const [untilTouched, setUntilTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -44,12 +49,25 @@ export function Profile({
   async function save() {
     setBusy(true);
     try {
-      await api.updateProfile({
+      // Build the patch so we only SEND fields the user actually
+      // touched this session. The server's updateProfile keeps the
+      // current value for any field that's undefined in the patch,
+      // so omitting = "leave alone". Clearing the status explicitly
+      // (empty text) DOES clear the saved expiry too — a status
+      // without text has no expiry to attach.
+      const patch: {
+        displayName?: string; avatar?: string | null;
+        statusText?: string | null; statusUntil?: number | null;
+      } = {
         displayName: displayName.trim() || me!.displayName,
         avatar,
         statusText: statusText.trim() || null,
-        statusUntil: statusText.trim() ? untilTimestamp() : null,
-      });
+      };
+      if (!statusText.trim()) patch.statusUntil = null;
+      else if (untilTouched) patch.statusUntil = untilTimestamp();
+      // else: leave statusUntil out of the patch entirely so a prior
+      // expiry survives a name-only edit (QA F17).
+      await api.updateProfile(patch);
       await refreshMe();
       toast("Profile updated", "ok");
       onSaved?.();
@@ -92,17 +110,21 @@ export function Profile({
             onChange={(e) => { const f = e.target.files?.[0]; if (f) onPickAvatar(f); e.target.value = ""; }} />
         </div>
 
-        {/* Display name */}
+        {/* Display name. Explicit htmlFor/id so screen readers pair the
+            label with the input and a label click focuses the field
+            (QA F18). */}
         <div>
-          <label>Display name</label>
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)}
+          <label htmlFor="profile-display-name">Display name</label>
+          <input id="profile-display-name"
+            value={displayName} onChange={(e) => setDisplayName(e.target.value)}
             maxLength={80} placeholder="Your name" />
         </div>
 
         {/* Status */}
         <div>
-          <label>Status</label>
-          <input value={statusText} onChange={(e) => setStatusText(e.target.value)}
+          <label htmlFor="profile-status-text">Status</label>
+          <input id="profile-status-text"
+            value={statusText} onChange={(e) => setStatusText(e.target.value)}
             maxLength={120} placeholder="e.g. Busy till 4pm" />
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
             {PRESETS.map((p) => (
@@ -123,7 +145,7 @@ export function Profile({
                   { k: "4h", label: "4 hours" },
                   { k: "today", label: "End of day" },
                 ].map((o) => (
-                  <button key={o.k} onClick={() => setUntil(o.k)}
+                  <button key={o.k} onClick={() => { setUntil(o.k); setUntilTouched(true); }}
                     style={{
                       all: "unset", cursor: "pointer", flex: 1, textAlign: "center",
                       padding: "8px 6px", borderRadius: 10, fontSize: 12, fontWeight: 600,

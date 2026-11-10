@@ -234,7 +234,7 @@ export function Settings({
 // and lets the user revoke them. The current session is tagged
 // "This device"; revoking it logs us out everywhere.
 function DevicesPanel({ onSignedOutEverywhere }: { onSignedOutEverywhere: () => void }) {
-  type Row = { id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null };
+  type Row = { id: string; chainId: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null };
   const [rows, setRows] = useState<Row[] | null>(null);
   const [busy, setBusy] = useState(false);
   const myRefresh = loadRefreshToken();

@@ -278,25 +278,52 @@ async function revokeChainFrom(startId: string): Promise<void> {
 }
 
 export async function listActiveSessions(userId: string): Promise<Array<{
-  id: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
+  id: string; chainId: string; deviceLabel: string | null; createdAt: number; lastUsedAt: number | null;
 }>> {
   // The newest unrevoked row of each chain is a "live" session. The
   // easiest proxy for that: rows that are not revoked and have NO
   // other row pointing at them via replaced_by. We select all
   // unrevoked rows, then filter out ones that appear as a
   // replaced_by elsewhere.
-  const rows = await db.prepare(
-    `SELECT id, device_label, created_at, last_used_at, replaced_by
-       FROM refresh_tokens WHERE user_id = ? AND revoked_at IS NULL`,
+  //
+  // `id` is the HEAD of the chain (rotates on each refresh). `chainId`
+  // is the ROOT — the id of the original token the chain started from,
+  // which is stable across rotations. Clients should compare their
+  // own "which session am I?" against chainId so the "This device"
+  // label on Settings → Devices doesn't disappear after a background
+  // refresh (QA F20). The old head-based comparison broke labelling
+  // every time the token rotated.
+  // Pull ALL rows (including revoked/rotated predecessors) so we can
+  // walk a chain back to its root. We return only unrevoked heads
+  // below — the full-row read is only for building the index.
+  const all = await db.prepare(
+    `SELECT id, device_label, created_at, last_used_at, replaced_by, revoked_at
+       FROM refresh_tokens WHERE user_id = ?`,
   ).all<{
     id: string; device_label: string | null;
-    created_at: number; last_used_at: number | null; replaced_by: string | null;
+    created_at: number; last_used_at: number | null;
+    replaced_by: string | null; revoked_at: number | null;
   }>(userId);
-  const replaced = new Set(rows.filter((r) => r.replaced_by).map((r) => r.replaced_by as string));
-  return rows
-    .filter((r) => !replaced.has(r.id))
+  // Every "replaced_by" edge points head-ward; the inverse maps head → prev.
+  const prevOf = new Map<string, string>();
+  for (const r of all) {
+    if (r.replaced_by) prevOf.set(r.replaced_by, r.id);
+  }
+  function chainRoot(id: string): string {
+    const seen = new Set<string>();
+    let cur = id;
+    while (prevOf.has(cur) && !seen.has(cur)) {
+      seen.add(cur);
+      cur = prevOf.get(cur) as string;
+    }
+    return cur;
+  }
+  const liveHeads = all
+    .filter((r) => r.revoked_at === null && r.replaced_by === null);
+  return liveHeads
     .map((r) => ({
       id: r.id,
+      chainId: chainRoot(r.id),
       deviceLabel: r.device_label,
       createdAt: r.created_at,
       lastUsedAt: r.last_used_at,
@@ -516,11 +543,21 @@ export type PublicUser = {
   presence?: { online: boolean; lastSeenAt: number | null };
 };
 
-export function toPublic(u: UserRow, live?: Map<string, number>): PublicUser {
+// `includeEmail` controls whether the caller gets the full email. Keep
+// it FALSE for directory lookups by handle/phone/id made by someone
+// who isn't the owner — otherwise the handle → email oracle leaks
+// every registered email to any authed account (QA F14). The current-
+// user endpoint (/api/me) and the add-by-email path pass TRUE because
+// the caller either IS the owner or already knows the address. Same
+// rule applies to the phone number, which is likewise private by
+// default even though users opt in to being discoverable by phone.
+export function toPublic(u: UserRow, live?: Map<string, number>, includeEmail = true): PublicUser {
   // A status with an expiry that's passed reads as no status.
   const statusLive = u.status_until == null || u.status_until > Date.now();
   const out: PublicUser = {
-    id: u.id, email: u.email, phone: u.phone ?? null,
+    id: u.id,
+    email: includeEmail ? u.email : "",
+    phone: includeEmail ? (u.phone ?? null) : null,
     displayName: u.display_name,
     handle: u.handle, publicKey: u.public_key,
     avatar: u.avatar ?? null,

@@ -17,13 +17,27 @@ const DIM = 128;
 // with escapes so the file has no non-ASCII bytes.
 const DIACRITICS = /[̀-ͯ]/g;
 
+// Unicode-aware tokenizer. The old split on /[^a-z0-9]+/ threw away
+// every non-Latin script — Arabic, Chinese, Japanese, Korean,
+// Devanagari, Cyrillic, Thai, Hebrew, etc. — because those codepoints
+// aren't a–z or 0–9. QA F21 reproduced this: tokenize("مرحبا") returned
+// []. Now we split on anything that's NOT a Letter or Number in any
+// script (\p{L}\p{N} with the /u flag), so every alphabet survives.
+//
+// Length filter is relaxed to ≥ 1 for CJK (where one character IS a
+// token — 花, 日, 本 each carry meaning on their own); kept at ≥ 2 for
+// everything else so short English stopwords like "a", "i", "of" that
+// slip past STOPWORDS don't bloat the index. The language check is a
+// simple "did we see a CJK codepoint" test — generous but cheap.
+const NON_WORD = /[^\p{L}\p{N}]+/u;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 export function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(DIACRITICS, "")
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 1 && !STOPWORDS.has(t));
+  const normalized = text.toLowerCase().normalize("NFKD").replace(DIACRITICS, "");
+  const hasCjk = CJK.test(normalized);
+  const minLen = hasCjk ? 1 : 2;
+  return normalized
+    .split(NON_WORD)
+    .filter((t) => t.length >= minLen && !STOPWORDS.has(t));
 }
 
 export function embed(text: string): number[] {

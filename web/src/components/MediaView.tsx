@@ -387,9 +387,15 @@ function formatDuration(ms?: number): string {
 }
 
 function formatSize(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  // What the row holds is the CIPHERTEXT length. nacl.secretbox adds
+  // 24 bytes of nonce + 16 bytes of MAC to the plaintext, so the
+  // stored byteSize is always originalBytes + 40. Subtract so the UI
+  // shows the number the sender/receiver recognises (QA F16: a 133-
+  // byte file was being shown as 173 B). Floor at 0 for safety.
+  const plain = Math.max(0, b - 40);
+  if (plain < 1024) return `${plain} B`;
+  if (plain < 1024 * 1024) return `${(plain / 1024).toFixed(1)} KB`;
+  return `${(plain / 1024 / 1024).toFixed(1)} MB`;
 }
 
 // A swipeable, zoomable viewer for a set of images. Reuses the single

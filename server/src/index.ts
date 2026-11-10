@@ -83,6 +83,53 @@ app.use(cors({
   origin: (origin, cb) => cb(null, true),
   credentials: false,
 }));
+
+// Security headers + cache control (QA F11, F12, F13).
+//
+// CSP: locks scripts, styles, images, connects to our own origin plus
+// the handful of external services the client legitimately calls —
+// PayPal + Paystack for the hosted checkout approve-URL fetches,
+// Anthropic via our own proxy (so already covered by 'self'), Google
+// Translate (opt-in). 'unsafe-inline' is kept on styles only because
+// framer-motion and inline React style={{...}} rely on it; scripts
+// have no inline allowance. frame-ancestors 'none' closes the
+// clickjacking vector regardless of the browser's storage partitioning
+// (F12 — our own site shouldn't be framable, period).
+//
+// Cache-Control no-store on /api/* keeps authed JSON out of shared
+// proxy caches and the browser's own disk cache. /api/blobs/* is an
+// exception — those are content-addressed and effectively immutable,
+// and large; caching them is both safe and desirable. The SPA bundle
+// (served by express.static below) keeps its default aggressive cache
+// — those filenames are content-hashed at build time.
+app.use((req, res, next) => {
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "media-src 'self' blob:",
+      "connect-src 'self' https: wss:",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "object-src 'none'",
+    ].join("; "),
+  );
+  if (req.path.startsWith("/api/") && !req.path.startsWith("/api/blobs/")) {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Pragma", "no-cache");
+  }
+  next();
+});
+
 app.use(express.json({ limit: "2mb" }));
 app.use("/api/blobs", express.raw({ type: "*/*", limit: MAX_BLOB_BYTES + 1024 }));
 app.use("/api/backup", express.raw({ type: "application/octet-stream", limit: MAX_BACKUP_BYTES + 1024 }));
@@ -426,19 +473,26 @@ app.get("/api/users/search", authed, async (req, res) => {
   } catch (e) { handleError(res, e); }
 });
 
+// by-email: the caller already knows the address, so returning it
+// back isn't a leak. Include it so "add by email" flows still work.
 app.get("/api/users/by-email/:email", authed, async (req, res) => {
   try {
     const u = await findUserByEmail(req.params.email);
     if (!u) return res.status(404).json({ error: "not_found" });
-    res.json(toPublic(u, livePresence));
+    res.json(toPublic(u, livePresence, true));
   } catch (e) { handleError(res, e); }
 });
 
+// by-handle / by-phone / by-id: the caller supplied a non-email
+// discovery key, so the email/phone would be NEW information — a
+// trivial oracle. Hide them unless the lookup resolves to the caller
+// themselves (QA F14).
 app.get("/api/users/by-handle/:handle", authed, async (req, res) => {
   try {
     const u = await findUserByHandle(req.params.handle);
     if (!u) return res.status(404).json({ error: "not_found" });
-    res.json(toPublic(u, livePresence));
+    const isSelf = u.id === (req as AuthedReq).userId;
+    res.json(toPublic(u, livePresence, isSelf));
   } catch (e) { handleError(res, e); }
 });
 
@@ -446,7 +500,8 @@ app.get("/api/users/by-phone/:phone", authed, async (req, res) => {
   try {
     const u = await findUserByPhone(req.params.phone);
     if (!u) return res.status(404).json({ error: "not_found" });
-    res.json(toPublic(u, livePresence));
+    const isSelf = u.id === (req as AuthedReq).userId;
+    res.json(toPublic(u, livePresence, isSelf));
   } catch (e) { handleError(res, e); }
 });
 
@@ -454,7 +509,8 @@ app.get("/api/users/:id", authed, async (req, res) => {
   try {
     const u = await getUserById(req.params.id);
     if (!u) return res.status(404).json({ error: "not_found" });
-    res.json(toPublic(u, livePresence));
+    const isSelf = u.id === (req as AuthedReq).userId;
+    res.json(toPublic(u, livePresence, isSelf));
   } catch (e) { handleError(res, e); }
 });
 
@@ -467,7 +523,9 @@ app.post("/api/users/lookup-phones", authed, async (req, res) => {
     for (const raw of body.phones) {
       if (!raw || !raw.trim()) continue;
       const u = await findUserByPhone(raw);
-      if (u && u.id !== (req as AuthedReq).userId) found.push(toPublic(u, livePresence));
+      // The caller DID supply the phone (it's in their contact list),
+      // so echoing phone/email back isn't new information.
+      if (u && u.id !== (req as AuthedReq).userId) found.push(toPublic(u, livePresence, true));
     }
     res.json(found);
   } catch (e) { handleError(res, e); }
