@@ -111,7 +111,14 @@ app.use((req, res, next) => {
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self'",
+      // 'wasm-unsafe-eval' allows WebAssembly.compile / instantiate.
+      // Argon2id via hash-wasm (the password KDF used at login,
+      // registration, and backup unwrap) is a WASM module — without
+      // this keyword sign-in dies with "Compiling WebAssembly violates
+      // CSP". Same for on-device Whisper via @huggingface/transformers.
+      // Modern CSP (level 3) splits WASM from the generic 'unsafe-eval'
+      // keyword: this does NOT allow JS eval(), only WASM. Safe.
+      "script-src 'self' 'wasm-unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
