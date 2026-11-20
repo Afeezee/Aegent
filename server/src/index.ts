@@ -145,7 +145,7 @@ app.use("/api/backup", express.raw({ type: "application/octet-stream", limit: MA
 app.get("/healthz", (_req, res) => res.json({
   ok: true,
   ts: Date.now(),
-  llm: !!process.env.ANTHROPIC_API_KEY,
+  llm: !!process.env.GROQ_API_KEY,
   // Lets the client gate the agent's "web_search" tool so the LLM only
   // sees it when a provider is actually wired on the server.
   webSearch: webSearchEnabled(),

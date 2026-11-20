@@ -35,7 +35,8 @@ The relay reads `PORT` and `JWT_SECRET` at startup. That's it — no other secre
 **Web (`web/`)**
 
 ```
-VITE_ANTHROPIC_API_KEY=<optional>     # only if you're enabling LLM agent mode
+# The LLM key is a SERVER secret; the client never needs it.
+# Set GROQ_API_KEY on the server-side env instead.
 ```
 
 `VITE_*` values are compiled into the bundle at build time — treat them as public. Never put server-only secrets in a `VITE_` variable.
