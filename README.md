@@ -26,7 +26,7 @@ A private messenger where every conversation is genuinely end-to-end encrypted �
 - **Mobile-responsive** — below 720 px the sidebar and chat pane swap into a single-column layout with a back button; safe-area insets applied so the Android nav bar and notches never clip content.
 
 ### AI Agent
-Reachable from anywhere via **⌘/Ctrl-J**, the sidebar icon, or the floating button on mobile. Runs entirely on-device by default; when the server has `GROQ_API_KEY` set, it also drives a real Qwen 3.8 (27B) tool-use loop via Groq's OpenAI-compatible endpoint (`/api/agent/turn` is a thin proxy that translates between the client's Anthropic-style shape and Groq's OpenAI-style shape, so the key never enters the client bundle).
+Reachable from anywhere via **⌘/Ctrl-J**, the sidebar icon, or the floating button on mobile. Runs entirely on-device by default; when the server has `GROQ_API_KEY` set, it also drives a real GPT-OSS 120B tool-use loop via Groq's OpenAI-compatible endpoint (Qwen 3.8 is wired as a fallback — set `GROQ_MODEL=qwen/qwen3.8-27b` to use it). `/api/agent/turn` is a thin proxy that translates between the client's Anthropic-style shape and Groq's OpenAI-style shape, so the key never enters the client bundle.
 
 **Consent and transparency.** The first time you tap the agent it explains, in plain language, that asking it sends only the messages it needs to the AI — and waits for you to turn it on. Every reply carries a "Used N messages ▸" line that expands to exactly what left your phone. Its retrieval is **scope-enforced**, not prompted: it can't read a group whose assistant is switched off, filtered at the data layer rather than trusted to the model. Agent transcripts are sealed at rest like messages.
 
@@ -211,7 +211,7 @@ Open two browser profiles (or one normal + one incognito), register two accounts
 
 Full deployment guide in [DEPLOYMENT.md](DEPLOYMENT.md). Summary:
 
-- **Server**: Docker → Coolify / Railway / etc. Postgres addon provides `DATABASE_URL`; no persistent volume needed. Set `JWT_SECRET` (64 hex chars). Optional: `GROQ_API_KEY` (plus `GROQ_MODEL`, default `qwen/qwen3.8-27b`) to enable LLM-mode agent.
+- **Server**: Docker → Coolify / Railway / etc. Postgres addon provides `DATABASE_URL`; no persistent volume needed. Set `JWT_SECRET` (64 hex chars). Optional: `GROQ_API_KEY` (plus `GROQ_MODEL`, default `openai/gpt-oss-120b`) to enable LLM-mode agent.
 - **Web**: served by the same Node process (single-origin), or standalone on any static host with `VITE_API_URL` pointed at the Railway domain at build time.
 - **APK**: automatic via GitHub Actions on push; or local `npm run android:sync && cd android && .\gradlew assembleDebug`.
 

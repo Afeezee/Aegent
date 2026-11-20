@@ -24,11 +24,26 @@ import { isAdmin } from "./auth.js";
 
 const GROQ_API_BASE = process.env.GROQ_API_BASE ?? "https://api.groq.com/openai/v1";
 const GROQ_ENDPOINT = `${GROQ_API_BASE.replace(/\/$/, "")}/chat/completions`;
-// Qwen 3.8 on Groq (the 27B tool-use variant Afeez picked for this
-// hackathon). Override with GROQ_MODEL if you want a different id from
-// GET /v1/models.
-const DEFAULT_MODEL = process.env.GROQ_MODEL ?? "qwen/qwen3.8-27b";
-const DEFAULT_MAX_TOKENS = 1024;
+// Default model. GPT-OSS 120B is Groq's strongest tool-use model and
+// behaves closer to Claude at agentic flows than Qwen 3.8 does — Qwen
+// is a reasoning model that chats a lot before deciding to call a
+// tool, which cost us the Checkout-PIN gate on the first switch.
+// Override with GROQ_MODEL if you want a different id from GET /v1/models.
+const DEFAULT_MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
+const DEFAULT_MAX_TOKENS = 2048;
+
+function isReasoningModel(id: string): boolean {
+  return /^(openai\/gpt-oss|qwen|deepseek)/i.test(id);
+}
+
+// Remove Qwen/DeepSeek-style <think>...</think> chain-of-thought if a
+// stray block makes it into content despite reasoning_format:"hidden".
+// Keeps the final answer; drops the reasoning segment that would leak
+// into the chat UI.
+function stripThink(s: string): string {
+  if (!s) return s;
+  return s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
 
 // ---- types for the Anthropic shape the client sends / expects ----
 
@@ -192,6 +207,40 @@ type OAIChatCompletion = {
   usage?: unknown;
 };
 
+// Qwen sometimes emits a tool call as inline content when it fails to
+// use the structured tool_calls channel, shaped like:
+//   <tool_call>{"name":"draft_order","arguments":{...}}</tool_call>
+// Rescue those into proper tool_use blocks so the client's loop still
+// fires and the Checkout PIN gate still appears.
+function extractInlineToolCalls(
+  text: string,
+): { strippedText: string; tools: AnthToolUseBlock[] } {
+  const tools: AnthToolUseBlock[] = [];
+  let i = 0;
+  const strippedText = text.replace(
+    /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi,
+    (_m, inner: string) => {
+      try {
+        const obj = JSON.parse(inner) as { name?: string; arguments?: unknown };
+        if (obj && typeof obj.name === "string") {
+          const input =
+            typeof obj.arguments === "string"
+              ? (() => { try { return JSON.parse(obj.arguments); } catch { return {}; } })()
+              : (obj.arguments as Record<string, unknown>) ?? {};
+          tools.push({
+            type: "tool_use",
+            id: `inline_${Date.now()}_${i++}`,
+            name: obj.name,
+            input: (input as Record<string, unknown>) ?? {},
+          });
+        }
+      } catch { /* leave as text */ }
+      return "";
+    },
+  ).trim();
+  return { strippedText, tools };
+}
+
 function translateResponseToAnthropic(oai: OAIChatCompletion): {
   id: string;
   role: "assistant";
@@ -202,8 +251,11 @@ function translateResponseToAnthropic(oai: OAIChatCompletion): {
   const choice = oai.choices?.[0];
   const msg = choice?.message;
   const blocks: Array<AnthTextBlock | AnthToolUseBlock> = [];
-  if (msg?.content && msg.content.trim()) {
-    blocks.push({ type: "text", text: msg.content });
+  const rawText = typeof msg?.content === "string" ? msg.content : "";
+  const noThink = stripThink(rawText);
+  const { strippedText, tools: inlineTools } = extractInlineToolCalls(noThink);
+  if (strippedText) {
+    blocks.push({ type: "text", text: strippedText });
   }
   if (msg?.tool_calls && msg.tool_calls.length > 0) {
     for (const tc of msg.tool_calls) {
@@ -212,11 +264,13 @@ function translateResponseToAnthropic(oai: OAIChatCompletion): {
       blocks.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
     }
   }
+  for (const t of inlineTools) blocks.push(t);
+
   const finish = choice?.finish_reason;
+  const hasToolBlock = blocks.some((b) => b.type === "tool_use");
   const stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" =
-    finish === "tool_calls" ? "tool_use"
+    hasToolBlock ? "tool_use"
     : finish === "length" ? "max_tokens"
-    : finish === "content_filter" ? "end_turn"
     : "end_turn";
 
   return {
@@ -282,12 +336,24 @@ export async function agentTurn(req: Request & { userId: string }, res: Response
   // the configured Groq model.
   const model = DEFAULT_MODEL;
 
-  const openaiBody = {
+  const openaiBody: Record<string, unknown> = {
     model,
     messages: translateMessagesToOpenAI(body.system, body.messages),
     tools: translateToolsToOpenAI(body.tools),
-    max_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, 2048),
-    temperature: body.temperature ?? 0.4,
+    // Qwen and GPT-OSS chatter when loose; the client's tool loop wants
+    // a decisive tool call or a short answer, so keep the temperature
+    // low. The client can still override with `temperature`.
+    temperature: body.temperature ?? 0.2,
+    max_tokens: Math.min(body.max_tokens ?? DEFAULT_MAX_TOKENS, 4096),
+    // Groq's parameter for Qwen / DeepSeek: don't surface the chain of
+    // thought as visible content. Ignored by non-reasoning models.
+    reasoning_format: "hidden",
+    // Groq's parameter for GPT-OSS. "low" = short reasoning before the
+    // tool call, which matches our UX. Ignored by non-OSS models.
+    ...(isReasoningModel(model) ? { reasoning_effort: "low" } : {}),
+    // When tools are present, let the model decide — not "required",
+    // because agent replies to "hi" shouldn't force a tool.
+    ...((body.tools && body.tools.length > 0) ? { tool_choice: "auto" } : {}),
   };
 
   const approxCharsIn = (() => {
